@@ -64,18 +64,29 @@ robot-competition/
 ## 远程仓库
 
 ```
-https://github.com/2186279865/robot-10.15.git
+SSH:    git@github.com:2186279865/robot-10.15.git      ← 推荐，不用开代理
+HTTPS:  https://github.com/2186279865/robot-10.15.git   ← 需要开代理
 ```
 
-仓库根目录就是本文件夹（`robot-competition`）。团队协作方式：
+> 仓库名是 `robot-10.15`，但**仓库根目录**是本文件夹（`robot-competition`），主工程在 `ghr/10.15/` 里。
+
+团队协作方式：
 
 - 负责人把队友加为 Collaborator：https://github.com/2186279865/robot-10.15/settings/access
 - 队友克隆：
   ```bash
-  git clone https://github.com/2186279865/robot-10.15.git robot-competition
+  git clone git@github.com:2186279865/robot-10.15.git robot-competition
+  cd robot-competition/ghr/10.15      # 主工程目录
   ```
 - 日常：`git pull` → 改代码 → Keil 编译下载验证 → `git commit` → `git push`
 
-> **注意**：教程 [新手联合开发完整教程.md](ghr/10.15/新手联合开发完整教程.md) 里写的克隆目录名是 `robot-10.15`，
-> 而实际仓库根目录叫 `robot-competition`（或你 clone 时自己起的名字）。**差异只影响路径，命令本身不变**——
-> 把教程里的 `cd robot-10.15` 换成本地实际目录名即可。
+### 需要开代理吗？
+
+| 方式 | 需要代理 | 说明 |
+|---|---|---|
+| **SSH**（`git@github.com:...`） | **不需要** ✅ | 走 22 端口，国内多数网络可直连 |
+| HTTPS（`https://...`） | 需要 | 代理没开时会报 `Failed to connect ... over proxy` |
+
+判断自己用的哪种：`git remote -v`，看到 `git@` 就是 SSH。
+
+**如果推送报 `Failed to connect to github.com:443 over proxy`**：说明用的是 HTTPS 而代理没开——打开代理软件，或改用 SSH。

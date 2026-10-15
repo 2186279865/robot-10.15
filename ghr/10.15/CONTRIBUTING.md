@@ -69,10 +69,26 @@ ssh -T git@github.com
 
 ### 2.3 克隆工程
 
+> 📌 **仓库根包含两个子目录**，主工程在 `ghr/10.15/` 里：
+>
+> ```
+> robot-competition/          ← 克隆出来的目录（仓库根）
+> ├── README.md
+> ├── ghr/10.15/             ← ★ 主工程，Keil 工程在这里
+> └── xrw/                    ← 参考示例（例35/例36），只读
+> ```
+
 ```bash
 cd 你放工程的目录
-git clone git@github.com:2186279865/robot-10.15.git
-cd robot-10.15
+git clone git@github.com:2186279865/robot-10.15.git robot-competition
+cd robot-competition            # 仓库根
+cd ghr/10.15                    # 主工程（改代码、开 Keil 都在这里）
+```
+
+**打开 Keil 工程**：
+
+```
+ghr/10.15/Project/STM32F407.uvprojx
 ```
 
 ---
