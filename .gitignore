@@ -1,7 +1,8 @@
 # ============================================================
-#  10.15 工程版本管理
+#  robot-competition 仓库根忽略规则
+#  覆盖 ghr/10.15（主工程）与 xrw/（参考示例）两棵目录树
 #  只跟踪源码、工程配置、说明文档
-#  编译产物 / 备份快照 / IDE 用户设置 一律不入库
+#  编译产物 / 备份快照 / IDE 用户设置 / 密钥 一律不入库
 # ============================================================
 
 # ---------- Keil MDK 编译产物 ----------
@@ -25,27 +26,29 @@
 *.__i
 *.build_log.htm
 
-# ---------- Keil 输出目录 ----------
-/Project/Objects/
-/Project/Listings/
-/Project/DebugConfig/
-OBJ/
-Objects/
-Listings/
+# ---------- Keil 输出目录（**/ 保证任意层级都匹配）----------
+**/OBJ/
+**/Objects/
+**/Listings/
+**/DebugConfig/
+**/Debug/
+**/Release/
+**/RTE/
+**/tests/out/
 
 # ---------- Keil / IDE 用户设置（每台机器不同，不共享）----------
 *.uvguix.*
 *.uvguix
+*.uvoptx
 *.uvopt
 *.scvd
 *.dbgconf
-*.opt
 *.ats
 JLinkSettings.ini
 
 # ---------- 编译型备份目录（历史快照，留在本地即可）----------
-backup_before_*/
-backup_*/
+**/backup_before_*/
+**/backup_*/
 
 # ---------- 临时/杂项 ----------
 *.tmp
