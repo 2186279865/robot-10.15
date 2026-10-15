@@ -57,3 +57,12 @@ Thumbs.db
 desktop.ini
 ~$*
 JLinkLog.txt
+
+# ---------- 密钥/凭证：绝对不入库 ----------
+.git-ssh/
+.ssh-key/
+.ssh/
+*id_ed25519*
+*id_rsa*
+*.pem
+known_hosts
