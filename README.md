@@ -19,10 +19,13 @@ robot-competition/
 
 | 目录 | 作用 | 版本管理 |
 |---|---|---|
-| `ghr/10.15` | **主开发工程**，我们要改的就是它 | ✅ 独立 git 仓库，远程 `robot-10.15` |
-| `xrw/例35 ...` | 参考示例（视觉 XY 跟随流程，写得最完整） | 未纳入版本管理 |
-| `xrw/例36 ...` | 参考示例（按键 + Z 轴升降，**按键写法最可靠**） | 未纳入版本管理 |
-| `EMM_V5_...md` | 步进电机串口协议速查表 | 未纳入版本管理 |
+| `ghr/10.15` | **主开发工程**，我们要改的就是它 | ✅ 已入库 |
+| `xrw/例35 ...` | 参考示例（视觉 XY 跟随流程，写得最完整） | ✅ 已入库 |
+| `xrw/例36 ...` | 参考示例（按键 + Z 轴升降，**按键写法最可靠**） | ✅ 已入库 |
+| `EMM_V5_...md` | 步进电机串口协议速查表 | ✅ 已入库 |
+
+> **整个 `robot-competition` 就是一个 git 仓库**，`ghr/` 和 `xrw/` 都是仓库内的目录。
+> clone 一次就能拿到全部内容。
 
 ## 开始之前
 
@@ -61,9 +64,18 @@ robot-competition/
 ## 远程仓库
 
 ```
-git@github.com:2186279865/robot-10.15.git
+https://github.com/2186279865/robot-10.15.git
 ```
 
-> ⚠️ 注意：`ghr/10.15` 是**独立仓库**，`xrw/` 和本文件都**不在**该仓库里。
-> 如果以后要把整个 `robot-competition`（含 `xrw`）纳入同一个仓库，需要把 `ghr/10.15/.git`
-> 上移到本目录并调整 `.gitignore`，届时请先和队友确认。
+仓库根目录就是本文件夹（`robot-competition`）。团队协作方式：
+
+- 负责人把队友加为 Collaborator：https://github.com/2186279865/robot-10.15/settings/access
+- 队友克隆：
+  ```bash
+  git clone https://github.com/2186279865/robot-10.15.git robot-competition
+  ```
+- 日常：`git pull` → 改代码 → Keil 编译下载验证 → `git commit` → `git push`
+
+> **注意**：教程 [新手联合开发完整教程.md](ghr/10.15/新手联合开发完整教程.md) 里写的克隆目录名是 `robot-10.15`，
+> 而实际仓库根目录叫 `robot-competition`（或你 clone 时自己起的名字）。**差异只影响路径，命令本身不变**——
+> 把教程里的 `cd robot-10.15` 换成本地实际目录名即可。
