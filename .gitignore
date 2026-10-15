@@ -1,0 +1,59 @@
+# ============================================================
+#  10.15 工程版本管理
+#  只跟踪源码、工程配置、说明文档
+#  编译产物 / 备份快照 / IDE 用户设置 一律不入库
+# ============================================================
+
+# ---------- Keil MDK 编译产物 ----------
+*.o
+*.obj
+*.axf
+*.elf
+*.bin
+*.hex
+*.crf
+*.dep
+*.d
+*.lnp
+*.lst
+*.map
+*.htm
+*.exe
+*.i
+*.sct
+*.bak
+*.__i
+*.build_log.htm
+
+# ---------- Keil 输出目录 ----------
+/Project/Objects/
+/Project/Listings/
+/Project/DebugConfig/
+OBJ/
+Objects/
+Listings/
+
+# ---------- Keil / IDE 用户设置（每台机器不同，不共享）----------
+*.uvguix.*
+*.uvguix
+*.uvopt
+*.scvd
+*.dbgconf
+*.opt
+*.ats
+JLinkSettings.ini
+
+# ---------- 编译型备份目录（历史快照，留在本地即可）----------
+backup_before_*/
+backup_*/
+
+# ---------- 临时/杂项 ----------
+*.tmp
+*.log
+*.zip
+*.rar
+*.7z
+Thumbs.db
+desktop.ini
+~$*
+JLinkLog.txt
