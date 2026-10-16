@@ -27,11 +27,11 @@
 #define STEPPER_ADDR_X     4U
 #define STEPPER_ADDR_Y     5U
 
-/* 当前工程实际挂了多少台：按这几个地址逐个发送 */
-#define STEPPER_MOTOR_1    1U
-#define STEPPER_MOTOR_2    2U
-#define STEPPER_MOTOR_3    3U
-#define STEPPER_MOTOR_4    4U
+/* 电机序号映射到实际轴地址；全部电机接口按 Z、托盘、X、Y 逐个发送 */
+#define STEPPER_MOTOR_1    STEPPER_ADDR_Z
+#define STEPPER_MOTOR_2    STEPPER_ADDR_TRAY
+#define STEPPER_MOTOR_3    STEPPER_ADDR_X
+#define STEPPER_MOTOR_4    STEPPER_ADDR_Y
 #define STEPPER_MOTOR_COUNT 4U
 
 /* ---- 运动参数 ---- */
@@ -56,11 +56,16 @@ void    Stepper_Init(void);
 /* ---- 单个电机 ---- */
 uint8_t Stepper_EnableAt(uint8_t addr, uint8_t on);              /* F3 */
 uint8_t Stepper_ZeroHereAt(uint8_t addr);                        /* 0A 6D */
+uint8_t Stepper_ResetStallAt(uint8_t addr);                      /* 0E 52 解除堵转保护 */
 uint8_t Stepper_MoveRelativeAt(uint8_t addr, uint8_t dir, int32_t pulses,
                                uint32_t wait_ms);                /* FD, raF=0 */
+/* FD 位置模式，可指定 RPM 与加速度（诊断/试验用；accel 0~1 = 直接启动） */
+uint8_t Stepper_MoveRelativeAt2(uint8_t addr, uint8_t dir, int32_t pulses,
+                                uint16_t rpm, uint8_t accel, uint32_t wait_ms);
 uint8_t Stepper_MoveAbsoluteAt(uint8_t addr, uint8_t dir, int32_t pulses,
                                uint32_t wait_ms);                /* FD, raF=1 */
 uint8_t Stepper_RunSpeedAt(uint8_t addr, uint8_t dir, uint16_t rpm); /* F6 */
+uint8_t Stepper_RunSpeedAt2(uint8_t addr, uint8_t dir, uint16_t rpm, uint8_t accel); /* F6 + 指定加速度 */
 uint8_t Stepper_StopAt(uint8_t addr);                            /* FE 98 */
 
 /* ---- 全部电机（按 STEPPER_MOTOR_1..COUNT 逐个发送）---- */

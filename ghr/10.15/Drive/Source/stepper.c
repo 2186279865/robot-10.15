@@ -230,12 +230,20 @@ uint8_t Stepper_ZeroHereAt(uint8_t addr)
     return Stepper_SendFrame(f, 4U);
 }
 
-uint8_t Stepper_MoveRelativeAt(uint8_t addr, uint8_t dir, int32_t pulses,
-                               uint32_t wait_ms)
+/* 0E 52：解除堵转保护。堵转保护一旦触发，只发 F6/FD 电机也不会转，
+ * 直到断电重启或在驱动器上清除；上电先发一帧成本很低。 */
+uint8_t Stepper_ResetStallAt(uint8_t addr)
+{
+    uint8_t f[4];
+    f[0] = addr; f[1] = 0x0E; f[2] = 0x52; f[3] = 0x6B;
+    return Stepper_SendFrame(f, 4U);
+}
+
+uint8_t Stepper_MoveRelativeAt2(uint8_t addr, uint8_t dir, int32_t pulses,
+                                uint16_t rpm, uint8_t accel, uint32_t wait_ms)
 {
     uint8_t f[13];
-    uint8_t n = build_position(f, addr, dir, pulses,
-                               STEPPER_SPEED_RPM, STEPPER_ACCEL, 0U);
+    uint8_t n = build_position(f, addr, dir, pulses, rpm, accel, 0U);
 
     if (!Stepper_SendFrame(f, n))
     {
@@ -243,6 +251,13 @@ uint8_t Stepper_MoveRelativeAt(uint8_t addr, uint8_t dir, int32_t pulses,
     }
     Delay_ms(wait_ms);
     return 1U;
+}
+
+uint8_t Stepper_MoveRelativeAt(uint8_t addr, uint8_t dir, int32_t pulses,
+                               uint32_t wait_ms)
+{
+    return Stepper_MoveRelativeAt2(addr, dir, pulses,
+                                   STEPPER_SPEED_RPM, STEPPER_ACCEL, wait_ms);
 }
 
 uint8_t Stepper_MoveAbsoluteAt(uint8_t addr, uint8_t dir, int32_t pulses,
@@ -266,7 +281,14 @@ uint8_t Stepper_RunSpeedAt(uint8_t addr, uint8_t dir, uint16_t rpm)
     uint8_t n = build_speed(f, addr, dir, rpm, 0U);
     return Stepper_SendFrame(f, n);
 }
-
+/* 带加速度的 F6 速度模式：加速度档位越大，驱动器加速斜坡越缓、起转力矩越小。
+ * accel = 0 或 1 时近乎直接启动，起转最猛。 */
+uint8_t Stepper_RunSpeedAt2(uint8_t addr, uint8_t dir, uint16_t rpm, uint8_t accel)
+{
+    uint8_t f[8];
+    uint8_t n = build_speed(f, addr, dir, rpm, accel);
+    return Stepper_SendFrame(f, n);
+}
 uint8_t Stepper_StopAt(uint8_t addr)
 {
     uint8_t f[5];
