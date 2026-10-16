@@ -41,6 +41,15 @@ static int32_t  last_pos_pulses = 0;
 static uint32_t last_pos_wait = 0xFFFFFFFFUL;
 static uint16_t last_servo_deg = 0xFFFFU;
 
+/* PA3 回读：桩里当成"驱动器 TXD 接到了 PA3"
+ *   HostTest_SendFrame = 固件发给驱动器的 3 字节询问帧（记录下来供断言）
+ *   HostTest_Read      = 驱动器回包字节（由用例注入，模拟 USART2 中断填环形缓冲） */
+static uint8_t  emm_tx[16];
+static uint8_t  emm_tx_len = 0;
+static int      c_sendframe = 0;
+static uint8_t  emm_rx[64];
+static uint16_t emm_rx_head = 0, emm_rx_tail = 0;
+
 uint32_t HostTest_Millis(void)
 {
     return fake_ms;
@@ -102,6 +111,47 @@ void HostTest_ServoSetAngle(uint16_t deg)
 {
     c_servo++;
     last_servo_deg = deg;
+}
+
+/* 这两个是真实函数（不是宏桩）：emm_reply_inline.h 里就声明了它们 */
+uint8_t Stepper_SendFrame(const uint8_t *frame, uint8_t len)
+{
+    uint8_t i;
+
+    if (len > (uint8_t)sizeof(emm_tx))
+    {
+        return 0U;
+    }
+    for (i = 0U; i < len; i++)
+    {
+        emm_tx[i] = frame[i];
+    }
+    emm_tx_len = len;
+    c_sendframe++;
+    return 1U;
+}
+
+uint8_t Stepper_Read(uint8_t *byte)
+{
+    if (emm_rx_head >= emm_rx_tail)
+    {
+        return 0U;
+    }
+    *byte = emm_rx[emm_rx_head];
+    emm_rx_head++;
+    return 1U;
+}
+
+/* 注入驱动器回包字节 */
+static void drv_reply(const uint8_t *bytes, uint16_t len)
+{
+    uint16_t i;
+
+    for (i = 0U; i < len; i++)
+    {
+        emm_rx[emm_rx_tail] = bytes[i];
+        emm_rx_tail++;
+    }
 }
 
 /* ==========================================================================
@@ -207,6 +257,10 @@ static void reset_world(void)
     rxerr_flags = 0;
     txlog_len = 0;
     txoff = 0;
+    emm_tx_len = 0;
+    c_sendframe = 0;
+    emm_rx_head = 0;
+    emm_rx_tail = 0;
     host_protocol_init();
 }
 
@@ -366,7 +420,7 @@ static void do_hello(void)
     expect_contains("fw=");
     expect_contains("proto=1");
     expect_contains("axes=1/3/4/5");
-    expect_contains("readback=-");
+    expect_contains("readback=1");
     check(strstr(cur_frame, "boot=") != NULL, "hello must carry boot=");
 }
 
@@ -849,6 +903,138 @@ static void test_split_frames(void)
     expect("#102,ok,");
 }
 
+/* PA3 回读：查询要等驱动器回包才应答，超时回 E04，没接线的轴回 E11 */
+static void test_readback_query(void)
+{
+    const uint8_t pos90[8]  = { 0x01U, 0x36U, 0x00U, 0x00U, 0x00U, 0x40U, 0x00U, 0x6BU };
+    const uint8_t pos90n[8] = { 0x01U, 0x36U, 0x01U, 0x00U, 0x00U, 0x40U, 0x00U, 0x6BU };
+    const uint8_t vel300[6] = { 0x01U, 0x35U, 0x00U, 0x01U, 0x2CU, 0x6BU };
+    const uint8_t flag2[4]  = { 0x01U, 0x3AU, 0x02U, 0x6BU };
+    const uint8_t reached[4] = { 0x01U, 0xFDU, 0x9FU, 0x6BU };
+    const uint8_t pos180[8] = { 0x01U, 0x36U, 0x00U, 0x00U, 0x00U, 0x80U, 0x00U, 0x6BU };
+    int before;
+
+    cur_test = "readback";
+    reset_world();
+    do_hello();
+
+    /* --- 位置查询：先发 3 字节询问帧，应答等回包（不能先回 ok） --- */
+    txoff = 0; txlog_len = 0;
+    send("120,motor_query,1,pos");
+    check(c_sendframe == 1, "query must send one frame to the driver");
+    check(emm_tx_len == 3U, "query frame is 3 bytes");
+    check(emm_tx[0] == 0x01U, "query frame addr");
+    check(emm_tx[1] == 0x36U, "pos query uses function 0x36");
+    check(emm_tx[2] == 0x6BU, "query frame trailer 0x6B");
+    expect_none();                      /* 回包没来之前不许发 ok */
+
+    drv_reply(pos90, 8U);
+    pump();
+    expect("#120,ok,");
+    expect_contains("addr=1");
+    expect_contains("counts=16384");
+    expect_contains("deg=90.0");
+
+    /* 同 id 同内容重发：重发缓存应答，不再去问驱动器 */
+    txoff = 0; txlog_len = 0;
+    send("120,motor_query,1,pos");
+    expect("#120,ok,");
+    expect_contains("counts=16384");
+    check(c_sendframe == 1, "duplicate request must not re-query the driver");
+
+    /* --- 负数（0x36 的符号位） --- */
+    txoff = 0; txlog_len = 0;
+    send("121,motor_query,1,pos");
+    drv_reply(pos90n, 8U);
+    pump();
+    expect("#121,ok,");
+    expect_contains("counts=-16384");
+    expect_contains("deg=-90.0");
+
+    /* --- 转速 0x35 --- */
+    txoff = 0; txlog_len = 0;
+    send("122,motor_query,1,vel");
+    check(emm_tx[1] == 0x35U, "vel query uses function 0x35");
+    drv_reply(vel300, 6U);
+    pump();
+    expect("#122,ok,");
+    expect_contains("rpm=300");
+    expect_contains("age_ms=");
+
+    /* --- 状态 0x3A --- */
+    txoff = 0; txlog_len = 0;
+    send("123,motor_query,1,flag");
+    check(emm_tx[1] == 0x3AU, "flag query uses function 0x3A");
+    drv_reply(flag2, 4U);
+    pump();
+    expect("#123,ok,");
+    expect_contains("flag=2");
+
+    /* --- 回包不来：query_timeout_ms 后回 E04，不编造数据 --- */
+    txoff = 0; txlog_len = 0;
+    send("124,motor_query,1,pos");
+    expect_none();
+    fake_ms += 101U;
+    pump();
+    expect("#124,err,E04");
+    expect_contains("addr=1");
+
+    /* --- 没接回读线的轴：立刻回 E11，且不占用总线 --- */
+    txoff = 0; txlog_len = 0;
+    before = c_sendframe;
+    send("125,motor_query,4,pos");
+    expect("#125,err,E11");
+    expect_contains("addr=4");
+    check(c_sendframe == before, "no readback line -> must not send a query frame");
+
+    /* --- 一次只留一个查询事务：上一条没回包时再来一条回 E09 --- */
+    txoff = 0; txlog_len = 0;
+    send("126,motor_query,1,pos");
+    send("127,motor_query,1,pos");
+    expect("#127,err,E09");
+    expect_contains("reason=query_busy");
+    drv_reply(pos90, 8U);
+    pump();
+    expect("#126,ok,");                 /* 前一条照旧拿回包，顺序不乱 */
+    expect_contains("counts=16384");
+
+    /* --- 驱动器主动发的到位通知不能被当成查询应答 --- */
+    txoff = 0; txlog_len = 0;
+    drv_reply(reached, 4U);
+    pump();
+    expect_none();
+
+    /* --- 回包来了但不是查的那一项：E05，不能拿它当答案 --- */
+    txoff = 0; txlog_len = 0;
+    send("129,motor_query,1,pos");
+    drv_reply(flag2, 4U);              /* 要位置（0x36），却回了状态（0x3A） */
+    pump();
+    expect("#129,err,E05");
+    expect_contains("addr=1");
+
+    /* --- 遥测订阅有回读的轴：订阅后立刻起一次后台查询，读数跟着刷新 --- */
+    txoff = 0; txlog_len = 0;
+    before = c_sendframe;
+    send("128,tele_on,1,200");
+    expect("#128,ok,");
+    expect_contains("addr=1");
+    check(c_sendframe == (before + 1), "tele_on a readback axis starts one background query");
+    expect("#0,tele,");
+    expect_contains("readback=1");
+    expect_contains("counts=16384");      /* 还是上一条查询读到的值 */
+    check(c_sendframe == (before + 1), "an outstanding query must not be restarted");
+
+    drv_reply(pos180, 8U);
+    pump();
+    fake_ms += 200U;
+    txoff = 0; txlog_len = 0;
+    pump();
+    expect("#0,tele,");
+    expect_contains("readback=1");
+    expect_contains("counts=32768");
+    expect_contains("deg=180.0");
+}
+
 int main(void)
 {
     printf("host protocol tests\n");
@@ -866,6 +1052,7 @@ int main(void)
     test_params();
     test_gripper();
     test_telemetry_and_settle_event();
+    test_readback_query();
     test_link_timeout();
     test_split_frames();
 

@@ -9,14 +9,18 @@
  * #include "stepper_inline.h"，避免函数重复定义。
  *
  * 资源占用（与现有模块无冲突）：
- *   USART2 + PA2(TX)  —— 只有本模块使用；PA3 不配置
+ *   USART2 + PA2(TX) + PA3(RX) —— 只有本模块使用
  *   TIM2 + TIM2_IRQn  —— 独立 1ms 计数；舵机用 TIM4，延时用 SysTick
+ *
+ * 接收（PA3）：PA3 要接到驱动器的 TXD 才能收到回包。**只接 Z 轴（地址 1）这一路**，
+ * 四路 TX 不能因为地址不同就直接并联（推挽输出会互相打架），要并联必须各串二极管/
+ * 电阻或者改用 RS-485。没接 PA3 时接收中断不会来，查询一律超时 E04，不影响发送。
  */
 
 #include "stepper.h"
 #include "delay.h"
 
-#define STEPPER_RX_SIZE 32U
+#define STEPPER_RX_SIZE 64U
 
 static volatile uint32_t stepper_ms;            /* TIM2 累加的毫秒数 */
 static volatile uint16_t rx_head, rx_tail;
@@ -72,7 +76,7 @@ void TIM2_IRQHandler(void)
     }
 }
 
-/* ---------------- USART2：PA2 只发 ---------------- */
+/* ---------------- USART2：PA2 发 / PA3 收 ---------------- */
 
 static void stepper_uart_init(void)
 {
@@ -84,29 +88,65 @@ static void stepper_uart_init(void)
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
 
     GPIO_StructInit(&g);
-    g.GPIO_Pin   = GPIO_Pin_2;              /* 只配 TX，PA3 留空 */
+    g.GPIO_Pin   = GPIO_Pin_2 | GPIO_Pin_3;     /* PA2=TX、PA3=RX */
     g.GPIO_Mode  = GPIO_Mode_AF;
     g.GPIO_Speed = GPIO_Speed_50MHz;
     g.GPIO_OType = GPIO_OType_PP;
-    g.GPIO_PuPd  = GPIO_PuPd_UP;
+    g.GPIO_PuPd  = GPIO_PuPd_UP;                /* 没接 TXD 时保持高电平，不产生假起始位 */
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource2, GPIO_AF_USART2);
+    GPIO_PinAFConfig(GPIOA, GPIO_PinSource3, GPIO_AF_USART2);
     GPIO_Init(GPIOA, &g);
 
     USART_StructInit(&u);
     u.USART_BaudRate = 115200UL;
-    /* 与例35/例36 完全一致：USART2 只发送，不接收。
-     * 只发不收时若仍使能接收，PA3 悬空会不停触发 RXNE/ORE 中断。 */
-    u.USART_Mode     = USART_Mode_Tx;
+    u.USART_Mode     = USART_Mode_Tx | USART_Mode_Rx;
     USART_Init(USART2, &u);
     USART_Cmd(USART2, ENABLE);
 
-    /* 例35/例36 在 EMM_TX_ONLY 下不注册 USART2 接收中断，这里保持一致 */
-    (void)n;
+    /* 接收中断：抢占优先级 3（毫秒时基 TIM2=1、USB OTG=2 都比它高），
+     * 中断里只做"读 DR -> 进环形缓冲"，解析放到主循环。 */
+    USART_ClearFlag(USART2, USART_FLAG_ORE | USART_FLAG_NE | USART_FLAG_FE | USART_FLAG_PE);
+    USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
+    n.NVIC_IRQChannel = USART2_IRQn;
+    n.NVIC_IRQChannelPreemptionPriority = 3;
+    n.NVIC_IRQChannelSubPriority = 0;
+    n.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&n);
 }
 
-/* 纯发送模式下不会用到；保留空实现以免向量表里的弱符号被误用 */
 void USART2_IRQHandler(void)
 {
+    uint16_t next;
+
+    if (USART_GetITStatus(USART2, USART_IT_RXNE) != RESET)
+    {
+        uint8_t b = (uint8_t)(USART2->DR & 0xFFU);   /* 读 DR 同时清 RXNE */
+
+        next = (uint16_t)((rx_head + 1U) % STEPPER_RX_SIZE);
+        if (next == rx_tail)
+        {
+            rx_error = 1U;                            /* 缓冲满：丢弃新字节并记账 */
+        }
+        else
+        {
+            rx_buf[rx_head] = b;
+            rx_head = next;
+        }
+    }
+
+    /* 溢出/帧错误等：清标志并记账，否则会反复进中断 */
+    if (USART_GetFlagStatus(USART2, USART_FLAG_ORE) != RESET)
+    {
+        (void)USART2->SR;
+        (void)USART2->DR;
+        rx_error = 1U;
+    }
+    if (USART_GetFlagStatus(USART2, USART_FLAG_FE) != RESET)
+    {
+        (void)USART2->SR;
+        (void)USART2->DR;
+        rx_error = 1U;
+    }
 }
 
 /* ---------------- 发送与指令构造 ---------------- */

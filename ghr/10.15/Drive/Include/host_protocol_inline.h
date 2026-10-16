@@ -29,6 +29,7 @@
 
 #include "host_transport.h"
 #include "control_inline.h"
+#include "emm_reply_inline.h"
 
 /* ---------------- 常量 ---------------- */
 
@@ -44,6 +45,11 @@
 #define HOST_READ_BYTES_PER_TASK  64U   /* 每次任务最多处理的接收字节数，避免独占主循环 */
 
 #define HOST_FIRMWARE_VERSION     "0.1.0"
+
+/* 回读能力：目前只有 Z 轴（地址 1）的驱动器 TXD 接到了 PA3。
+ * hello 必须如实报出这张表：上位机据此决定哪些轴显示实测值。
+ * 没接线时不会变成"有回读但读不到"——查询会在 query_timeout_ms 后回 E04。 */
+#define HOST_READBACK_AXES        "1"
 
 /* 错误码（与上位机 protocol.ERROR_CODES 一致） */
 #define HOST_E_UNKNOWN_CMD        "E01"
@@ -389,6 +395,44 @@ static void host_kv_u32(HostOut *o, const char *key, uint32_t value)
     host_out_u32(o, value);
 }
 
+/* 有符号值（编码器计数、转速可以是负的） */
+static void host_kv_i32(HostOut *o, const char *key, int32_t value)
+{
+    host_out_char(o, ',');
+    host_out_str(o, key);
+    host_out_char(o, '=');
+    if (value < 0)
+    {
+        host_out_char(o, '-');
+        host_out_u32(o, (uint32_t)(-(value + 1)) + 1U);   /* 避开 -2^31 溢出 */
+    }
+    else
+    {
+        host_out_u32(o, (uint32_t)value);
+    }
+}
+
+/* 角度 ×10 打印成 12.3，固件里不用浮点 */
+static void host_kv_deg_x10(HostOut *o, const char *key, int32_t deg_x10)
+{
+    int32_t whole;
+    int32_t frac;
+
+    host_out_char(o, ',');
+    host_out_str(o, key);
+    host_out_char(o, '=');
+    if (deg_x10 < 0)
+    {
+        host_out_char(o, '-');
+        deg_x10 = -deg_x10;
+    }
+    whole = deg_x10 / 10;
+    frac  = deg_x10 % 10;
+    host_out_u32(o, (uint32_t)whole);
+    host_out_char(o, '.');
+    host_out_char(o, (char)('0' + (char)frac));
+}
+
 static void host_body_head(HostOut *o, uint16_t id, const char *kind)
 {
     host_out_reset(o);
@@ -510,6 +554,159 @@ static uint8_t host_emit(uint16_t id, const char *req_text, uint16_t req_len)
 }
 
 /* ==========================================================================
+ * 驱动器回读（PA3）：一次只留一个查询事务
+ * ========================================================================== */
+
+static EmmParser host_emm_parser;
+static EmmQuery  host_emm_query;
+
+static void host_flush_pending_event(void);   /* 定义在下面的"主动上报"一节 */
+
+/* 查询要等驱动器回包（回包由 USART2 中断送进环形缓冲）。
+ * 这期间不能先把 ok 发出去——否则上位机会先看到"ok 但没有数据"。
+ * 所以把请求 id 与切分后的原文存下来，等回包或超时后补发（补发走 host_emit，
+ * 一样进会话缓存，这样上位机重发同一个 id 时不会被重复执行）。 */
+static uint8_t  host_defer_line    = 0U;   /* 本行的应答要等回包（每行开头清零） */
+static uint8_t  host_query_pending = 0U;   /* 有一次查询正等回包（补发后清零） */
+static uint16_t host_defer_id      = 0U;
+static uint8_t  host_defer_req_len = 0U;
+static char     host_defer_req[HOST_MAX_LINE_CHARS + 1U];
+static uint8_t  host_defer_addr    = 0U;
+static uint8_t  host_defer_what    = EMM_QUERY_NONE;
+
+/* 目前只有 Z 轴驱动器 TXD 接到 PA3；其余三路没接，必须如实回 E11 */
+static uint8_t host_axis_has_readback(uint8_t addr)
+{
+    return (uint8_t)((addr == 1U) ? 1U : 0U);
+}
+
+static void host_save_defer_req(const char *text, uint16_t len)
+{
+    uint16_t i;
+
+    if (len > HOST_MAX_LINE_CHARS)
+    {
+        len = HOST_MAX_LINE_CHARS;
+    }
+    for (i = 0U; i < len; i++)
+    {
+        host_defer_req[i] = text[i];
+    }
+    host_defer_req[len]   = '\0';
+    host_defer_req_len    = (uint8_t)len;
+}
+
+static void host_query_reset_all(void)
+{
+    EmmParser_Reset(&host_emm_parser);
+    EmmQuery_Reset(&host_emm_query);
+    host_defer_line    = 0U;
+    host_query_pending = 0U;
+    host_defer_id      = 0U;
+    host_defer_req_len = 0U;
+    host_defer_addr    = 0U;
+    host_defer_what    = EMM_QUERY_NONE;
+}
+
+/* 回包到了：把数据补进应答，旧数据不装新（stamp 早于本次发出的不认） */
+static uint8_t host_query_has_fresh_data(void)
+{
+    if (host_emm_query.have_data == 0U)
+    {
+        return 0U;
+    }
+    return (uint8_t)((host_emm_query.stamp_ms >= host_emm_query.sent_ms) ? 1U : 0U);
+}
+
+static void host_query_answer(uint32_t now)
+{
+    host_body_ok(&host_out, host_defer_id);
+    host_kv_u32(&host_out, "addr", (uint32_t)host_defer_addr);
+
+    if (host_defer_what == EMM_QUERY_POS)
+    {
+        host_kv_i32(&host_out, "counts", host_emm_query.counts);
+        host_kv_deg_x10(&host_out, "deg", Emm_CountsToDegX10(host_emm_query.counts));
+    }
+    else if (host_defer_what == EMM_QUERY_VEL)
+    {
+        host_kv_i32(&host_out, "rpm", (int32_t)host_emm_query.rpm);
+    }
+    else
+    {
+        host_kv_u32(&host_out, "flag", (uint32_t)host_emm_query.flag);
+    }
+    host_kv_u32(&host_out, "age_ms", EmmQuery_AgeMs(&host_emm_query, now));
+
+    (void)host_emit(host_defer_id, host_defer_req, host_defer_req_len);
+    host_query_pending = 0U;
+    host_flush_pending_event();
+}
+
+static void host_query_timeout_answer(void)
+{
+    host_body_err(&host_out, host_defer_id, HOST_E_QUERY_TIMEOUT);
+    host_kv_u32(&host_out, "addr", (uint32_t)host_defer_addr);
+    (void)host_emit(host_defer_id, host_defer_req, host_defer_req_len);
+    host_query_pending = 0U;
+    host_flush_pending_event();
+}
+
+/* 驱动器回了应答，但不是查的那一项（例如要位置却回了状态） */
+static void host_query_bad_reply_answer(void)
+{
+    host_body_err(&host_out, host_defer_id, HOST_E_REPLY);
+    host_kv_u32(&host_out, "addr", (uint32_t)host_defer_addr);
+    (void)host_emit(host_defer_id, host_defer_req, host_defer_req_len);
+    host_query_pending = 0U;
+    host_flush_pending_event();
+}
+
+/* 每轮都要调：收字节、推进事务、按需补发应答 */
+static void host_query_service(uint32_t now)
+{
+    (void)EmmQuery_Poll(&host_emm_query, &host_emm_parser, now);
+
+    if (host_emm_query.bad_reply != 0U)
+    {
+        host_emm_query.bad_reply = 0U;
+        if (host_query_pending != 0U)
+        {
+            host_query_bad_reply_answer();
+        }
+        return;
+    }
+    if (host_query_pending == 0U)
+    {
+        return;                 /* 没有在等回包的查询 */
+    }
+    if ((host_emm_query.active == 0U) && host_query_has_fresh_data())
+    {
+        host_query_answer(now);
+        return;
+    }
+    if (EmmQuery_Expired(&host_emm_query, now))
+    {
+        host_query_timeout_answer();
+    }
+}
+
+/* 遥测订阅了有回读的轴时，顺便起一次位置查询（不占 PC 的请求 id） */
+static void host_query_background(uint32_t now)
+{
+    if (host_query_pending != 0U)
+    {
+        return;
+    }
+    if (host_emm_query.active != 0U)
+    {
+        return;
+    }
+    (void)EmmQuery_Start(&host_emm_query, 1U, EMM_QUERY_POS, now,
+                         (uint32_t)host_param_value("query_timeout_ms"));
+}
+
+/* ==========================================================================
  * 主动上报
  * ========================================================================== */
 
@@ -542,19 +739,33 @@ static void host_emit_link_event(const char *state)
     (void)host_out_finish(&host_evt);
 }
 
-/* 步骤 1：还没有接回读，遥测只能报指令状态并显式写 readback=0 */
+/* 遥测：有回读的轴报实测计数/角度，没接回读的轴显式写 readback=0 */
 static void host_emit_telemetry(uint8_t addr)
 {
     ControlAxis *ax = control_get(addr);
+    uint32_t     now;
 
     if (ax == 0)
     {
         return;
     }
+    now = Stepper_Millis();
+
     host_body_head(&host_evt, 0U, "tele");
     host_kv_u32(&host_evt, "addr", ax->addr);
     host_kv_u32(&host_evt, "rpm", (uint32_t)((ax->mode == CONTROL_MODE_SPEED) ? ax->rpm : 0U));
-    host_kv_u32(&host_evt, "readback", 0U);
+
+    if (host_axis_has_readback(addr) && (host_emm_query.have_data != 0U))
+    {
+        host_kv_u32(&host_evt, "readback", 1U);
+        host_kv_i32(&host_evt, "counts", host_emm_query.counts);
+        host_kv_deg_x10(&host_evt, "deg", Emm_CountsToDegX10(host_emm_query.counts));
+        host_kv_u32(&host_evt, "age_ms", EmmQuery_AgeMs(&host_emm_query, now));
+    }
+    else
+    {
+        host_kv_u32(&host_evt, "readback", 0U);
+    }
     (void)host_out_finish(&host_evt);
 }
 
@@ -727,6 +938,7 @@ static void host_cmd_hello(uint16_t id, uint8_t nargs)
     }
 
     host_session_clear();           /* 新会话：旧请求 id 全部作废 */
+    host_query_reset_all();         /* 也丢掉上一次没回完的查询 */
     host_ready = 1U;
     host_link_lost = 0U;
     host_boot_id++;
@@ -738,8 +950,8 @@ static void host_cmd_hello(uint16_t id, uint8_t nargs)
     host_out_char(&host_out, ','); host_out_str(&host_out, "boot=");
     host_out_hex32(&host_out, host_boot_id);
     host_kv_str(&host_out, "axes", "1/3/4/5");
-    /* 步骤 1 没有任何轴接回读：这里必须是 '-'，等 Z 轴接上 PA3 后再改成 "1" */
-    host_kv_str(&host_out, "readback", "-");
+    /* 只有 Z 轴驱动器 TXD 接了 PA3；没接线时查询会超时回 E04，不会编造读数 */
+    host_kv_str(&host_out, "readback", HOST_READBACK_AXES);
 }
 
 static void host_cmd_ping(uint16_t id, uint8_t nargs)
@@ -979,23 +1191,49 @@ static void host_cmd_motor_zero(uint16_t id, uint8_t nargs)
 
 static void host_cmd_motor_query(uint16_t id, uint8_t nargs)
 {
-    uint8_t addr;
+    uint8_t  addr;
+    uint8_t  what;
+    uint32_t now;
 
     if (!host_require_argc(id, nargs, 2U)) { return; }
     if (!host_arg_axis(id, host_tokens[2], &addr)) { return; }
-    if (!host_streq(host_tokens[3], "vel") &&
-        !host_streq(host_tokens[3], "pos") &&
-        !host_streq(host_tokens[3], "flag"))
+
+    if (host_streq(host_tokens[3], "vel"))       { what = EMM_QUERY_VEL; }
+    else if (host_streq(host_tokens[3], "pos"))  { what = EMM_QUERY_POS; }
+    else if (host_streq(host_tokens[3], "flag")) { what = EMM_QUERY_FLAG; }
+    else
     {
         host_body_err(&host_out, id, HOST_E_ARG);
         host_kv_str(&host_out, "reason", "what");
         return;
     }
 
-    /* 步骤 3 才把驱动器回包接到 PA3；在那之前如实回 E11，绝不编造实测值 */
-    (void)addr;
-    host_body_err(&host_out, id, HOST_E_NO_READBACK);
-    host_kv_u32(&host_out, "addr", addr);
+    /* 驱动器 TXD 没接到 PA3 的轴：如实报"无回读能力"，绝不编造实测值 */
+    if (!host_axis_has_readback(addr))
+    {
+        host_body_err(&host_out, id, HOST_E_NO_READBACK);
+        host_kv_u32(&host_out, "addr", addr);
+        return;
+    }
+
+    now = Stepper_Millis();
+    if (!EmmQuery_Start(&host_emm_query, addr, what, now,
+                        (uint32_t)host_param_value("query_timeout_ms")))
+    {
+        /* 一次只留一个查询事务；上一次还没收完就先说忙，不排队、不覆盖 */
+        host_body_err(&host_out, id, HOST_E_BUSY);
+        host_kv_str(&host_out, "reason", "query_busy");
+        host_kv_u32(&host_out, "addr", addr);
+        return;
+    }
+
+    /* 应答要等驱动器回包：请求原文已由 host_handle_line 存好，
+     * host_query_service 收到回包（或超时）后再补发 #<id>,ok/err */
+    host_defer_line    = 1U;
+    host_query_pending = 1U;
+    host_defer_id      = id;
+    host_defer_addr    = addr;
+    host_defer_what    = what;
 }
 
 static void host_cmd_gripper(uint16_t id, uint8_t nargs)
@@ -1306,8 +1544,20 @@ static void host_handle_line(void)
         return;
     }
 
+    /* 需要等驱动器回包的查询（motor_query）要靠这段原文补发应答；
+     * 存的是已切分（',' 换成 '\0'）的文本，和会话缓存里的格式一致。
+     * 上一条查询还没收完时不能覆盖它——那条查询的应答也要用这段原文。 */
+    host_defer_line = 0U;
+    if (host_query_pending == 0U)
+    {
+        host_save_defer_req(host_line, payload_len);
+    }
+
     host_dispatch(id, ntok);
-    (void)host_emit(id, host_line, payload_len);
+    if (host_defer_line == 0U)
+    {
+        (void)host_emit(id, host_line, payload_len);
+    }
     host_flush_pending_event();     /* 应答先出，事件后出 */
 }
 
@@ -1385,6 +1635,7 @@ static void host_protocol_init(void)
     host_tele_next_ms   = 0U;
 
     host_session_clear();
+    host_query_reset_all();
     control_reset_state();
 }
 
@@ -1419,6 +1670,9 @@ static void host_protocol_task(void)
         n++;
     }
 
+    /* 4.5 驱动器回读（PA3）：本轮的字节已经在上面收完，这里解析并补发应答 */
+    host_query_service(now);
+
     /* 5. 停止字符：置锁存 + 错发四轴停止 + 报事件 */
     if (host_stop_pending)
     {
@@ -1442,11 +1696,16 @@ static void host_protocol_task(void)
         }
     }
 
-    /* 7. 遥测：默认关，只有 tele_on 订阅后才发 */
+    /* 7. 遥测：默认关，只有 tele_on 订阅后才发。
+     *    订阅的是有回读的轴时，顺便起一次位置查询，下一拍就有实测值。 */
     if ((host_ready) && (host_tele_axis != 0U) && (host_tele_interval_ms > 0U))
     {
         if ((int32_t)(now - host_tele_next_ms) >= 0)
         {
+            if (host_axis_has_readback(host_tele_axis))
+            {
+                host_query_background(now);
+            }
             host_emit_telemetry(host_tele_axis);
             host_tele_next_ms = now + (uint32_t)host_tele_interval_ms;
         }
