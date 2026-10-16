@@ -19,6 +19,10 @@
 #define SERVO_GRAB_DEG   180U
 
 void Servo_Init(void);
+/* Same as Servo_Init(), but the PWM starts directly at `angle` so the servo
+ * never sees a wrong pulse at power-on (gripper must boot at its release
+ * position instead of 0 degrees). */
+void Servo_InitAt(uint16_t angle);
 void Servo_SetAngle(uint16_t angle);
 uint16_t Servo_AngleToPulse(uint16_t angle);
 

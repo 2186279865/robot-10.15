@@ -117,6 +117,16 @@ static void control_reset_state(void)
     control_gripper_settled  = 0U;
 }
 
+/* 夹爪硬件初始化：必须在上电时调用一次，否则 PB6 根本没有 PWM 输出，
+ * 上位机怎么点都不会动。PWM 直接从松开位起振，避免上电瞬间夹一下。 */
+static void control_gripper_init(void)
+{
+    Servo_InitAt(control_gripper_angle);        /* 180 = 松开位 */
+    control_gripper_busy     = 0U;
+    control_gripper_settled  = 0U;
+    control_gripper_ready_ms = 0U;
+}
+
 static uint32_t control_next_task_id(void)
 {
     control_task_seq++;

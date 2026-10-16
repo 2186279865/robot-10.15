@@ -2,6 +2,11 @@
 
 void Servo_Init(void)
 {
+    Servo_InitAt(SERVO_OPEN_DEG);
+}
+
+void Servo_InitAt(uint16_t angle)
+{
     GPIO_InitTypeDef gpio;
     TIM_TimeBaseInitTypeDef timer;
     TIM_OCInitTypeDef channel;
@@ -30,14 +35,15 @@ void Servo_Init(void)
     channel.TIM_OCMode = TIM_OCMode_PWM1;
     channel.TIM_OutputState = TIM_OutputState_Enable;
     channel.TIM_OCPolarity = TIM_OCPolarity_High;
-    channel.TIM_Pulse = Servo_AngleToPulse(SERVO_OPEN_DEG);
+    if (angle > SERVO_MAX_ANGLE) angle = SERVO_MAX_ANGLE;
+    channel.TIM_Pulse = Servo_AngleToPulse(angle);
     TIM_OC1Init(TIM4, &channel);
     TIM_OC1PreloadConfig(TIM4, TIM_OCPreload_Enable);
     TIM_ARRPreloadConfig(TIM4, ENABLE);
     TIM_Cmd(TIM4, ENABLE);
     TIM_SetCounter(TIM4, 0);
 
-    Servo_SetAngle(SERVO_OPEN_DEG);
+    Servo_SetAngle(angle);
 }
 
 uint16_t Servo_AngleToPulse(uint16_t angle)

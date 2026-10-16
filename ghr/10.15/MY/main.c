@@ -39,9 +39,9 @@
  *   3. 时间基准从 "ms += KEY_TASK_MS" 估算改成 Stepper_Millis() 实测。
  *   4. 下发动作全部走 control_apply_*，PA0 与 PC 看到的是同一份状态。
  *
- * 【还没有的东西】
- *   回读（PA3 接驱动器 TXD）尚未接线，所以 motor_query 一律如实回 E11，
- *   hello 里 readback=-，界面不会显示任何"实测"数据。
+ * 【回读】
+ *   回读：PA3 接驱动器 TXD。哪几个轴真接了回读线由参数 readback_mask 声明，
+ *   hello 里的 readback 列表同样取这个参数，界面不会显示任何"实测"数据。
  *
  * 如果 PA0 还是不动，按顺序排查（前两条是硬件，代码解决不了）：
  *   1. 驱动器有没有接 12~48V 电机电源？只靠 STM32 的 USB/5V 供电电机不动。
@@ -100,6 +100,7 @@ int main(void)
     /* USB CDC：只做板级初始化，不等枚举、不阻塞 */
     HostLink_Init();
     host_protocol_init();
+    control_gripper_init();   /* PB6/TIM4 舵机 PWM 上电起振，停在松开位 */
 
     /* 上电自检：闪 1 下 = 初始化完成、程序已经跑到主循环 */
     led_blink(1U);

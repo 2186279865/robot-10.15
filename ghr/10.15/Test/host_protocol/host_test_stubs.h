@@ -21,6 +21,7 @@ uint8_t  HostTest_RunSpeedAt2(uint8_t addr, uint8_t dir, uint16_t rpm,
                               uint8_t accel);
 uint8_t  HostTest_StopAt(uint8_t addr);
 void     HostTest_ServoSetAngle(uint16_t deg);
+void     HostTest_ServoInitAt(uint16_t deg);
 
 #define Stepper_Millis()                        HostTest_Millis()
 #define Stepper_EnableAt(a, on)                 HostTest_EnableAt((a), (on))
@@ -31,5 +32,6 @@ void     HostTest_ServoSetAngle(uint16_t deg);
 #define Stepper_RunSpeedAt2(a, d, r, c)         HostTest_RunSpeedAt2((a), (d), (r), (c))
 #define Stepper_StopAt(a)                       HostTest_StopAt(a)
 #define Servo_SetAngle(deg)                     HostTest_ServoSetAngle(deg)
+#define Servo_InitAt(deg)                       HostTest_ServoInitAt(deg)
 
 #endif /* HOST_TEST_STUBS_H */

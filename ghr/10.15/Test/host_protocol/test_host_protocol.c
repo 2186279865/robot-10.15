@@ -113,6 +113,12 @@ void HostTest_ServoSetAngle(uint16_t deg)
     last_servo_deg = deg;
 }
 
+void HostTest_ServoInitAt(uint16_t deg)
+{
+    c_servo++;
+    last_servo_deg = deg;
+}
+
 /* 这两个是真实函数（不是宏桩）：emm_reply_inline.h 里就声明了它们 */
 uint8_t Stepper_SendFrame(const uint8_t *frame, uint8_t len)
 {
@@ -1035,6 +1041,23 @@ static void test_readback_query(void)
     expect_contains("deg=180.0");
 }
 
+/* 上电初始化：以前 main.c 忘了调舵机初始化，PB6 根本没有 PWM，夹爪怎么点都不动。
+ * 这里把"上电必须直接输出松开位"钉成用例。 */
+static void test_gripper_init(void)
+{
+    cur_test = "gripper-init";
+    reset_world();
+
+    last_servo_deg = 0xFFFFU;
+    control_gripper_init();
+    check(last_servo_deg == 180U,
+          "power-on servo PWM must start at the release position (180)");
+
+    /* 初始化不能顺手报一个"等待结束"事件 */
+    check(control_take_gripper_settled() == 0U,
+          "init must not fake a settled event");
+}
+
 /* 多轴回读：readback_mask 决定哪些轴接了回读线；
  * 遥测开着时四轴轮着查，接到哪个轴的回包就报哪个轴的实测值。 */
 static void test_multiaxis_readback(void)
@@ -1160,6 +1183,7 @@ int main(void)
     test_link_timeout();
     test_split_frames();
     test_multiaxis_readback();
+    test_gripper_init();
 
     {
         FILE *f = fopen("frames.txt", "wb");
