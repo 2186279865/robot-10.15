@@ -1686,8 +1686,17 @@ static void host_handle_line(void)
      * 所以"同 id 同内容"的比较不受影响。 */
     ntok = host_tokenize(host_line, HOST_MAX_TOKENS);
 
-    /* 同 id 同内容：只重发原应答，不重复执行（相对位移尤其重要） */
-    dup = host_session_find(id);
+    /* 同 id 同内容：只重发原应答，不重复执行（相对位移尤其重要）。
+     * 例外：hello 是"开会话"命令。链路复位/重新握手时客户端会复用同一个 id，
+     * 若被上一次会话的缓存挡住就会误回 E12，所以 hello 一律不看旧缓存。 */
+    if ((ntok >= 2U) && host_streq(host_tokens[1], "hello"))
+    {
+        dup = 0;
+    }
+    else
+    {
+        dup = host_session_find(id);
+    }
     if (dup != 0)
     {
         if ((dup->req_len == (uint8_t)payload_len) &&

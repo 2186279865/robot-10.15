@@ -333,6 +333,8 @@ class HostClient:
             )
         if pending.cmd == "stop_all":
             self.latched = True
+        if pending.cmd == "stop_clear" and pairs.get("latch") == "0":
+            self.latched = False
 
     def _on_event(self, frame: P.Frame) -> None:
         pairs = frame.pairs

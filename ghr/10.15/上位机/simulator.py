@@ -115,7 +115,9 @@ class SimulatedDevice:
         if not frame.is_request:
             return []
         self.command_log.append(frame.raw)
-        if frame.req_id != P.ID_EVENT:
+        # hello 是开会话命令：不能被上一次会话的缓存挡住（固件侧同样处理），
+        # 否则链路复位后客户端复用同一个 id 重新握手会被误判成 E12。
+        if frame.req_id != P.ID_EVENT and frame.cmd != "hello":
             verdict = self.session.check(frame.req_id, self._request_key(frame))
             if verdict == P.SessionCache.DUPLICATE:
                 cached = self.session.cached_response(frame.req_id)

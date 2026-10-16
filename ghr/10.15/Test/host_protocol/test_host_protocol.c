@@ -447,6 +447,20 @@ static void test_hello_handshake(void)
     expect_contains("want=1");
 }
 
+static void test_hello_rehandshake_reuses_id(void)
+{
+    /* 链路复位后上位机会复用同一个 id 重新握手（客户端重建了请求 id 池）。
+     * 上一次会话的缓存绝不能把重新握手挡成 E12，否则界面永远连不回来。 */
+    cur_test = "hello-rehandshake";
+    reset_world();
+    send("7,hello,1,111");
+    expect("#7,ok,");
+    send("7,hello,1,222");
+    expect("#7,ok,");
+    expect_contains("proto=1");
+    check(host_protocol_is_ready() == 1U, "ready after re-handshake");
+}
+
 static void test_ping_and_status(void)
 {
     cur_test = "ping/status";
@@ -1173,6 +1187,7 @@ int main(void)
     printf("host protocol tests\n");
 
     test_hello_handshake();
+    test_hello_rehandshake_reuses_id();
     test_ping_and_status();
     test_doc_example_frame();
     test_duplicate_and_conflict();
