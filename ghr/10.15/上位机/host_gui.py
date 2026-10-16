@@ -325,9 +325,15 @@ class App:
         self._build_log(log_tab)
 
     def _build_gripper(self, parent: ttk.Frame) -> None:
+        grab_default = int(P.PARAM_DEFAULTS["gripper_grab_deg"])
+        open_default = int(P.PARAM_DEFAULTS["gripper_open_deg"])
         ttk.Label(
             parent,
-            text="夹爪：0°=夹紧、180°=松开，每次 45°（GRIPPER_* 宏为准，方向不要反转）",
+            text=(
+                "夹爪：%d°=夹紧（180-45，不是 0 度）、%d°=松开，每次 %d°"
+                "（以固件 GRIPPER_* / 参数表为准，方向不要反转）"
+                % (grab_default, open_default, int(P.PARAM_DEFAULTS["gripper_step_deg"]))
+            ),
             foreground="#444444",
         ).pack(anchor="w")
         buttons = ttk.Frame(parent)
@@ -342,9 +348,11 @@ class App:
 
         angle_row = ttk.Frame(parent)
         angle_row.pack(anchor="w", pady=6)
-        ttk.Label(angle_row, text="指定角度 0~270：").pack(side="left")
-        self.servo_angle = tk.IntVar(value=180)
-        ttk.Spinbox(angle_row, from_=0, to=270, width=6, textvariable=self.servo_angle).pack(side="left")
+        ttk.Label(angle_row, text="指定角度 %d~%d：" % (grab_default, open_default)).pack(side="left")
+        self.servo_angle = tk.IntVar(value=open_default)
+        ttk.Spinbox(
+            angle_row, from_=grab_default, to=open_default, width=6, textvariable=self.servo_angle
+        ).pack(side="left")
         ttk.Button(angle_row, text="下发角度", command=self.send_servo_angle).pack(side="left", padx=6)
         ttk.Label(
             angle_row, text="（直接下发角度会绕过夹爪内部角度，仅调试用）", foreground="#888888"

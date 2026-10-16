@@ -776,13 +776,13 @@ static void test_gripper(void)
 
     send("80,gripper,grab");
     expect("#80,ok,");
-    expect_contains("angle=0");
-    check(last_servo_deg == 0U, "grab should drive 0 deg");
+    expect_contains("angle=135");
+    check(last_servo_deg == 135U, "grab must drive the clamp position 135 (180-45)");
 
     send("81,gripper,step_release");
     expect("#81,ok,");
-    expect_contains("angle=45");
-    check(last_servo_deg == 45U, "step release should drive 45 deg");
+    expect_contains("angle=180");
+    check(last_servo_deg == 180U, "step release from the clamp goes back to 180");
 
     send("82,gripper,open");
     expect("#82,ok,");
@@ -797,10 +797,16 @@ static void test_gripper(void)
     expect("#84,err,E02");
     expect_contains("reason=out_of_range");
 
+    /* 调试角度同样夹在 [夹紧端, 松开端] 之内：90 低于夹紧端 135 -> E02 */
     txoff = 0; txlog_len = 0;
     send("85,servo_angle,90");
-    expect("#85,ok,");
-    check(last_servo_deg == 90U, "debug angle goes straight out");
+    expect("#85,err,E02");
+    expect_contains("min=135");
+
+    txoff = 0; txlog_len = 0;
+    send("86,servo_angle,150");
+    expect("#86,ok,");
+    check(last_servo_deg == 150U, "debug angle inside the gripper range goes straight out");
 }
 
 static void test_telemetry_and_settle_event(void)

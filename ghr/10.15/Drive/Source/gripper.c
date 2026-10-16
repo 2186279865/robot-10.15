@@ -5,7 +5,7 @@
 /* 抓夹（舵机夹爪）模块实现。
  *
  * 角度模型：current_deg 就是直接送给舵机的物理角度。
- *     GRIPPER_OPEN_DEG(180) --逐步收紧--> GRIPPER_GRAB_DEG(0)
+ *     GRIPPER_OPEN_DEG(180) --逐步收紧--> GRIPPER_GRAB_DEG(135)
  * 每次动作改变 GRIPPER_STEP_DEG(45) 度，并在最后一步夹紧 / 松开时精确落在端点，
  * 不会因为步长不整除而走不到位。
  */

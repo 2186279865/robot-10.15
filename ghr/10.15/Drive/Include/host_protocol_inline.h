@@ -89,7 +89,7 @@ static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
     { "acc",               1U,    0U,  255U   },
     { "speed_rpm_max",     300U,  1U,  6000U  },
     { "gripper_open_deg",  180U,  0U,  270U   },
-    { "gripper_grab_deg",  0U,    0U,  270U   },
+    { "gripper_grab_deg",  135U,  0U,  270U   },
     { "gripper_step_deg",  45U,   1U,  270U   },
     { "gripper_settle_ms", 200U,  0U,  60000U },
     { "heartbeat_ms",      500U,  20U, 60000U },

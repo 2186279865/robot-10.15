@@ -263,7 +263,7 @@ class TestParamDefaults(unittest.TestCase):
         self.assertEqual(P.PARAM_DEFAULTS["speed_rpm"], 60)
         self.assertEqual(P.PARAM_DEFAULTS["speed_rpm_max"], 300)
         self.assertEqual(P.PARAM_DEFAULTS["gripper_open_deg"], 180)
-        self.assertEqual(P.PARAM_DEFAULTS["gripper_grab_deg"], 0)
+        self.assertEqual(P.PARAM_DEFAULTS["gripper_grab_deg"], 135)
         self.assertEqual(P.PARAM_DEFAULTS["gripper_step_deg"], 45)
 
     def test_axis_labels(self):

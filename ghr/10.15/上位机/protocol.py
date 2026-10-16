@@ -78,7 +78,7 @@ PARAM_DEFAULTS: Dict[str, object] = {
     "acc": 1,
     "speed_rpm_max": 300,
     "gripper_open_deg": 180,
-    "gripper_grab_deg": 0,
+    "gripper_grab_deg": 135,
     "gripper_step_deg": 45,
     "gripper_settle_ms": 200,
     "heartbeat_ms": 500,

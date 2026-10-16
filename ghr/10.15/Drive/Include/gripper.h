@@ -22,7 +22,7 @@
 
 #define GRIPPER_STEP_DEG      45U     /* 每次动作改变的角度 */
 #define GRIPPER_OPEN_DEG      180U    /* 松开位置（上电位置） */
-#define GRIPPER_GRAB_DEG      0U      /* 夹紧位置 */
+#define GRIPPER_GRAB_DEG      135U    /* 夹紧位置 = 180 - 45，不是 0 度 */
 #define GRIPPER_STEP_WAIT_MS  200U    /* 每走一步后给舵机的到位时间 */
 
 /* 上电：舵机转到松开位置，模块进入松开状态 */
