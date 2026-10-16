@@ -64,11 +64,6 @@ KNOWN_PARAMS = [(name, PARAM_LABELS[name]) for name in P.PARAM_DEFAULTS if name 
 class AxisPanel:
     """单轴手动控制面板。"""
 
-    # 与固件保持一致：STEPPER_PULSES_PER_REV=3200（位置指令单位），
-    # EMM 回读编码器 65536 计数/圈（0x36 回包）。
-    PULSES_PER_REV = 3200
-    COUNTS_PER_REV = 65536.0
-
     def __init__(self, master, app, addr: int) -> None:
         self.app = app
         self.addr = addr
@@ -83,12 +78,9 @@ class AxisPanel:
         self.direction = tk.IntVar(value=0)
         self.rpm = tk.IntVar(value=60)
         self.acc = tk.IntVar(value=1)
-        self.pulses = tk.IntVar(value=AxisPanel.PULSES_PER_REV)
-        self.turns = tk.DoubleVar(value=1.0)
+        self.pulses = tk.IntVar(value=3200)
         self.mode = tk.StringVar(value="rel")
         self.tele = tk.BooleanVar(value=False)
-        self.reference_valid = False
-        self._syncing = False
 
         row = ttk.Frame(frame)
         row.pack(fill="x", padx=4, pady=2)
@@ -100,46 +92,23 @@ class AxisPanel:
         ttk.Label(row, text="加速度").pack(side="left", padx=(6, 0))
         ttk.Spinbox(row, from_=0, to=255, width=4, textvariable=self.acc).pack(side="left")
 
-        # 位置模式：脉冲与圈数两个输入框双向同步，改哪个都行（1 圈 = 3200 脉冲）
         row2 = ttk.Frame(frame)
         row2.pack(fill="x", padx=4, pady=2)
-        ttk.Label(row2, text="位置模式：脉冲").pack(side="left")
+        ttk.Label(row2, text="脉冲").pack(side="left")
         ttk.Spinbox(row2, from_=1, to=1000000, width=8, textvariable=self.pulses).pack(side="left")
-        ttk.Label(row2, text="=").pack(side="left", padx=2)
-        ttk.Spinbox(
-            row2,
-            from_=0.01,
-            to=1000.0,
-            increment=0.1,
-            width=7,
-            format="%.2f",
-            textvariable=self.turns,
-        ).pack(side="left")
-        ttk.Label(row2, text="圈").pack(side="left")
-        self.pulses.trace_add("write", self._on_pulses)
-        self.turns.trace_add("write", self._on_turns)
-        self.mode.trace_add("write", lambda *_a: self._refresh_target())
-
-        row3 = ttk.Frame(frame)
-        row3.pack(fill="x", padx=4, pady=2)
-        ttk.Label(row3, text="下发方式").pack(side="left")
+        ttk.Label(row2, text="模式").pack(side="left", padx=(6, 0))
         ttk.Combobox(
-            row3, width=5, state="readonly", values=("rel", "abs"), textvariable=self.mode
+            row2, width=5, state="readonly", values=("rel", "abs"), textvariable=self.mode
         ).pack(side="left")
-        ttk.Button(row3, text="▶ 相对走", width=9, command=lambda: self.send_pos("rel")).pack(
-            side="left", padx=(6, 2)
-        )
-        ttk.Button(row3, text="▶ 绝对走到此", width=12, command=lambda: self.send_pos("abs")).pack(
-            side="left", padx=2
-        )
         ttk.Checkbutton(
-            row3, text="订阅遥测", variable=self.tele, command=self.toggle_telemetry
+            row2, text="订阅遥测", variable=self.tele, command=self.toggle_telemetry
         ).pack(side="left", padx=(8, 0))
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x", padx=4, pady=2)
         for text, command in (
             ("速度模式", self.send_speed),
+            ("位置模式", self.send_pos),
             ("停止", self.send_stop),
             ("使能", lambda: self.send_enable(1)),
             ("取消使能", lambda: self.send_enable(0)),
@@ -157,79 +126,8 @@ class AxisPanel:
         ):
             ttk.Button(buttons2, text=text, width=8, command=command).pack(side="left", padx=1)
 
-        self.target_label = ttk.Label(frame, text="目标位置：—", foreground="#444444")
-        self.target_label.pack(fill="x", padx=4, pady=(2, 0))
-        self.ref_label = ttk.Label(frame, text="位置基准：未建立", foreground="#8a5a00")
-        self.ref_label.pack(fill="x", padx=4)
         self.readback = ttk.Label(frame, text="回读：—（未接回读）", foreground="#666666")
-        self.readback.pack(fill="x", padx=4, pady=(0, 4))
-        self._refresh_target()
-        self._refresh_reference()
-
-    # -- 脉冲/圈数联动 + 位置基准 -------------------------------------------
-    def _on_pulses(self, *_a) -> None:
-        """脉冲框改了 → 同步圈数（1 圈 = PULSES_PER_REV 脉冲）。"""
-        if self._syncing:
-            return
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            return
-        if pulses <= 0:
-            return
-        self._syncing = True
-        try:
-            self.turns.set(round(pulses / float(self.PULSES_PER_REV), 3))
-        finally:
-            self._syncing = False
-        self._refresh_target()
-
-    def _on_turns(self, *_a) -> None:
-        """圈数框改了 → 反算脉冲。"""
-        if self._syncing:
-            return
-        try:
-            turns = float(self.turns.get())
-        except (tk.TclError, ValueError):
-            return
-        if turns <= 0:
-            return
-        self._syncing = True
-        try:
-            self.pulses.set(int(round(turns * self.PULSES_PER_REV)))
-        finally:
-            self._syncing = False
-        self._refresh_target()
-
-    def _refresh_target(self) -> None:
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            pulses = 0
-        turns = pulses / float(self.PULSES_PER_REV)
-        mode = "相对（走这么多）" if self.mode.get() == "rel" else "绝对（走到这个位置）"
-        self.target_label.configure(
-            text=f"目标位置：{pulses} 脉冲 = {turns:.2f} 圈 = {turns * 360.0:.1f}°　模式：{mode}"
-        )
-
-    def _refresh_reference(self) -> None:
-        if self.reference_valid:
-            self.ref_label.configure(
-                text="位置基准：已建立（最近一次『位置清零』/已确认）", foreground="#0a6b0a"
-            )
-        else:
-            self.ref_label.configure(
-                text="位置基准：未建立 —— 用『绝对走到此』前先点『位置清零』", foreground="#8a5a00"
-            )
-
-    def reset_reference(self) -> None:
-        """新会话：驱动器是否掉过电未知，绝对位置基准一律作废。"""
-        self.reference_valid = False
-        self._refresh_reference()
-
-    def mark_zeroed(self) -> None:
-        self.reference_valid = True
-        self._refresh_reference()
+        self.readback.pack(fill="x", padx=4, pady=(2, 4))
 
     # -- 发送 ---------------------------------------------------------------
     def _guard(self) -> bool:
@@ -243,39 +141,18 @@ class AxisPanel:
             return
         self.app.client.send("motor_speed", self.addr, self.direction.get(), self.rpm.get(), self.acc.get())
 
-    def send_pos(self, mode: str = "rel") -> None:
-        """按相对/绝对方式下发目标位置（脉冲数来自脉冲框，圈数框与之联动）。"""
+    def send_pos(self) -> None:
         if not self._guard():
             return
-        self.mode.set(mode)
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            self.app.note("脉冲数不是有效数字")
-            return
-        if pulses <= 0:
-            self.app.note("脉冲数必须大于 0")
-            return
-        if mode == "abs" and not self.reference_valid:
-            if not messagebox.askyesno(
-                "绝对位置基准未建立",
-                f"{AXIS_LABELS[self.addr]} 还没有建立位置基准。\n\n"
-                "绝对位置以驱动器上电位置或最近一次『位置清零』为原点，\n"
-                "基准不对时电机会按错误的目标位置行走。\n\n"
-                "建议先点『位置清零』，再走绝对位置。\n\n仍要按现在的脉冲数下发吗？",
-            ):
-                return
-            self.mark_zeroed()
         self.app.client.send(
             "motor_pos",
             self.addr,
             self.direction.get(),
             self.rpm.get(),
             self.acc.get(),
-            pulses,
-            mode,
+            self.pulses.get(),
+            self.mode.get(),
         )
-        self._refresh_target()
 
     def send_stop(self) -> None:
         if not self._guard():
@@ -296,14 +173,9 @@ class AxisPanel:
     def send_zero(self) -> None:
         if not self._guard():
             return
-        if not messagebox.askyesno(
-            "位置清零",
-            f"把 {AXIS_LABELS[self.addr]} 的当前位置当成零点？\n\n"
-            "固件只在轴停止时接受清零；清零后该轴的位置基准才算建立。",
-        ):
+        if not messagebox.askyesno("位置清零", f"{AXIS_LABELS[self.addr]} 当前位置将被当成零点，继续？"):
             return
         self.app.client.send("motor_zero", self.addr)
-        self.mark_zeroed()
 
     def query(self, what: str) -> None:
         if not self._guard():
@@ -420,8 +292,6 @@ class App:
             pady=2,
         )
         self.stop_button.pack(side="right", padx=6)
-        self.clear_latch_button = ttk.Button(bar, text="清除停止锁存", command=self.clear_latch)
-        self.clear_latch_button.pack(side="right", padx=4)
         self.last_rx_label = ttk.Label(bar, text="最后通信 —")
         self.last_rx_label.pack(side="right", padx=6)
         self.root.bind("<Escape>", lambda _event: self.emergency_stop())
@@ -679,15 +549,6 @@ class App:
         self._stop_requested = True
         self.note("已下发停止全部；请确认机械确实停下")
 
-    def clear_latch(self) -> None:
-        """解除固件的停止锁存：按过停止（或发过 '!'）之后，必须显式解除才能继续跑运动。"""
-        if not self.client.online:
-            self.note("未连接：无法清除停止锁存")
-            return
-        self.client.send("stop_clear")
-        self._stop_requested = False
-        self.note("已请求解除停止锁存；确认机械停稳、人员撤离后再下发运动")
-
     def send_gripper(self, action: str) -> None:
         self.client.send("gripper", action, timeout_ms=2000)
         self.gripper_status.configure(
@@ -864,22 +725,11 @@ class App:
             return
         if event.kind == "reply":
             pairs = event.data.get("pairs", {})
-            cmd = event.data.get("cmd")
-            if cmd == "hello":
-                # 新会话：驱动器可能已掉电，绝对位置基准一律作废。
-                for panel in self.axes.values():
-                    panel.reset_reference()
-            if cmd == "param_get" and "name" in pairs:
+            if event.data.get("cmd") == "param_get" and "name" in pairs:
                 name = pairs.get("name")
                 if name in self.param_vars:
                     self.param_vars[name].set(pairs.get("value", ""))
                 self.custom_value.set(pairs.get("value", ""))
-        elif event.kind == "err":
-            code = event.data.get("code")
-            if code == "E13":
-                self._log("绝对位置被拒：该轴位置基准无效，先点该轴『位置清零』建立基准", "warn")
-            elif code == "E04":
-                self._log("查询超时：该轴没有接回读线（TXD→PA3），或驱动器没回包", "warn")
         self._log(event.text, event.kind)
 
     def _refresh_state(self) -> None:
