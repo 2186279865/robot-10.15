@@ -82,4 +82,5 @@ venv/
 .acl-recovery/
 
 # ---------- 上位机协议主机侧测试产物（.exe/.o 已被上面规则覆盖）----------
-Test/host_protocol/frames.txt
+**/Test/host_protocol/frames.txt
+*.pdb
