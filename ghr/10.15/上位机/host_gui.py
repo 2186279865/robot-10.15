@@ -56,6 +56,7 @@ PARAM_LABELS = {
     "query_timeout_ms": "查询超时 ms",
     "telemetry_ms": "遥测周期 ms",
     "frame_gap_ms": "电机帧间隔 ms",
+    "readback_mask": "回读轴掩码(1/3/4/5=1/2/4/8)",
 }
 KNOWN_PARAMS = [(name, PARAM_LABELS[name]) for name in P.PARAM_DEFAULTS if name in PARAM_LABELS]
 
@@ -563,6 +564,10 @@ class App:
             self.note(f"参数 {name} 没有填值")
             return
         self.client.send("param_set", name, text)
+        if name == "readback_mask":
+            # 回读轴名单是 hello 里带回来的，改完掩码要重新握手界面才会刷新
+            self.note("readback_mask 已下发，重新握手刷新回读轴名单")
+            self.client.begin_handshake()
 
     def send_raw(self) -> None:
         if not self.debug_mode.get():

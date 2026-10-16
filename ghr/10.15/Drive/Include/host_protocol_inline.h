@@ -46,10 +46,12 @@
 
 #define HOST_FIRMWARE_VERSION     "0.1.0"
 
-/* 回读能力：目前只有 Z 轴（地址 1）的驱动器 TXD 接到了 PA3。
- * hello 必须如实报出这张表：上位机据此决定哪些轴显示实测值。
- * 没接线时不会变成"有回读但读不到"——查询会在 query_timeout_ms 后回 E04。 */
-#define HOST_READBACK_AXES        "1"
+/* 回读能力：哪些驱动器的 TXD 接到了回读线上，用 readback_mask 参数表示
+ * （bit0=Z(1)，bit1=托盘(3)，bit2=X(4)，bit3=Y(5)），默认只有 Z 轴。
+ * hello 必须如实报出这份名单：上位机据此决定哪些轴显示实测值。
+ * 多轴怎么共用一条回读线由硬件决定（各串二极管/电阻并联、模拟开关选路、
+ * 或每路一个 UART），固件这里只按"能不能收到回包"说话——没接的轴
+ * 查询会在 query_timeout_ms 后回 E04，不会编数据。 */
 
 /* 错误码（与上位机 protocol.ERROR_CODES 一致） */
 #define HOST_E_UNKNOWN_CMD        "E01"
@@ -77,9 +79,11 @@ typedef struct
     uint16_t    max;
 } HostParam;
 
-#define HOST_PARAM_COUNT 12U
+#define HOST_PARAM_COUNT 13U
 
-static HostParam host_params[HOST_PARAM_COUNT] =
+/* 出厂默认值。host_protocol_init() 会把下面的运行参数表恢复成这一份，
+ * 所以 MCU 复位后参数一定回到默认，不会带着上一次会话的临时值。 */
+static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
 {
     { "speed_rpm",         60U,   1U,  6000U  },
     { "acc",               1U,    0U,  255U   },
@@ -92,8 +96,23 @@ static HostParam host_params[HOST_PARAM_COUNT] =
     { "link_timeout_ms",   3000U, 100U, 60000U },
     { "query_timeout_ms",  100U,  10U, 60000U },
     { "telemetry_ms",      200U,  20U, 60000U },
-    { "frame_gap_ms",      10U,   1U,  1000U  }
+    { "frame_gap_ms",      10U,   1U,  1000U  },
+    /* 哪些轴接了驱动器回读线（bit0=Z=1、bit1=托盘=3、bit2=X=4、bit3=Y=5）。
+     * 接线变了只改这个参数，不用重烧；没接线的轴查询会如实回 E11。 */
+    { "readback_mask",     1U,    1U,  15U    }
 };
+
+static HostParam host_params[HOST_PARAM_COUNT];
+
+static void host_params_restore_defaults(void)
+{
+    uint8_t i;
+
+    for (i = 0U; i < HOST_PARAM_COUNT; i++)
+    {
+        host_params[i] = host_param_defaults[i];
+    }
+}
 
 /* ---------------- 会话缓存 ---------------- */
 
@@ -561,6 +580,7 @@ static EmmParser host_emm_parser;
 static EmmQuery  host_emm_query;
 
 static void host_flush_pending_event(void);   /* 定义在下面的"主动上报"一节 */
+static void host_emit_telemetry(uint8_t addr);
 
 /* 查询要等驱动器回包（回包由 USART2 中断送进环形缓冲）。
  * 这期间不能先把 ok 发出去——否则上位机会先看到"ok 但没有数据"。
@@ -574,11 +594,40 @@ static char     host_defer_req[HOST_MAX_LINE_CHARS + 1U];
 static uint8_t  host_defer_addr    = 0U;
 static uint8_t  host_defer_what    = EMM_QUERY_NONE;
 
-/* 目前只有 Z 轴驱动器 TXD 接到 PA3；其余三路没接，必须如实回 E11 */
+/* 哪些轴接了回读线：bit i 对应 control_addr_table[i]（Z/托盘/X/Y）。
+ * readback_mask 是运行参数，接线变了改参数即可，不用重新烧固件；
+ * 没接线的轴就算打开也只是查询超时（E04），不会编数据出来。 */
+static uint8_t host_readback_mask(void)
+{
+    return (uint8_t)(host_param_value("readback_mask") & 0x0FU);
+}
+
 static uint8_t host_axis_has_readback(uint8_t addr)
 {
-    return (uint8_t)((addr == 1U) ? 1U : 0U);
+    uint8_t idx = control_index_of(addr);
+
+    if (idx == 0xFFU)
+    {
+        return 0U;
+    }
+    return (uint8_t)((host_readback_mask() >> idx) & 1U);
 }
+
+/* 每个轴各存一份最近一次回读到的数：遥测轮着查时，绝不能用 A 轴的读数去报 B 轴 */
+typedef struct
+{
+    uint8_t  have;         /* 收到过该轴的有效回包 */
+    uint8_t  what;         /* 最后一笔是 EMM_QUERY_* 的哪一项 */
+    int32_t  counts;       /* 0x36 */
+    int16_t  rpm;          /* 0x35 */
+    uint8_t  flag;         /* 0x3A */
+    uint32_t stamp_ms;     /* 数据时间戳：界面据此显示"多少秒前的数" */
+} HostAxisRead;
+
+static HostAxisRead host_axis_read[CONTROL_AXIS_COUNT];
+
+/* 遥测轮询走到哪了：一次只起一个事务，转一圈换下一个接了回读线的轴 */
+static uint8_t host_sweep_index = 0U;
 
 static void host_save_defer_req(const char *text, uint16_t len)
 {
@@ -598,6 +647,8 @@ static void host_save_defer_req(const char *text, uint16_t len)
 
 static void host_query_reset_all(void)
 {
+    uint8_t i;
+
     EmmParser_Reset(&host_emm_parser);
     EmmQuery_Reset(&host_emm_query);
     host_defer_line    = 0U;
@@ -606,6 +657,16 @@ static void host_query_reset_all(void)
     host_defer_req_len = 0U;
     host_defer_addr    = 0U;
     host_defer_what    = EMM_QUERY_NONE;
+    host_sweep_index   = 0U;    /* 轮询位置也归零，否则新会话从中间某个轴开始 */
+    for (i = 0U; i < CONTROL_AXIS_COUNT; i++)
+    {
+        host_axis_read[i].have     = 0U;
+        host_axis_read[i].what     = EMM_QUERY_NONE;
+        host_axis_read[i].counts   = 0;
+        host_axis_read[i].rpm      = 0;
+        host_axis_read[i].flag     = 0U;
+        host_axis_read[i].stamp_ms = 0U;
+    }
 }
 
 /* 回包到了：把数据补进应答，旧数据不装新（stamp 早于本次发出的不认） */
@@ -618,25 +679,57 @@ static uint8_t host_query_has_fresh_data(void)
     return (uint8_t)((host_emm_query.stamp_ms >= host_emm_query.sent_ms) ? 1U : 0U);
 }
 
+static HostAxisRead *host_read_of(uint8_t addr)
+{
+    uint8_t idx = control_index_of(addr);
+
+    if (idx == 0xFFU)
+    {
+        return 0;
+    }
+    return &host_axis_read[idx];
+}
+
+/* 把刚收到的回包落到该轴自己的格子里（遥测和 motor_query 都从这里取数） */
+static void host_query_store(void)
+{
+    HostAxisRead *r = host_read_of(host_emm_query.addr);
+
+    if (r == 0)
+    {
+        return;
+    }
+    r->have     = 1U;
+    r->what     = host_emm_query.what;
+    r->counts   = host_emm_query.counts;
+    r->rpm      = host_emm_query.rpm;
+    r->flag     = host_emm_query.flag;
+    r->stamp_ms = host_emm_query.stamp_ms;
+}
+
 static void host_query_answer(uint32_t now)
 {
+    HostAxisRead *r = host_read_of(host_defer_addr);
+
     host_body_ok(&host_out, host_defer_id);
     host_kv_u32(&host_out, "addr", (uint32_t)host_defer_addr);
 
     if (host_defer_what == EMM_QUERY_POS)
     {
-        host_kv_i32(&host_out, "counts", host_emm_query.counts);
-        host_kv_deg_x10(&host_out, "deg", Emm_CountsToDegX10(host_emm_query.counts));
+        host_kv_i32(&host_out, "counts", (r != 0) ? r->counts : 0);
+        host_kv_deg_x10(&host_out, "deg",
+                        Emm_CountsToDegX10((r != 0) ? r->counts : 0));
     }
     else if (host_defer_what == EMM_QUERY_VEL)
     {
-        host_kv_i32(&host_out, "rpm", (int32_t)host_emm_query.rpm);
+        host_kv_i32(&host_out, "rpm", (int32_t)((r != 0) ? r->rpm : 0));
     }
     else
     {
-        host_kv_u32(&host_out, "flag", (uint32_t)host_emm_query.flag);
+        host_kv_u32(&host_out, "flag", (uint32_t)((r != 0) ? r->flag : 0U));
     }
-    host_kv_u32(&host_out, "age_ms", EmmQuery_AgeMs(&host_emm_query, now));
+    host_kv_u32(&host_out, "age_ms",
+                (r != 0) ? (uint32_t)(now - r->stamp_ms) : 0U);
 
     (void)host_emit(host_defer_id, host_defer_req, host_defer_req_len);
     host_query_pending = 0U;
@@ -665,6 +758,8 @@ static void host_query_bad_reply_answer(void)
 /* 每轮都要调：收字节、推进事务、按需补发应答 */
 static void host_query_service(uint32_t now)
 {
+    uint8_t was_active = host_emm_query.active;
+
     (void)EmmQuery_Poll(&host_emm_query, &host_emm_parser, now);
 
     if (host_emm_query.bad_reply != 0U)
@@ -676,34 +771,64 @@ static void host_query_service(uint32_t now)
         }
         return;
     }
-    if (host_query_pending == 0U)
+
+    /* 事务从"在等"变成"结束了"且拿到了本次的新数据 = 这一笔查询成功 */
+    if ((was_active != 0U) && (host_emm_query.active == 0U) &&
+        host_query_has_fresh_data())
     {
-        return;                 /* 没有在等回包的查询 */
-    }
-    if ((host_emm_query.active == 0U) && host_query_has_fresh_data())
-    {
-        host_query_answer(now);
+        host_query_store();
+        if (host_query_pending != 0U)
+        {
+            host_query_answer(now);
+        }
+        else if (host_tele_axis != 0U)
+        {
+            /* 后台轮到的轴：这一拍就把它报上去，不用等下一拍 */
+            host_emit_telemetry(host_emm_query.addr);
+        }
         return;
     }
-    if (EmmQuery_Expired(&host_emm_query, now))
+
+    if ((host_emm_query.active != 0U) && EmmQuery_Expired(&host_emm_query, now))
     {
-        host_query_timeout_answer();
+        if (host_query_pending != 0U)
+        {
+            host_query_timeout_answer();
+        }
+        /* 后台查询超时：只记账，下一拍自动换下一个轴 */
     }
 }
 
-/* 遥测订阅了有回读的轴时，顺便起一次位置查询（不占 PC 的请求 id） */
-static void host_query_background(uint32_t now)
+/* 遥测开着的时候轮着查接了回读线的轴：一次只起一个事务，
+ * 不占 PC 的请求 id，也不和 PC 正在等的查询抢（PC 的优先）。 */
+static void host_query_sweep(uint32_t now)
 {
-    if (host_query_pending != 0U)
+    uint8_t mask = host_readback_mask();
+    uint8_t i;
+    uint8_t idx;
+
+    if (mask == 0U)
     {
         return;
     }
-    if (host_emm_query.active != 0U)
+    if ((host_query_pending != 0U) || (host_emm_query.active != 0U))
     {
         return;
     }
-    (void)EmmQuery_Start(&host_emm_query, 1U, EMM_QUERY_POS, now,
-                         (uint32_t)host_param_value("query_timeout_ms"));
+    for (i = 0U; i < CONTROL_AXIS_COUNT; i++)
+    {
+        idx = (uint8_t)((host_sweep_index + i) % CONTROL_AXIS_COUNT);
+        if (((mask >> idx) & 1U) == 0U)
+        {
+            continue;
+        }
+        if (EmmQuery_Start(&host_emm_query, control_addr_table[idx], EMM_QUERY_POS,
+                           now, (uint32_t)host_param_value("query_timeout_ms")))
+        {
+            host_sweep_index = (uint8_t)((idx + 1U) % CONTROL_AXIS_COUNT);
+            return;
+        }
+    }
 }
 
 /* ==========================================================================
@@ -739,11 +864,12 @@ static void host_emit_link_event(const char *state)
     (void)host_out_finish(&host_evt);
 }
 
-/* 遥测：有回读的轴报实测计数/角度，没接回读的轴显式写 readback=0 */
+/* 遥测：有回读的轴报该轴自己最近一次实测值，没接回读的轴显式写 readback=0 */
 static void host_emit_telemetry(uint8_t addr)
 {
-    ControlAxis *ax = control_get(addr);
-    uint32_t     now;
+    ControlAxis  *ax = control_get(addr);
+    HostAxisRead *r  = host_read_of(addr);
+    uint32_t      now;
 
     if (ax == 0)
     {
@@ -755,12 +881,23 @@ static void host_emit_telemetry(uint8_t addr)
     host_kv_u32(&host_evt, "addr", ax->addr);
     host_kv_u32(&host_evt, "rpm", (uint32_t)((ax->mode == CONTROL_MODE_SPEED) ? ax->rpm : 0U));
 
-    if (host_axis_has_readback(addr) && (host_emm_query.have_data != 0U))
+    if (host_axis_has_readback(addr) && (r != 0) && (r->have != 0U))
     {
         host_kv_u32(&host_evt, "readback", 1U);
-        host_kv_i32(&host_evt, "counts", host_emm_query.counts);
-        host_kv_deg_x10(&host_evt, "deg", Emm_CountsToDegX10(host_emm_query.counts));
-        host_kv_u32(&host_evt, "age_ms", EmmQuery_AgeMs(&host_emm_query, now));
+        if (r->what == EMM_QUERY_VEL)
+        {
+            host_kv_i32(&host_evt, "rpm_measured", (int32_t)r->rpm);
+        }
+        else if (r->what == EMM_QUERY_FLAG)
+        {
+            host_kv_u32(&host_evt, "flag", (uint32_t)r->flag);
+        }
+        else
+        {
+            host_kv_i32(&host_evt, "counts", r->counts);
+            host_kv_deg_x10(&host_evt, "deg", Emm_CountsToDegX10(r->counts));
+        }
+        host_kv_u32(&host_evt, "age_ms", (uint32_t)(now - r->stamp_ms));
     }
     else
     {
@@ -912,10 +1049,39 @@ static uint8_t host_arg_u32(uint16_t id, const char *text, uint32_t min,
  * 命令实现
  * ========================================================================== */
 
+/* 按 readback_mask 生成 hello 里的回读名单，例如 "1/3/4/5"；一个都没有时给 "-" */
+static void host_readback_list(char *buf, uint8_t cap)
+{
+    uint8_t mask = host_readback_mask();
+    uint8_t i;
+    uint8_t n = 0U;
+
+    for (i = 0U; i < CONTROL_AXIS_COUNT; i++)
+    {
+        if (((mask >> i) & 1U) == 0U)
+        {
+            continue;
+        }
+        if (n > 0U)
+        {
+            if (n >= (uint8_t)(cap - 2U)) { break; }
+            buf[n++] = '/';
+        }
+        if (n >= (uint8_t)(cap - 2U)) { break; }
+        buf[n++] = (char)('0' + (char)control_addr_table[i]);
+    }
+    if (n == 0U)
+    {
+        buf[n++] = '-';
+    }
+    buf[n] = '\0';
+}
+
 static void host_cmd_hello(uint16_t id, uint8_t nargs)
 {
     uint32_t pv;
     uint32_t session;
+    char     rb[16];
 
     if (!host_require_argc(id, nargs, 2U))
     {
@@ -950,8 +1116,9 @@ static void host_cmd_hello(uint16_t id, uint8_t nargs)
     host_out_char(&host_out, ','); host_out_str(&host_out, "boot=");
     host_out_hex32(&host_out, host_boot_id);
     host_kv_str(&host_out, "axes", "1/3/4/5");
-    /* 只有 Z 轴驱动器 TXD 接了 PA3；没接线时查询会超时回 E04，不会编造读数 */
-    host_kv_str(&host_out, "readback", HOST_READBACK_AXES);
+    /* 名单里的轴才是接了回读线的（readback_mask）；不在名单里的轴查询会回 E11 */
+    host_readback_list(rb, (uint8_t)sizeof(rb));
+    host_kv_str(&host_out, "readback", rb);
 }
 
 static void host_cmd_ping(uint16_t id, uint8_t nargs)
@@ -1636,6 +1803,7 @@ static void host_protocol_init(void)
 
     host_session_clear();
     host_query_reset_all();
+    host_params_restore_defaults();
     control_reset_state();
 }
 
@@ -1697,16 +1865,25 @@ static void host_protocol_task(void)
     }
 
     /* 7. 遥测：默认关，只有 tele_on 订阅后才发。
-     *    订阅的是有回读的轴时，顺便起一次位置查询，下一拍就有实测值。 */
+     *    每一拍轮着查一个接了回读线的轴（readback_mask），并且把订阅轴 +
+     *    其余接了回读的轴都各报一帧，所以界面上四个轴的实测值会一起刷新。 */
     if ((host_ready) && (host_tele_axis != 0U) && (host_tele_interval_ms > 0U))
     {
         if ((int32_t)(now - host_tele_next_ms) >= 0)
         {
-            if (host_axis_has_readback(host_tele_axis))
-            {
-                host_query_background(now);
-            }
+            uint8_t i;
+
+            host_query_sweep(now);
             host_emit_telemetry(host_tele_axis);
+            for (i = 0U; i < CONTROL_AXIS_COUNT; i++)
+            {
+                uint8_t a = control_addr_table[i];
+
+                if ((a != host_tele_axis) && (host_axis_has_readback(a)))
+                {
+                    host_emit_telemetry(a);
+                }
+            }
             host_tele_next_ms = now + (uint32_t)host_tele_interval_ms;
         }
     }

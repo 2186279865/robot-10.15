@@ -277,5 +277,48 @@ class TestEventsAndSafety(ClientTestBase):
         self.assertFalse(self.client.pending)
 
 
+class TestReadbackMask(ClientTestBase):
+    """readback_mask 决定哪些轴接了回读线；模拟后端必须和固件一致。"""
+
+    def test_mask_switches_readback_axes(self):
+        self.connect()
+        self.assertEqual(self.client.readback_axes, (1,))
+
+        self.client.send("param_set", "readback_mask", 15)
+        self.pump()
+        self.assertEqual(self.device.readback_list(), "1/3/4/5")
+        for addr in P.VALID_AXES:
+            self.assertTrue(self.device.axes[addr].readback_capable)
+
+        # 重新握手后 hello 要如实报出四个轴
+        self.client.send("hello", P.PROTOCOL_VERSION, 1)
+        self.pump()
+        self.assertEqual(self.client.readback_axes, P.VALID_AXES)
+
+    def test_mask_out_of_range_is_refused(self):
+        self.connect()
+        self.client.send("param_set", "readback_mask", 16)
+        self.pump()
+        errs = self.polled("err")
+        self.assertTrue(errs)
+        self.assertEqual(errs[-1].data.get("code"), "E02")
+        self.assertEqual(self.device.readback_list(), "1")
+
+    def test_unwired_axis_query_reports_e11(self):
+        self.connect()
+        self.client.send("motor_query", 4, "pos")
+        self.pump()
+        errs = self.polled("err")
+        self.assertTrue(errs)
+        self.assertEqual(errs[-1].data.get("code"), "E11")
+
+    def test_reset_restores_default_mask(self):
+        self.connect()
+        self.client.send("param_set", "readback_mask", 15)
+        self.pump()
+        self.device.reset()
+        self.assertEqual(self.device.readback_list(), "1")
+
+
 if __name__ == "__main__":
     unittest.main()

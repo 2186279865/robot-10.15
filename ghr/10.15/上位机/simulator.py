@@ -37,10 +37,8 @@ class AxisState:
     position_counts: int = 0
     stall: bool = False
     last_readback_ms: int = 0
-
-    @property
-    def readback_capable(self) -> bool:
-        return self.addr in READBACK_AXES
+    #: 该轴是否接了驱动器回读线（由 readback_mask 决定，可在线改）
+    readback_capable: bool = False
 
     @property
     def running(self) -> bool:
@@ -75,6 +73,7 @@ class SimulatedDevice:
         self.axes: Dict[int, AxisState] = {addr: AxisState(addr=addr) for addr in P.VALID_AXES}
         self.gripper = GripperState()
         self.params: Dict[str, object] = dict(P.PARAM_DEFAULTS)
+        self._apply_readback_mask()
         self.stop_latched = False
         self.stop_latch_reason = ""
         self.control_owner = "pc"
@@ -163,9 +162,19 @@ class SimulatedDevice:
                 proto=P.PROTOCOL_VERSION,
                 boot=f"{self._next_boot:08X}",
                 axes="1/3/4/5",
-                readback="1",
+                readback=self.readback_list() or "-",
             )
         ]
+
+    def readback_list(self) -> str:
+        """接了回读线的轴，形如 "1/3/4/5"；和固件 hello 里的 readback 字段一致。"""
+        return "/".join(str(a) for a in P.VALID_AXES if self.axes[a].readback_capable)
+
+    def _apply_readback_mask(self) -> None:
+        """readback_mask 一变就刷新各轴的回读能力（bit0=Z、bit1=托盘、bit2=X、bit3=Y）。"""
+        mask = int(self.params.get("readback_mask", 1))  # type: ignore[arg-type]
+        for idx, addr in enumerate(P.VALID_AXES):
+            self.axes[addr].readback_capable = bool((mask >> idx) & 1)
 
     def _cmd_ping(self, rid: int, **_: object) -> List[bytes]:
         return [P.encode_ok(rid, ms=self.now_ms())]
@@ -300,6 +309,8 @@ class SimulatedDevice:
             return [P.encode_err(rid, "E02", reason="unknown_param")]
         if name in ("speed_rpm_max",) and value < 1:
             return [P.encode_err(rid, "E02", reason="range")]
+        if name == "readback_mask" and not 1 <= value <= 15:
+            return [P.encode_err(rid, "E02", reason="range")]
         before = self.params[name]
         self.params[name] = value
         if name == "gripper_open_deg":
@@ -310,6 +321,8 @@ class SimulatedDevice:
             self.gripper.step_deg = value
         elif name == "gripper_settle_ms":
             self.gripper.settle_ms = value
+        elif name == "readback_mask":
+            self._apply_readback_mask()
         return [P.encode_ok(rid, name=name, before=before, value=value)]
 
     def _cmd_tele_on(self, rid: int, addr: int, interval_ms: int) -> List[bytes]:
@@ -417,9 +430,11 @@ class SimulatedDevice:
         return self.now_ms() < self.gripper.busy_until_ms
 
     def reset(self) -> None:
-        """模拟 MCU 复位：运动清空、会话与缓冲清空。"""
+        """模拟 MCU 复位：运动清空、会话与缓冲清空、运行参数回默认。"""
         self.framing.reset()
         self.session.clear()
+        self.params = dict(P.PARAM_DEFAULTS)
+        self._apply_readback_mask()
         for axis in self.axes.values():
             axis.enabled = False
             axis.rpm = 0

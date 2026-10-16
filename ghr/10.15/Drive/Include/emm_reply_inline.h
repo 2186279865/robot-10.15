@@ -366,14 +366,4 @@ static uint8_t EmmQuery_Expired(EmmQuery *q, uint32_t now_ms)
     return 1U;
 }
 
-/* 读到的数据有多旧（毫秒）。从未读过返回 0xFFFFFFFF。 */
-static uint32_t EmmQuery_AgeMs(const EmmQuery *q, uint32_t now_ms)
-{
-    if (q->have_data == 0U)
-    {
-        return 0xFFFFFFFFUL;
-    }
-    return (uint32_t)(now_ms - q->stamp_ms);
-}
-
 #endif /* __EMM_REPLY_INLINE_H */

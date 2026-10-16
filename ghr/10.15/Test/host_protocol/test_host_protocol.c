@@ -1035,6 +1035,110 @@ static void test_readback_query(void)
     expect_contains("deg=180.0");
 }
 
+/* 多轴回读：readback_mask 决定哪些轴接了回读线；
+ * 遥测开着时四轴轮着查，接到哪个轴的回包就报哪个轴的实测值。 */
+static void test_multiaxis_readback(void)
+{
+    static const uint8_t  axes[4]   = { 1U, 3U, 4U, 5U };
+    static const uint32_t counts[4] = { 4096UL, 12288UL, 16384UL, 20480UL };
+    uint8_t reply[8];
+    char    want[64];
+    uint8_t i;
+
+    cur_test = "multiaxis";
+    reset_world();
+    do_hello();
+
+    /* 默认只接了 Z 轴：别的轴查询必须如实回 E11，不许编数据 */
+    txoff = 0; txlog_len = 0;
+    send("200,motor_query,3,pos");
+    expect("#200,err,E11");
+
+    /* 接线变了只改参数，不用重烧固件 */
+    txoff = 0; txlog_len = 0;
+    send("201,param_set,readback_mask,15");
+    expect("#201,ok,");
+    expect_contains("name=readback_mask");
+
+    txoff = 0; txlog_len = 0;
+    send("202,hello,1,1");
+    expect("#202,ok,");
+    expect_contains("readback=1/3/4/5");
+
+    /* 非订阅的轴也能单独查 */
+    txoff = 0; txlog_len = 0;
+    send("203,motor_query,3,pos");
+    check(emm_tx[0] == 3U, "query frame goes to the asked axis");
+    reply[0] = 3U;    reply[1] = 0x36U; reply[2] = 0x00U;
+    reply[3] = 0x00U; reply[4] = 0x00U; reply[5] = 0x30U; reply[6] = 0x00U; reply[7] = 0x6BU;
+    drv_reply(reply, 8U);
+    pump();
+    expect("#203,ok,");
+    expect_contains("addr=3");
+    expect_contains("counts=12288");
+    expect_contains("deg=67.5");
+
+    /* 遥测一拍 200ms，把查询超时放宽，免得后台查询在两次遥测之间就过期 */
+    txoff = 0; txlog_len = 0;
+    send("204,param_set,query_timeout_ms,6000");
+    expect("#204,ok,");
+
+    txoff = 0; txlog_len = 0;
+    send("205,tele_on,1,200");
+    expect("#205,ok,");
+
+    for (i = 0U; i < 4U; i++)
+    {
+        uint8_t slot;
+        uint32_t value = 0UL;
+
+        /* 一拍只起一个查询事务，顺序就是 1 -> 3 -> 4 -> 5 */
+        txoff = 0; txlog_len = 0;
+        fake_ms += 200U;
+        pump();
+        expect("#0,tele,");                     /* 订阅的 1 号轴每拍都报 */
+        expect_contains("addr=1");
+        check(emm_tx_len == 3U, "sweep frame is 3 bytes");
+        check(emm_tx[1] == 0x36U, "sweep asks for position");
+        check(emm_tx[0] == axes[i], "sweep polls the readback axes in turn");
+
+        for (slot = 0U; slot < 4U; slot++)
+        {
+            if (axes[slot] == axes[i]) { value = counts[slot]; }
+        }
+
+        txoff = 0; txlog_len = 0;
+        reply[0] = axes[i]; reply[1] = 0x36U; reply[2] = 0x00U;
+        reply[3] = (uint8_t)(value >> 24);
+        reply[4] = (uint8_t)(value >> 16);
+        reply[5] = (uint8_t)(value >> 8);
+        reply[6] = (uint8_t)(value);
+        reply[7] = 0x6BU;
+        drv_reply(reply, 8U);
+        pump();
+        expect("#0,tele,");
+        snprintf(want, sizeof(want), "addr=%u", (unsigned)axes[i]);
+        expect_contains(want);
+        expect_contains("readback=1");
+        snprintf(want, sizeof(want), "counts=%lu", (unsigned long)value);
+        expect_contains(want);
+    }
+
+    /* 轮完一圈接着回到 1 号轴 */
+    txoff = 0; txlog_len = 0;
+    fake_ms += 200U;
+    pump();
+    check(emm_tx[0] == 1U, "sweep wraps back to the first readback axis");
+
+    /* 参数改回默认，避免影响后面的用例 */
+    txoff = 0; txlog_len = 0;
+    send("206,param_set,readback_mask,1");
+    expect("#206,ok,");
+    txoff = 0; txlog_len = 0;
+    send("207,param_set,query_timeout_ms,100");
+    expect("#207,ok,");
+}
+
 int main(void)
 {
     printf("host protocol tests\n");
@@ -1055,6 +1159,7 @@ int main(void)
     test_readback_query();
     test_link_timeout();
     test_split_frames();
+    test_multiaxis_readback();
 
     {
         FILE *f = fopen("frames.txt", "wb");
