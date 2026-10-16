@@ -1,91 +1,209 @@
 #include "stm32f4xx.h"
 #include "led.h"
 #include "delay.h"
-#include "servo.h"
 #include "gripper.h"
 #include "key.h"
 #include "stepper.h"
 
-/* æ¨¡å—å®žçŽ°ï¼ˆæœ¬å·¥ç¨‹ä¸æŠŠå•ç‹¬çš„ .c åŠ è¿› Keil å·¥ç¨‹ï¼Œæ‰€ä»¥åœ¨è¿™é‡Œå†…è”è¿›æ¥ï¼‰ã€‚
- * ä»¥åŽå¦‚æžœç”¨ Keil çš„ Add Existing Files æŠŠ gripper.c / key.c / stepper.c
- * æ­£å¼åŠ è¿›å·¥ç¨‹ï¼ŒæŠŠä¸‹é¢è¿™å‡ è¡Œåˆ æŽ‰å³å¯ï¼ŒæŽ¥å£ä¸ç”¨æ”¹ã€‚ */
+/* Ä£¿éÊµÏÖ£¨±¾¹¤³Ì²»°Ñµ¥¶ÀµÄ .c ¼Ó½ø Keil ¹¤³Ì£¬ËùÒÔÔÚÕâÀïÄÚÁª½øÀ´£©¡£
+ * ÒÔºóÈç¹ûÓÃ Keil µÄ Add Existing Files °Ñ gripper.c / key.c / stepper.c
+ * ÕýÊ½¼Ó½ø¹¤³Ì£¬°ÑÏÂÃæÕâ¼¸ÐÐÉ¾µô¼´¿É£¬½Ó¿Ú²»ÓÃ¸Ä¡£ */
 #include "gripper_inline.h"
 #include "key_inline.h"
 #include "stepper_inline.h"
 
-/* ===================== æ­¥è¿›ç”µæœº + æŠ“å¤¹ï¼ˆæŒ‰é”®ç‰ˆï¼‰ =====================
- * ä¸Šç”µé¡ºåºç…§ä¾‹36ï¼šFE åœè½¦ -> F3 ä½¿èƒ½ -> ç­‰ 500msã€‚
- * æŒ‰ PA0 ä¸€ä¸‹ï¼šå…¨éƒ¨ç”µæœºï¼ˆåœ°å€ 1~4ï¼‰æŒ‰é€Ÿåº¦æ¨¡å¼è½¬ NUDGE_MS æ¯«ç§’åŽè‡ªåŠ¨åœè½¦ï¼Œ
- *              åŒæ—¶æŠ“å¤¹æ”¶ç´§ä¸€æ­¥ 45 åº¦ã€‚
+/* ================= PA0 °´¼ü -> 1 ºÅµç»ú ×ª / Í££¨toggle£© =================
+ * Ö»²Ù×÷ 1 ºÅµç»ú£¨µØÖ· 01£©¡£°´Ò»ÏÂ¿ªÊ¼Á¬Ðø×ª£¬ÔÙ°´Ò»ÏÂÍ£Ö¹£»¿ÉÒÔ·´¸´°´¡£
  *
- * å¦‚æžœç”µæœºè¿˜æ˜¯ä¸åŠ¨ï¼Œçœ‹ LED çš„å¼€æœºé—ªçƒæ¬¡æ•°ï¼ˆä¸²å£å›žçŽ¯è‡ªæ£€ç»“æžœï¼‰ï¼š
- *      é—ª 1 æ¬¡ = PA2â†”PA3 çŸ­æŽ¥æ—¶å›žæ˜¾æ­£å¸¸
- *      é—ª 2 æ¬¡ = PA2 ä¸Šæœ‰å¤–éƒ¨æŽ¥çº¿ä½†æ²¡å›žæ˜¾
- *      é—ª 3 æ¬¡ = PA2 ä¸Šä»€ä¹ˆéƒ½æ²¡æŽ¥  <- é©±åŠ¨å™¨ä¿¡å·çº¿æ²¡æŽ¥åˆ° PA2 æ—¶å°±æ˜¯è¿™ä¸ª
- * ================================================================== */
+ *   ÉÏµç£ºÉÁ 1 ÏÂ£¨³ÌÐò»î×Å£©-> 0E 52 ½â¶Â×ª -> FE Í£³µ -> F3 Ê¹ÄÜ -> µÈ 500ms
+ *   °´ PA0 µÚ 1 ´Î£º·¢ F6 ËÙ¶ÈÄ£Ê½£¬1 ºÅµç»ú³ÖÐø×ª£¬LED ³£ÁÁ
+ *   °´ PA0 µÚ 2 ´Î£º·¢ FE Á¢¼´Í£Ö¹£¬LED Ãð
+ *   ÔÙ°´£º¼ÌÐø×ª / ÔÙÍ££¬Èç´Ë·´¸´
+ *
+ * ¡¾±¾°æºÍÉÏÒ»°æµÄÇø±ð£ºÆð×ª²ÎÊý¡¿
+ *   ÉÏÒ»°æÓÃ RPM=300¡¢acc=128¡£¼ÓËÙ¶ÈµµÎ»Ô½´ó£¬Çý¶¯Æ÷µÄ¼ÓËÙÐ±ÆÂÔ½»º¡¢
+ *   Æð×ªË²¼äµÄÁ¦¾ØÔ½Ð¡£»300RPM ¶ÔÐ¡µç»úÒ²Æ«¿ì£¬Æð×ªÈÝÒ×´¥·¢¶Â×ª±£»¤ ->
+ *   Ò»¶¯²»¶¯¡£±¾°æ¸Ä³É acc=1£¨½üºõÖ±½ÓÆô¶¯£¬Æð×ª×îÃÍ£©+ RPM=60£¨ÏÈÂý£¬
+ *   È·±£ÄÜ×ªÆðÀ´£©£¬²¢°Ñ"×ªËÙ+¼ÓËÙ¶È"×ö³É½×ÌÝ£ºµÚÒ»´Î°´²»¶¯¾Í×Ô¶¯»»ÏÂÒ»µµ
+ *   ÖØ·¢£¬ÖÁÉÙÄÜ×Ô¼ºÕÒµ½Ò»×éÄÜ×ªµÄ²ÎÊý¡£RUN_STARTUP_TUNE=0 ¿É¹Øµô×Ô¶¯»»µµ¡£
+ *
+ * ËµÃ÷£º±¾¹¤³ÌÖ»·¢²»ÊÕ£¬PA2 µ¥Ïß½Óµ½ 1 ºÅÇý¶¯Æ÷µÄ RXD£»Çý¶¯Æ÷ TXD ²»ÓÃ½Ó¡£
+ * ÉÏµç»áÏÈ·¢ FE Í£³µ£¬»úÐµ¸ºÔØÈç¹ûÍ£ÔÚÐÐ³ÌÖÐ¼äÒª×¢ÒâÏÈÊÖ¶¯°Úµ½°²È«Î»ÖÃ¡£
+ *
+ * Èç¹û»¹ÊÇ²»¶¯£¬°´Ë³ÐòÅÅ²é£¨Ç°Á½ÌõÊÇÓ²¼þ£¬´úÂë½â¾ö²»ÁË£©£º
+ *   1. Çý¶¯Æ÷ÓÐÃ»ÓÐ½Ó 12~48V µç»úµçÔ´£¿Ö»¿¿ STM32 µÄ USB/5V ¹©µçµç»ú²»¶¯¡£
+ *   2. STM32 µÄ GND ºÍÇý¶¯Æ÷µçÔ´µÄ GND ±ØÐë½ÓÔÚÒ»Æð£¨¹²µØ£©¡£²»¹²µØÊ±Çý¶¯Æ÷
+ *      ÊÕµ½µÄÊÇÐü¿ÕÂÒµçÆ½£¬±íÏÖ¾ÍÊÇ"³ÌÐòÔÚÅÜµ«µç»úÎÆË¿²»¶¯"¡£
+ *   3. ¿´ LED1£¨PC13£©£ºÉÏµçÉÁ 1 ÏÂ¡¢¿ÕÏÐÊ±Ã¿ 1.2 ÃëÉÁÒ»ÏÂ = ³ÌÐòÔÚÅÜ£»
+ *      °´¼üºó³£ÁÁ = °´¼üÒÑÏìÓ¦£¬´ËÊ±²»¶¯¾ÍÊÇÇý¶¯Æ÷ÄÇ±ßµÄÊÂ¡£
+ *   4. È·ÈÏ PA2 ½ÓµÄÊÇ 1 ºÅÇý¶¯Æ÷µÄ RXD£»È·ÈÏ¸ÃÇý¶¯Æ÷µØÖ·²¦Âë = 1£¨Ö¡Í· [01]£©¡£
+ *      ËùÓÐÇý¶¯Æ÷¹ÒÍ¬Ò»Ìõ PA2 ×ÜÏßÉÏ£¬¿¿µØÖ·Çø·Ö¡£
+ *   5. ÓÃÍ¬Ä¿Â¼µÄ main_diag.c£¨Î»ÖÃÄ£Ê½×ß 1 È¦£©µ¥¶ÀÑéÖ¤Ó²¼þÍ¨Â·£º
+ *      ÄÜ×ª = Ó²¼þÃ»ÎÊÌâ£¬ÎÊÌâÔÚËÙ¶ÈÄ£Ê½²ÎÊý»ò°´¼ü£»²»ÄÜ×ª = Ó²¼þ/½ÓÏßÎÊÌâ¡£
+ * ========================================================================= */
 
-#define NUDGE_RUN_MS   1000UL   /* æ¯æ¬¡æŒ‰é”®ç”µæœºè½¬åŠ¨æ—¶é•¿ */
-#define NUDGE_RPM      STEPPER_SPEED_RPM
+#define MOTOR_ADDR        1U        /* 1 ºÅµç»ú£»ÓëÀý36 µÄ Z_ADDRESS Ò»ÖÂ */
+
+#define MOTOR_RESEND_MS   250UL     /* ÔËÐÐÖÐ²¹·¢ F6 µÄ¼ä¸ô£¬·ÀÊ×Ö¡¶ªÊ§ */
+#define FRAME_GAP_MS      10UL      /* Á¬ÐøÁ½Ö¡Ö®¼äµÄ¼ä¸ô£¬±ÜÃâÇý¶¯Æ÷´¦Àí³åÍ» */
+
+#define BOOT_BLINK_MS     250UL     /* ÉÏµçÉÁµÆ / °´¼ü·´À¡µÄÁÁÃðÊ±³¤ */
+#define IDLE_BLINK_ON_MS  60UL      /* ¿ÕÏÐÐÄÌø£ºÁÁ¶à¾Ã */
+#define IDLE_BLINK_MS     1200UL    /* ¿ÕÏÐÐÄÌø£ºÒ»¸öÖÜÆÚ */
+
+/* Æð×ª²ÎÊý½×ÌÝ£º×ªËÙ RPM¡¢¼ÓËÙ¶ÈµµÎ»¡£°´²»¶¯¾Í»»ÏÂÒ»µµ¡£ */
+#define RUN_STARTUP_TUNE  1U        /* 1 = ÔÊÐí×Ô¶¯»»µµÖØÊÔ£»0 = Ö»ÓÃµÚ 1 µµ */
+#define TUNE_RETRY_MS     1500UL    /* Ã¿Ò»µµÊÔ¶à¾Ãºó»»ÏÂÒ»µµ */
+
+typedef struct { uint16_t rpm; uint8_t accel; } MotorRunCfg;
+
+static const MotorRunCfg motor_tune[] = {
+    {  60U,   1U },     /* µÚ 1 µµ£ºÂýËÙ + ½üºõÖ±½ÓÆô¶¯£¬Æð×ª×îÃÍ */
+    {  60U,   0U },     /* µÚ 2 µµ£ºÍêÈ«Ö±½ÓÆô¶¯ */
+    { 120U,   1U },     /* µÚ 3 µµ */
+    { 300U,   1U },     /* µÚ 4 µµ£ººÍ¾É°æ×ªËÙÒ»ÖÂ */
+    {  30U,   1U }      /* µÚ 5 µµ£º×îÂý */
+};
+
+#define TUNE_COUNT ((uint8_t)(sizeof(motor_tune) / sizeof(motor_tune[0])))
+
+/* ---------------- Ð¡¹¤¾ß ---------------- */
 
 static void led_blink(uint8_t times)
 {
     uint8_t i;
+
     for (i = 0U; i < times; i++)
     {
         LED1_ON;
-        Delay_ms(250);
+        Delay_ms(BOOT_BLINK_MS);
         LED1_OFF;
-        Delay_ms(250);
+        Delay_ms(BOOT_BLINK_MS);
     }
-    Delay_ms(700);
+}
+
+static void motor_enable(uint8_t addr, uint8_t on)
+{
+    (void)Stepper_EnableAt(addr, on);
+}
+
+static void motor_speed(uint8_t addr, uint8_t dir, uint16_t rpm, uint8_t accel)
+{
+    (void)Stepper_RunSpeedAt2(addr, dir, rpm, accel);   /* F6£º³ÖÐø×ª£¬²»×Ô¶¯Í£ */
+}
+
+static void motor_stop(uint8_t addr)
+{
+    /* Á¬·¢Á½Ö¡£¬±ÜÃâµ¥Ö¡¶ªÊ§ºóµç»úÍ£²»ÏÂÀ´ */
+    (void)Stepper_StopAt(addr);
+    Delay_ms(FRAME_GAP_MS);
+    (void)Stepper_StopAt(addr);
 }
 
 int main(void)
 {
-    uint32_t ms = 0U;
-    uint8_t  loop;
-    uint8_t  step_dir = STEPPER_DIR_POSITIVE;    /* æ¯æ¬¡æŒ‰é”®æ–¹å‘äº¤æ›¿ */
+    uint8_t  motor_state = 0U;      /* 0 = Í££¬1 = ×ª */
+    uint8_t  tune_index  = 0U;      /* µ±Ç°Æð×ª²ÎÊýµµÎ» */
+    uint32_t ms          = 0U;
+    uint32_t last_resend = 0U;
+    uint32_t last_tune   = 0U;
+    uint32_t blink_last  = 0U;
 
     Delay_Init();
     LED_Init();
     Key_Init();
-    Servo_Init();
-    Gripper_Init();
     Stepper_Init();
 
-    /* å¼€æœºï¼šä¸²å£å›žçŽ¯è‡ªæ£€ç»“æžœç”¨ LED æŠ¥å‘Š */
-    loop = Stepper_LoopbackTest();
-    if (loop == 1U)      { led_blink(1U); }
-    else if (loop == 2U) { led_blink(2U); }
-    else if (loop == 0U) { led_blink(3U); }
-    else                 { led_blink(5U); }
+    /* ÉÏµç×Ô¼ì£ºÉÁ 1 ÏÂ = ³õÊ¼»¯Íê³É¡¢³ÌÐòÒÑ¾­ÅÜµ½Ö÷Ñ­»· */
+    led_blink(1U);
 
-    /* ç…§ä¾‹36 çš„é¡ºåºï¼šå…¨éƒ¨åœè½¦ -> å…¨éƒ¨ä½¿èƒ½ -> ç­‰ 500ms */
-    (void)Stepper_StopAll();
-    (void)Stepper_EnableAll(1U);
+    /* ÕÕÀý36 µÄÉÏµçË³Ðò£ºÍ£³µ -> Ê¹ÄÜ -> µÈ 500ms£¬Ö®ºóÇý¶¯Æ÷²ÅÈÏËÙ¶ÈÖ¸Áî */
+    (void)Stepper_ResetStallAt(MOTOR_ADDR);     /* 0E 52£ºÇåÒ»´Î¶Â×ª±£»¤ */
+    Delay_ms(FRAME_GAP_MS);
+    motor_stop(MOTOR_ADDR);
+    Delay_ms(FRAME_GAP_MS);
+    motor_enable(MOTOR_ADDR, 1U);
     Delay_ms(500UL);
 
     LED1_OFF;
+    blink_last = ms;
 
     while (1)
     {
+        /* ------------- ½Ó°´¼ü£¨1ms ÂÖÑ¯£¬ÄÚ²¿ 20ms Ïû¶¶£¬³¤°´²»Á¬·¢£© ------------- */
         if (Key_Poll(ms))
         {
-            if (Gripper_Grab())
+            if (motor_state == 0U)
+            {
+                /* °´Ò»ÏÂ£º1 ºÅµç»ú¿ªÊ¼Á¬Ðø×ª£¨¹Ì¶¨Ò»¸ö·½Ïò£¬±ãÓÚ¹Û²ì£© */
+                motor_state = 1U;
+                tune_index  = 0U;
+                last_resend = ms;
+                last_tune   = ms;
+                blink_last  = ms;
+                motor_speed(MOTOR_ADDR, STEPPER_DIR_POSITIVE,
+                            motor_tune[0].rpm, motor_tune[0].accel);
+                LED1_ON;                                 /* ³£ÁÁ = ÕýÔÚ×ª */
+            }
+            else
+            {
+                /* ÔÙ°´Ò»ÏÂ£ºÍ£Ö¹×ª¶¯ */
+                motor_state = 0U;
+                motor_stop(MOTOR_ADDR);
+                LED1_OFF;
+                blink_last = ms;
+            }
+        }
+
+        if (motor_state != 0U)
+        {
+            /* ÔËÐÐÖÐ£ºÃ¿¸ô MOTOR_RESEND_MS ²¹·¢Ò»Ö¡ F6£¬Ê×Ö¡¶ªÁËÒ²ÄÜ×ªÆðÀ´ */
+            if ((uint32_t)(ms - last_resend) >= MOTOR_RESEND_MS)
+            {
+                last_resend = ms;
+                motor_speed(MOTOR_ADDR, STEPPER_DIR_POSITIVE,
+                            motor_tune[tune_index].rpm, motor_tune[tune_index].accel);
+            }
+
+#if RUN_STARTUP_TUNE
+            /* Ö»·¢²»ÊÕ£¬Ìý²»µ½Çý¶¯Æ÷»Ø»°£¬ËùÒÔÓÃ"»»²ÎÊý"´úÌæÅÐ¶Ï£º
+             * Ã¿Ò»µµÅÜÂú TUNE_RETRY_MS ¾Í»»ÏÂÒ»µµÔÙ·¢£»µ½×îºóÒ»µµ¾Í·´¸´ÓÃËü¡£
+             * µç»ú¿ªÊ¼×ª = ÄÇÒ»µµ¿ÉÓÃ£»Ò»Ö±²»×ª = Ó²¼þ/½ÓÏßÎÊÌâ¡£ */
+            if ((uint32_t)(ms - last_tune) >= TUNE_RETRY_MS)
+            {
+                last_tune = ms;
+
+                if ((uint8_t)(tune_index + 1U) < TUNE_COUNT)
+                {
+                    tune_index++;
+                    last_resend = ms;
+                    motor_speed(MOTOR_ADDR, STEPPER_DIR_POSITIVE,
+                                motor_tune[tune_index].rpm, motor_tune[tune_index].accel);
+                }
+            }
+#endif
+        }
+        else
+        {
+            /* ¿ÕÏÐ£ºÂýÉÁÒ»ÏÂ£¬ËµÃ÷³ÌÐò»¹»î×Å¡¢°´¼üÕýÔÚ±»ÂÖÑ¯ */
+            uint32_t t = (uint32_t)(ms - blink_last);
+
+            if (t < IDLE_BLINK_ON_MS)
             {
                 LED1_ON;
+            }
+            else if (t >= IDLE_BLINK_MS)
+            {
+                LED1_OFF;
+                blink_last = ms;
             }
             else
             {
                 LED1_OFF;
             }
-
-            /* å…¨éƒ¨ç”µæœºèµ°ä¸€æ®µï¼Œç„¶åŽè‡ªåŠ¨åœè½¦ */
-            (void)Stepper_NudgeAll(step_dir, NUDGE_RPM, NUDGE_RUN_MS);
-            step_dir = (uint8_t)(1U - step_dir);
         }
 
-        Key_TaskDelay();
+        Key_TaskDelay();            /* 1ms ½Ú×à£¬Key_Poll µÄÏû¶¶¿¿Õâ¸ö²½½ø */
         ms += KEY_TASK_MS;
     }
 }
