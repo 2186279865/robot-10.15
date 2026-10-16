@@ -624,7 +624,11 @@ static void test_position_zero_query(void)
     expect("#23,ok,");
     expect_contains("mode=abs");
 
-    /* 没有回读 → 查询必须如实回 E11，不许编造 */
+    /* 没有回读 → 查询必须如实回 E11，不许编造。
+     * 出厂默认四轴都算接了回读线，这里先把名单收成只有 Z 轴。 */
+    txoff = 0; txlog_len = 0;
+    send("240,param_set,readback_mask,1");
+    expect("#240,ok,");
     txoff = 0; txlog_len = 0;
     send("24,motor_query,4,pos");
     expect("#24,err,E11");
@@ -829,6 +833,12 @@ static void test_telemetry_and_settle_event(void)
     reset_world();
     do_hello();
 
+    /* 这个用例只看 1 号轴的遥测和夹爪事件：把回读名单收成只有 Z 轴，
+     * 免得四轴轮询的帧插进来（多轴轮询由 multiaxis 用例专门覆盖）。 */
+    txoff = 0; txlog_len = 0;
+    send("240,param_set,readback_mask,1");
+    expect("#240,ok,");
+
     send("90,tele_on,1,200");
     expect("#90,ok,");
     expect_contains("interval_ms=200");
@@ -1005,7 +1015,11 @@ static void test_readback_query(void)
     expect("#124,err,E04");
     expect_contains("addr=1");
 
-    /* --- 没接回读线的轴：立刻回 E11，且不占用总线 --- */
+    /* --- 没接回读线的轴：立刻回 E11，且不占用总线 ---
+     * 出厂默认四轴都算接了，这里先声明只接了 Z 轴。 */
+    txoff = 0; txlog_len = 0;
+    send("240,param_set,readback_mask,1");
+    expect("#240,ok,");
     txoff = 0; txlog_len = 0;
     before = c_sendframe;
     send("125,motor_query,4,pos");
@@ -1092,21 +1106,26 @@ static void test_multiaxis_readback(void)
     reset_world();
     do_hello();
 
-    /* 默认只接了 Z 轴：别的轴查询必须如实回 E11，不许编数据 */
+    /* 出厂默认四轴都接了回读线：hello 的名单就是 1/3/4/5 */
     txoff = 0; txlog_len = 0;
-    send("200,motor_query,3,pos");
-    expect("#200,err,E11");
+    send("200,hello,1,1");
+    expect("#200,ok,");
+    expect_contains("readback=1/3/4/5");
 
-    /* 接线变了只改参数，不用重烧固件 */
+    /* 某个轴还没接：只改参数声明"只接了 Z 轴"，该轴查询必须如实回 E11，不许编数据 */
     txoff = 0; txlog_len = 0;
-    send("201,param_set,readback_mask,15");
+    send("201,param_set,readback_mask,1");
     expect("#201,ok,");
     expect_contains("name=readback_mask");
 
     txoff = 0; txlog_len = 0;
-    send("202,hello,1,1");
-    expect("#202,ok,");
-    expect_contains("readback=1/3/4/5");
+    send("202,motor_query,3,pos");
+    expect("#202,err,E11");
+
+    /* 再接上就把掩码改回来，不用重烧固件 */
+    txoff = 0; txlog_len = 0;
+    send("208,param_set,readback_mask,15");
+    expect("#208,ok,");
 
     /* 非订阅的轴也能单独查 */
     txoff = 0; txlog_len = 0;
@@ -1173,9 +1192,9 @@ static void test_multiaxis_readback(void)
     pump();
     check(emm_tx[0] == 1U, "sweep wraps back to the first readback axis");
 
-    /* 参数改回默认，避免影响后面的用例 */
+    /* 参数改回默认（四轴都接），避免影响后面的用例 */
     txoff = 0; txlog_len = 0;
-    send("206,param_set,readback_mask,1");
+    send("206,param_set,readback_mask,15");
     expect("#206,ok,");
     txoff = 0; txlog_len = 0;
     send("207,param_set,query_timeout_ms,100");

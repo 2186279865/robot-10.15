@@ -18,8 +18,13 @@ import protocol as P
 FIRMWARE_VERSION = "sim-0.1"
 BOOT_ID = 0x5A5A0001
 
-#: 只有 Z 轴按方案 8 节先接回读（驱动器 TXD → PA3）。
-READBACK_AXES = (1,)
+#: 出厂默认接了回读线的轴 —— 由 protocol.PARAM_DEFAULTS["readback_mask"] 推导
+#: （默认 15 = 四轴都接），运行中可以随时用 param_set 改。
+READBACK_AXES = tuple(
+    addr
+    for idx, addr in enumerate(P.VALID_AXES)
+    if (P.PARAM_DEFAULTS["readback_mask"] >> idx) & 1
+)
 
 #: 编码器计数/圈（方案 8 节）。
 COUNTS_PER_REV = 65536
@@ -174,7 +179,7 @@ class SimulatedDevice:
 
     def _apply_readback_mask(self) -> None:
         """readback_mask 一变就刷新各轴的回读能力（bit0=Z、bit1=托盘、bit2=X、bit3=Y）。"""
-        mask = int(self.params.get("readback_mask", 1))  # type: ignore[arg-type]
+        mask = int(self.params.get("readback_mask", 15))  # type: ignore[arg-type]
         for idx, addr in enumerate(P.VALID_AXES):
             self.axes[addr].readback_capable = bool((mask >> idx) & 1)
 

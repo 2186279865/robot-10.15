@@ -47,11 +47,12 @@
 #define HOST_FIRMWARE_VERSION     "0.1.0"
 
 /* 回读能力：哪些驱动器的 TXD 接到了回读线上，用 readback_mask 参数表示
- * （bit0=Z(1)，bit1=托盘(3)，bit2=X(4)，bit3=Y(5)），默认只有 Z 轴。
+ * （bit0=Z(1)，bit1=托盘(3)，bit2=X(4)，bit3=Y(5)），**出厂默认 15 = 四轴都接**。
  * hello 必须如实报出这份名单：上位机据此决定哪些轴显示实测值。
- * 多轴怎么共用一条回读线由硬件决定（各串二极管/电阻并联、模拟开关选路、
- * 或每路一个 UART），固件这里只按"能不能收到回包"说话——没接的轴
- * 查询会在 query_timeout_ms 后回 E04，不会编数据。 */
+ * 多轴怎么共用一条回读线由硬件决定（**四路推挽 TXD 不能直接短接**：各串二极管做
+ * 线与、各串 1kΩ 限流、模拟开关选路，或改 RS-485；详见 ghr/10.15/上位机/README.md）。
+ * 某个轴还没接就先 `param_set,readback_mask,<掩码>` 把它去掉，查询会在
+ * query_timeout_ms 后回 E04，没在名单里的轴一律回 E11，都不会编数据。 */
 
 /* 错误码（与上位机 protocol.ERROR_CODES 一致） */
 #define HOST_E_UNKNOWN_CMD        "E01"
@@ -98,8 +99,9 @@ static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
     { "telemetry_ms",      200U,  20U, 60000U },
     { "frame_gap_ms",      10U,   1U,  1000U  },
     /* 哪些轴接了驱动器回读线（bit0=Z=1、bit1=托盘=3、bit2=X=4、bit3=Y=5）。
-     * 接线变了只改这个参数，不用重烧；没接线的轴查询会如实回 E11。 */
-    { "readback_mask",     1U,    1U,  15U    }
+     * 默认 15 = 四轴都接；某个轴还没接就改小这个参数，不用重烧固件。
+     * 名单外的轴查询如实回 E11，名单内但收不到回包的轴超时回 E04。 */
+    { "readback_mask",     15U,   1U,  15U    }
 };
 
 static HostParam host_params[HOST_PARAM_COUNT];

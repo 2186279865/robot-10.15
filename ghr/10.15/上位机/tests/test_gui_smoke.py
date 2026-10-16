@@ -13,6 +13,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import protocol as P  # noqa: E402
+
 try:
     import tkinter as tk
 except Exception:  # pragma: no cover
@@ -66,7 +68,7 @@ class GuiSmokeTest(unittest.TestCase):
     def test_01_handshake_reaches_online(self):
         self.assertTrue(self.app.client.online, self.app.client.state)
         self.assertTrue(self.app.client.fw_version)
-        self.assertEqual(self.app.client.readback_axes, (1,))
+        self.assertEqual(self.app.client.readback_axes, P.VALID_AXES)
         self.assertIn("固件 sim", self.app.fw_label.cget("text"))
 
     def test_02_speed_command_gets_reply_and_logs_it(self):
@@ -81,11 +83,20 @@ class GuiSmokeTest(unittest.TestCase):
         panel.toggle_telemetry()
         _pump(self.root, 0.6)
         self.assertIn("脉冲", panel.readback.cget("text"), panel.readback.cget("text"))
-        other = self.app.axes[4]
-        other.tele.set(True)
-        other.toggle_telemetry()
-        _pump(self.root, 0.6)
-        self.assertIn("未接回读", other.readback.cget("text"))
+
+        # 把名单收成只有 Z 轴 → 其它轴必须明确显示"未接回读"，不能让用户以为有实测值
+        self.app.client.send("param_set", "readback_mask", 1)
+        self.app.client.begin_handshake()
+        _pump(self.root, 0.8)
+        self.assertEqual(self.app.client.readback_axes, (1,))
+        self.assertIn("未接回读", self.app.axes[4].readback.cget("text"))
+
+        # 恢复默认：四轴都接
+        self.app.client.send("param_set", "readback_mask", 15)
+        self.app.client.begin_handshake()
+        _pump(self.root, 0.8)
+        self.assertEqual(self.app.client.readback_axes, P.VALID_AXES)
+        self.assertNotIn("未接回读", self.app.axes[4].readback.cget("text"))
 
     def test_04_gripper_buttons_and_status(self):
         self.app.send_gripper("grab")
@@ -124,12 +135,23 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertIn("stop_all ok", self.app.log_text.get("1.0", "end"))
 
     def test_07_wait_reached_on_axis_without_readback_is_refused(self):
+        # 默认四轴都算接了回读线，这里先声明只接了 Z 轴，才能试出"没有回读能力"这条门
+        self.app.client.send("param_set", "readback_mask", 1)
+        self.app.client.begin_handshake()
+        _pump(self.root, 0.8)
+        self.assertEqual(self.app.client.readback_axes, (1,))
         self.app.seq_clear()
         self.app.seq_kind.set("wait_reached")
         self.app.seq_args.set("4,3000")
         self.app.seq_add()
         self.assertEqual(self.app.sequence.steps, [])
         self.assertIn("没有回读能力", self.app.log_text.get("1.0", "end"))
+
+        # 恢复默认（四轴都接），别影响后面的用例
+        self.app.client.send("param_set", "readback_mask", 15)
+        self.app.client.begin_handshake()
+        _pump(self.root, 0.8)
+        self.assertEqual(self.app.client.readback_axes, P.VALID_AXES)
 
     def test_08_param_get_fills_entry(self):
         self.app.param_vars["speed_rpm_max"].set("")

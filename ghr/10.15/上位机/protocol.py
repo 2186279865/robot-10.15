@@ -87,8 +87,8 @@ PARAM_DEFAULTS: Dict[str, object] = {
     "telemetry_ms": 200,
     "frame_gap_ms": 10,
     #: 哪些轴接了驱动器回读线：bit0=Z(1)、bit1=托盘(3)、bit2=X(4)、bit3=Y(5)。
-    #: 接线变了只改这个参数，不用重烧固件；名单外的轴查询回 E11。
-    "readback_mask": 1,
+    #: 默认 15 = 四轴都接；某个轴还没接就把对应位去掉，不用重烧固件。
+    "readback_mask": 15,
 }
 
 

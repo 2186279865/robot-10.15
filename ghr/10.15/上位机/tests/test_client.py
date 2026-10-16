@@ -278,22 +278,27 @@ class TestEventsAndSafety(ClientTestBase):
 
 
 class TestReadbackMask(ClientTestBase):
-    """readback_mask 决定哪些轴接了回读线；模拟后端必须和固件一致。"""
+    """readback_mask 决定哪些轴接了回读线；模拟后端必须和固件一致（默认四轴都接）。"""
+
+    def test_default_mask_is_all_four_axes(self):
+        self.connect()
+        self.assertEqual(self.client.readback_axes, P.VALID_AXES)
+        self.assertEqual(self.device.readback_list(), "1/3/4/5")
+        self.assertEqual(self.device.params["readback_mask"], 15)
 
     def test_mask_switches_readback_axes(self):
         self.connect()
-        self.assertEqual(self.client.readback_axes, (1,))
-
-        self.client.send("param_set", "readback_mask", 15)
+        self.client.send("param_set", "readback_mask", 1)
         self.pump()
-        self.assertEqual(self.device.readback_list(), "1/3/4/5")
-        for addr in P.VALID_AXES:
-            self.assertTrue(self.device.axes[addr].readback_capable)
+        self.assertEqual(self.device.readback_list(), "1")
+        self.assertTrue(self.device.axes[1].readback_capable)
+        for addr in (3, 4, 5):
+            self.assertFalse(self.device.axes[addr].readback_capable)
 
-        # 重新握手后 hello 要如实报出四个轴
+        # 重新握手后 hello 要如实报出新的名单
         self.client.send("hello", P.PROTOCOL_VERSION, 1)
         self.pump()
-        self.assertEqual(self.client.readback_axes, P.VALID_AXES)
+        self.assertEqual(self.client.readback_axes, (1,))
 
     def test_mask_out_of_range_is_refused(self):
         self.connect()
@@ -302,10 +307,12 @@ class TestReadbackMask(ClientTestBase):
         errs = self.polled("err")
         self.assertTrue(errs)
         self.assertEqual(errs[-1].data.get("code"), "E02")
-        self.assertEqual(self.device.readback_list(), "1")
+        self.assertEqual(self.device.readback_list(), "1/3/4/5")
 
     def test_unwired_axis_query_reports_e11(self):
         self.connect()
+        self.client.send("param_set", "readback_mask", 1)
+        self.pump()
         self.client.send("motor_query", 4, "pos")
         self.pump()
         errs = self.polled("err")
@@ -314,10 +321,10 @@ class TestReadbackMask(ClientTestBase):
 
     def test_reset_restores_default_mask(self):
         self.connect()
-        self.client.send("param_set", "readback_mask", 15)
+        self.client.send("param_set", "readback_mask", 1)
         self.pump()
         self.device.reset()
-        self.assertEqual(self.device.readback_list(), "1")
+        self.assertEqual(self.device.readback_list(), "1/3/4/5")
 
 
 if __name__ == "__main__":
