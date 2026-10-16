@@ -14,16 +14,16 @@
       <uAC6>0</uAC6>
       <TargetOption>
         <TargetCommonOption>
-          <Device>STM32F407ZGTx</Device>
+          <Device>STM32F407VGTx</Device>
           <Vendor>STMicroelectronics</Vendor>
           <PackID>Keil.STM32F4xx_DFP.3.1.1</PackID>
           <PackURL>https://www.keil.com/pack/</PackURL>
           <Cpu>IRAM(0x20000000,0x20000) IRAM2(0x10000000,0x10000) IROM(0x08000000,0x100000) CPUTYPE("Cortex-M4") FPU2 CLOCK(12000000) ELITTLE</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
           <StartupFile></StartupFile>
-          <FlashDriverDll>UL2CM3(-S0 -C0 -P0 -FD20000000 -FC1000 -FN1 -FF0STM32F4xx_1024 -FS08000000 -FL0100000 -FP0($$Device:STM32F407ZGTx$CMSIS\Flash\STM32F4xx_1024.FLM))</FlashDriverDll>
+          <FlashDriverDll>UL2CM3(-S0 -C0 -P0 -FD20000000 -FC1000 -FN1 -FF0STM32F4xx_1024 -FS08000000 -FL0100000 -FP0($$Device:STM32F407VGTx$CMSIS\Flash\STM32F4xx_1024.FLM))</FlashDriverDll>
           <DeviceId>0</DeviceId>
-          <RegisterFile>$$Device:STM32F407ZGTx$Drivers\CMSIS\Device\ST\STM32F4xx\Include\stm32f4xx.h</RegisterFile>
+          <RegisterFile>$$Device:STM32F407VGTx$Drivers\CMSIS\Device\ST\STM32F4xx\Include\stm32f4xx.h</RegisterFile>
           <MemoryEnv></MemoryEnv>
           <Cmp></Cmp>
           <Asm></Asm>
@@ -33,7 +33,7 @@
           <SLE66CMisc></SLE66CMisc>
           <SLE66AMisc></SLE66AMisc>
           <SLE66LinkerMisc></SLE66LinkerMisc>
-          <SFDFile>$$Device:STM32F407ZGTx$CMSIS\SVD\STM32F40x.svd</SFDFile>
+          <SFDFile>$$Device:STM32F407VGTx$CMSIS\SVD\STM32F40x.svd</SFDFile>
           <bCustSvd>0</bCustSvd>
           <UseEnv>0</UseEnv>
           <BinPath></BinPath>
@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_STDPERIPH_DRIVER,STM32F40_41xxx,</Define>
               <Undefine></Undefine>
-              <IncludePath>..\STM32\CMSIS\Device\ST\STM32F4xx\Include;..\STM32\CMSIS\Include;..\STM32\STM32F4xx_StdPeriph_Driver\inc;..\MY;..\Drive\Include</IncludePath>
+              <IncludePath>..\STM32\CMSIS\Device\ST\STM32F4xx\Include;..\STM32\CMSIS\Include;..\STM32\STM32F4xx_StdPeriph_Driver\inc;..\MY;..\Drive\Include;..\USB\App;..\USB\STM32_USB_OTG_Driver\inc;..\USB\STM32_USB_Device_Library\Core\inc;..\USB\STM32_USB_Device_Library\Class\cdc\inc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -419,6 +419,11 @@
               <FileType>1</FileType>
               <FilePath>..\Drive\Source\servo.c</FilePath>
             </File>
+            <File>
+              <FileName>host_usb.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Drive\Source\host_usb.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -458,6 +463,56 @@
               <FileName>stm32f4xx_tim.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\STM32\STM32F4xx_StdPeriph_Driver\src\stm32f4xx_tim.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>USB</GroupName>
+          <Files>
+            <File>
+              <FileName>usb_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_OTG_Driver\src\usb_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>usb_dcd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_OTG_Driver\src\usb_dcd.c</FilePath>
+            </File>
+            <File>
+              <FileName>usb_dcd_int.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_OTG_Driver\src\usb_dcd_int.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_Device_Library\Core\src\usbd_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_ioreq.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_Device_Library\Core\src\usbd_ioreq.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_req.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_Device_Library\Core\src\usbd_req.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_cdc_core.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\STM32_USB_Device_Library\Class\cdc\src\usbd_cdc_core.c</FilePath>
+            </File>
+            <File>
+              <FileName>usbd_desc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\App\usbd_desc.c</FilePath>
+            </File>
+            <File>
+              <FileName>usb_bsp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\USB\App\usb_bsp.c</FilePath>
             </File>
           </Files>
         </Group>
