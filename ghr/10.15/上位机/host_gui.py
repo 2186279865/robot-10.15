@@ -83,12 +83,12 @@ class AxisPanel:
         self.direction = tk.IntVar(value=0)
         self.rpm = tk.IntVar(value=60)
         self.acc = tk.IntVar(value=1)
-        self.pulses = tk.IntVar(value=AxisPanel.PULSES_PER_REV)
+        # 位置手动输入 = 圈数 + 度数（两者相加），脉冲数由它们算出来
         self.turns = tk.DoubleVar(value=1.0)
+        self.degrees = tk.DoubleVar(value=0.0)
         self.mode = tk.StringVar(value="rel")
         self.tele = tk.BooleanVar(value=False)
         self.reference_valid = False
-        self._syncing = False
 
         row = ttk.Frame(frame)
         row.pack(fill="x", padx=4, pady=2)
@@ -100,24 +100,35 @@ class AxisPanel:
         ttk.Label(row, text="加速度").pack(side="left", padx=(6, 0))
         ttk.Spinbox(row, from_=0, to=255, width=4, textvariable=self.acc).pack(side="left")
 
-        # 位置模式：脉冲与圈数两个输入框双向同步，改哪个都行（1 圈 = 3200 脉冲）
+        # 位置模式：手动输入"转几圈"和"转几度"，两者相加，脉冲自动算
         row2 = ttk.Frame(frame)
         row2.pack(fill="x", padx=4, pady=2)
-        ttk.Label(row2, text="位置模式：脉冲").pack(side="left")
-        ttk.Spinbox(row2, from_=1, to=1000000, width=8, textvariable=self.pulses).pack(side="left")
-        ttk.Label(row2, text="=").pack(side="left", padx=2)
+        ttk.Label(row2, text="位置：圈").pack(side="left")
         ttk.Spinbox(
             row2,
-            from_=0.01,
-            to=1000.0,
+            from_=0.0,
+            to=10000.0,
             increment=0.1,
             width=7,
             format="%.2f",
             textvariable=self.turns,
         ).pack(side="left")
-        ttk.Label(row2, text="圈").pack(side="left")
-        self.pulses.trace_add("write", self._on_pulses)
-        self.turns.trace_add("write", self._on_turns)
+        ttk.Label(row2, text="度").pack(side="left", padx=(6, 0))
+        ttk.Spinbox(
+            row2,
+            from_=0.0,
+            to=9999.0,
+            increment=5.0,
+            width=7,
+            format="%.1f",
+            textvariable=self.degrees,
+        ).pack(side="left")
+        ttk.Label(row2, text="→").pack(side="left", padx=(6, 0))
+        self.pulse_label = ttk.Label(row2, text="—", foreground="#0a3d91")
+        self.pulse_label.pack(side="left")
+        ttk.Label(row2, text="（1圈=3200脉冲）", foreground="#666666").pack(side="left", padx=(4, 0))
+        self.turns.trace_add("write", lambda *_a: self._refresh_target())
+        self.degrees.trace_add("write", lambda *_a: self._refresh_target())
         self.mode.trace_add("write", lambda *_a: self._refresh_target())
 
         row3 = ttk.Frame(frame)
@@ -166,50 +177,35 @@ class AxisPanel:
         self._refresh_target()
         self._refresh_reference()
 
-    # -- 脉冲/圈数联动 + 位置基准 -------------------------------------------
-    def _on_pulses(self, *_a) -> None:
-        """脉冲框改了 → 同步圈数（1 圈 = PULSES_PER_REV 脉冲）。"""
-        if self._syncing:
-            return
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            return
-        if pulses <= 0:
-            return
-        self._syncing = True
-        try:
-            self.turns.set(round(pulses / float(self.PULSES_PER_REV), 3))
-        finally:
-            self._syncing = False
-        self._refresh_target()
+    # -- 圈/度 → 脉冲 + 位置基准 --------------------------------------------
+    def total_pulses(self):
+        """圈数 + 度数 → 脉冲数（1 圈 = 3200 脉冲，1° = 3200/360 脉冲）。
 
-    def _on_turns(self, *_a) -> None:
-        """圈数框改了 → 反算脉冲。"""
-        if self._syncing:
-            return
+        输入非法（空、非数字、负数）时返回 None，由调用方提示。
+        """
         try:
             turns = float(self.turns.get())
+            degrees = float(self.degrees.get())
         except (tk.TclError, ValueError):
-            return
-        if turns <= 0:
-            return
-        self._syncing = True
-        try:
-            self.pulses.set(int(round(turns * self.PULSES_PER_REV)))
-        finally:
-            self._syncing = False
-        self._refresh_target()
+            return None
+        if turns < 0.0 or degrees < 0.0:
+            return None
+        return int(round(turns * self.PULSES_PER_REV + degrees * (self.PULSES_PER_REV / 360.0)))
 
     def _refresh_target(self) -> None:
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            pulses = 0
-        turns = pulses / float(self.PULSES_PER_REV)
-        mode = "相对（走这么多）" if self.mode.get() == "rel" else "绝对（走到这个位置）"
+        pulses = self.total_pulses()
+        mode = "相对走" if self.mode.get() == "rel" else "绝对走到此"
+        if pulses is None:
+            self.pulse_label.configure(text="—（请输入非负的圈数/度数）")
+            self.target_label.configure(text=f"目标位置：输入无效　{mode}")
+            return
+        actual_deg = pulses * 360.0 / float(self.PULSES_PER_REV)
+        self.pulse_label.configure(text=f"{pulses} 脉冲")
         self.target_label.configure(
-            text=f"目标位置：{pulses} 脉冲 = {turns:.2f} 圈 = {turns * 360.0:.1f}°　模式：{mode}"
+            text=(
+                f"目标位置：{float(self.turns.get()):.2f} 圈 + {float(self.degrees.get()):.1f}° "
+                f"= {pulses} 脉冲（{actual_deg:.1f}°）　{mode}"
+            )
         )
 
     def _refresh_reference(self) -> None:
@@ -244,17 +240,16 @@ class AxisPanel:
         self.app.client.send("motor_speed", self.addr, self.direction.get(), self.rpm.get(), self.acc.get())
 
     def send_pos(self, mode: str = "rel") -> None:
-        """按相对/绝对方式下发目标位置（脉冲数来自脉冲框，圈数框与之联动）。"""
+        """按相对/绝对方式下发目标位置（目标 = 圈数 + 度数，换算成脉冲）。"""
         if not self._guard():
             return
         self.mode.set(mode)
-        try:
-            pulses = int(float(self.pulses.get()))
-        except (tk.TclError, ValueError):
-            self.app.note("脉冲数不是有效数字")
+        pulses = self.total_pulses()
+        if pulses is None:
+            self.app.note("圈数/度数必须是非负数字")
             return
         if pulses <= 0:
-            self.app.note("脉冲数必须大于 0")
+            self.app.note("圈数和度数不能同时为 0")
             return
         if mode == "abs" and not self.reference_valid:
             if not messagebox.askyesno(

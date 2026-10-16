@@ -149,22 +149,48 @@ class GuiSmokeTest(unittest.TestCase):
             [name for name, _ in self.gui.KNOWN_PARAMS], list(P.PARAM_DEFAULTS)
         )
 
-    # -- 位置模式 ------------------------------------------------------------
-    def test_10_pulses_and_turns_stay_in_sync(self):
+    # -- 位置模式：手动输入圈数 + 度数 ---------------------------------------
+    def test_10_turns_and_degrees_make_pulses(self):
         panel = self.app.axes[1]
-        panel.pulses.set(6400)
+        panel.turns.set(2.0)
+        panel.degrees.set(0.0)
         self.root.update()
-        self.assertAlmostEqual(float(panel.turns.get()), 2.0, places=3)
+        self.assertEqual(panel.total_pulses(), 6400, "2 圈 = 6400 脉冲")
+        self.assertIn("6400 脉冲", panel.pulse_label.cget("text"))
 
-        panel.turns.set(0.5)
+        panel.turns.set(1.0)
+        panel.degrees.set(45.0)
         self.root.update()
-        self.assertEqual(int(panel.pulses.get()), 1600)
+        self.assertEqual(panel.total_pulses(), 3600, "1 圈 45 度 = 3200 + 400 脉冲")
+        self.assertIn("3600 脉冲", panel.target_label.cget("text"))
+        self.assertIn("405.0", panel.target_label.cget("text"))
 
-        panel.pulses.set(3200)
+        panel.turns.set(0.0)
+        panel.degrees.set(90.0)
         self.root.update()
-        self.assertAlmostEqual(float(panel.turns.get()), 1.0, places=3)
-        self.assertIn("3200 脉冲", panel.target_label.cget("text"))
-        self.assertIn("1.00 圈", panel.target_label.cget("text"))
+        self.assertEqual(panel.total_pulses(), 800, "只有 90 度 = 800 脉冲")
+
+        panel.degrees.set(1.0)
+        self.root.update()
+        self.assertEqual(panel.total_pulses(), 9, "1° = 3200/360 脉冲，四舍五入到 9")
+
+        # 圈和度都是 0：不发指令，只提示
+        panel.turns.set(0.0)
+        panel.degrees.set(0.0)
+        self.app.clear_log()
+        panel.send_pos("rel")
+        _pump(self.root, 0.2)
+        self.assertNotIn("motor_pos", self.app.log_text.get("1.0", "end"), "0 圈 0 度不能下发")
+
+        # 负数（绕过 Spinbox 下限直接塞变量）→ 输入无效、不发指令
+        panel.degrees.set(-5.0)
+        self.root.update()
+        self.assertIsNone(panel.total_pulses())
+        self.assertIn("输入无效", panel.target_label.cget("text"))
+
+        panel.turns.set(1.0)
+        panel.degrees.set(0.0)
+        self.root.update()
 
     def test_11_absolute_position_requires_reference_then_dispatches(self):
         # 先解除前面用例留下的停止锁存（真机上按过停止后也要这么做）
@@ -195,7 +221,8 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertTrue(panel.reference_valid)
         self.assertIn("已建立", panel.ref_label.cget("text"))
 
-        panel.pulses.set(1600)
+        panel.turns.set(0.5)
+        panel.degrees.set(0.0)
         self.app.clear_log()
         panel.send_pos("abs")
         _pump(self.root, 0.5)
