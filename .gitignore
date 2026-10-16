@@ -69,3 +69,14 @@ JLinkLog.txt
 *id_rsa*
 *.pem
 known_hosts
+
+# ---------- Python（上位机 ghr/10.15/上位机）----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---------- DSH 沙箱 ACL 恢复记录（临时）----------
+.acl-recovery/
