@@ -109,3 +109,6 @@ build/
 
 # ---------- 运行时日志（诊断截图 / 回读记录等）----------
 **/logs/
+
+# ---------- new_eye GUI 运行时输出：每帧覆写 seq/ts，只留本地 ----------
+new_eye/runtime/latest_targets.json
