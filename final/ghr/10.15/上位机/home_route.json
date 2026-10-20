@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "boot_tip": "先把龙门手动推到固定“开机位”（X/Y 都对上标记），再点「开机回基准」",
+  "settle_ms": 800,
+  "steps": [
+    {
+      "axis": 4,
+      "dir": 0,
+      "pulses": 3000,
+      "rpm": 60,
+      "acc": 100
+    },
+    {
+      "axis": 5,
+      "dir": 0,
+      "pulses": 3000,
+      "rpm": 60,
+      "acc": 100
+    },
+    {
+      "axis": 1,
+      "dir": 1,
+      "pulses": 1000,
+      "rpm": 40,
+      "acc": 100
+    }
+  ],
+  "zero_axes": [
+    4,
+    5
+  ],
+  "updated_at": "2026-10-21 00:41:07"
+}

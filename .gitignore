@@ -112,3 +112,6 @@ build/
 
 # ---------- new_eye GUI 运行时输出：每帧覆写 seq/ts，只留本地 ----------
 new_eye/runtime/latest_targets.json
+# final 是自包含发布目录：允许 final 内的 SAM 权重入库（用 Git LFS 存大文件）
+!final/new_eye/models/
+!final/new_eye/models/sam_b.pt
