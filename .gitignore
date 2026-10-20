@@ -84,3 +84,28 @@ venv/
 # ---------- 上位机协议主机侧测试产物（.exe/.o 已被上面规则覆盖）----------
 **/Test/host_protocol/frames.txt
 *.pdb
+
+# ---------- 大模型权重 / 数据集：不入库（GitHub 单文件硬上限 100MB）----------
+# new_eye/models/sam_b.pt 约 358MB，只能本地保留
+**/models/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.gguf
+
+# ---------- Qwen 视觉工程运行环境：本地约 33GB，全部不入库 ----------
+# Qwen/.gitignore 已经忽略这些目录，这里再兜一层防止误 add
+Qwen/.venv/
+Qwen/cache/
+Qwen/downloads/
+Qwen/runtime/
+Qwen/home/
+Qwen/logs/
+Qwen/__pycache__/
+
+# ---------- 构建中转目录：build/ 只是 ghr/10.19 的副本 + Keil 编译日志 ----------
+build/
+
+# ---------- 运行时日志（诊断截图 / 回读记录等）----------
+**/logs/

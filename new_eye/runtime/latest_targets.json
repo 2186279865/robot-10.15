@@ -1,0 +1,142 @@
+{
+  "schema_version": 5,
+  "motion_authorized": false,
+  "points_used": true,
+  "max_classes": 6,
+  "seq": 1731,
+  "ts": 1792495182.221,
+  "classification_logic": "rule features on SAM masks (shape+colour) with on-site sample registration",
+  "fusion": {
+    "axis": "u",
+    "axis_name": "左右(u)",
+    "flip": false,
+    "flip_mode": 0,
+    "axis_mode": 0,
+    "n_top": 0,
+    "n_side": 3,
+    "matched": 0,
+    "mean_dist": null,
+    "unmatched_top": 0,
+    "unmatched_side": 3,
+    "auto": true
+  },
+  "class_summary": {
+    "副摄待确认": 3
+  },
+  "targets": [
+    {
+      "id": 1,
+      "views": "side",
+      "confidence": 1.001,
+      "bbox": [
+        805,
+        444,
+        97,
+        72
+      ],
+      "bbox_warped": [
+        114,
+        148,
+        139,
+        136
+      ],
+      "center_px": [
+        851.98,
+        481.1
+      ],
+      "area_px": 14421.0,
+      "center_tray": [
+        0.2613,
+        0.3088
+      ],
+      "shape": null,
+      "shape_conf": 0.0,
+      "color": "黄/橙",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "副摄待确认",
+      "class_key": "?|黄/橙",
+      "class_conf": 0.0,
+      "class_source": "side-only",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    },
+    {
+      "id": 2,
+      "views": "side",
+      "confidence": 0.91,
+      "bbox": [
+        755,
+        278,
+        127,
+        120
+      ],
+      "bbox_warped": [
+        338,
+        225,
+        184,
+        159
+      ],
+      "center_px": [
+        813.53,
+        340.53
+      ],
+      "area_px": 20616.5,
+      "center_tray": [
+        0.6142,
+        0.4397
+      ],
+      "shape": null,
+      "shape_conf": 0.0,
+      "color": "绿",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "副摄待确认",
+      "class_key": "?|绿",
+      "class_conf": 0.0,
+      "class_source": "side-only",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    },
+    {
+      "id": 3,
+      "views": "side",
+      "confidence": 0.957,
+      "bbox": [
+        741,
+        407,
+        91,
+        74
+      ],
+      "bbox_warped": [
+        184,
+        267,
+        133,
+        128
+      ],
+      "center_px": [
+        784.96,
+        445.27
+      ],
+      "area_px": 13422.5,
+      "center_tray": [
+        0.3577,
+        0.4729
+      ],
+      "shape": null,
+      "shape_conf": 0.0,
+      "color": "黄/橙",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "副摄待确认",
+      "class_key": "?|黄/橙",
+      "class_conf": 0.0,
+      "class_source": "side-only",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    }
+  ]
+}

@@ -121,6 +121,8 @@ class HostClient:
         self._lock = threading.RLock()
         self.auto_reconnect = True
         self.link_factory: Optional[Callable[[], object]] = None
+        #: 运动命令观察钩子：`hook(cmd, args)`，界面用它累计“软位置”（没有回读时也能回 0）。
+        self.motion_hook: Optional[Callable[[str, tuple], None]] = None
         if service:
             self.start_service()
 
@@ -216,6 +218,13 @@ class HostClient:
             deadline_ms=self.now_ms() + timeout_ms,
         )
         self._write(raw, f"TX {rid} {cmd}")
+        hook = self.motion_hook
+        if hook is not None and cmd in ("motor_pos", "motor_speed", "motor_zero",
+                                        "stop_all", "stop_clear"):
+            try:
+                hook(cmd, args)
+            except Exception as exc:  # 钩子只做界面记账，绝不能影响下发
+                self.emit("note", f"运动记账钩子异常：{exc}")
         return rid
 
     def resend(self, req_id: int) -> bool:

@@ -363,6 +363,13 @@ class App:
         self.runner = S.SequenceRunner(self.client, self.client.now_ms, self._runner_message)
         self._stop_requested = False
         self._log_lines = 0
+        # 软位置：没有回读也能算“一键回 0”。motor_pos(rel) 累加；
+        # 速度模式/绝对模式/断线后标记未知，不做猜测。
+        self.soft_pos = {addr: 0 for addr in AXIS_LABELS}
+        self.pos_known = {addr: True for addr in AXIS_LABELS}
+        self._home_queue = []
+        self._last_motion_s = 0.0
+        self.client.motion_hook = self._on_motion
 
         root.title("机器人抓取系统 上位机（Type-C USB CDC）")
         try:
@@ -398,6 +405,8 @@ class App:
         ttk.Checkbutton(bar, text="模拟后端", variable=self.sim).pack(side="left", padx=6)
         self.connect_button = ttk.Button(bar, text="连接", width=8, command=self.toggle_connect)
         self.connect_button.pack(side="left", padx=4)
+        self.home_button = ttk.Button(bar, text="一键回0", width=9, command=self.home_all)
+        self.home_button.pack(side="left", padx=(6, 4))
         self.state_label = ttk.Label(bar, text="未连接", foreground="#888888", width=12)
         self.state_label.pack(side="left", padx=6)
         self.fw_label = ttk.Label(bar, text="固件 —")
@@ -444,6 +453,10 @@ class App:
         seq_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(seq_tab, text="动作序列")
         self._build_sequence(seq_tab)
+
+        from vision_import import build_tab
+        # 传 self：生成抓取序列时要填入“动作序列”页并写日志
+        build_tab(self.notebook, self)
 
         log_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(log_tab, text="原始日志")
@@ -682,6 +695,101 @@ class App:
         self.client.send("stop_clear")
         self._stop_requested = False
         self.note("已请求解除停止锁存；确认机械停稳、人员撤离后再下发运动")
+
+    # -- 软位置记账 + 一键回 0 ----------------------------------------------
+    def _on_motion(self, cmd: str, args: tuple) -> None:
+        """累计每条轴的“软位置”，用于没有回读时的“一键回 0”。
+
+        规则：
+        - `motor_pos` rel：按方向把脉冲数累加；
+        - `motor_pos` abs / `motor_speed` / 急停 / 解除锁存：位置不再确定，标记未知
+          （固件把 abs 也按相对下发，速度模式没有终点，所以都不能信）；
+        - `motor_zero`（位置清零）：当前位置即新原点，软位置归 0。
+        """
+        try:
+            if cmd == "stop_all":
+                # 急停/停止：只有“正在动”的轴位置才会变不确定，静止时保持记账不变。
+                if time.monotonic() - getattr(self, "_last_motion_s", 0.0) <= 5.0:
+                    for addr in self.pos_known:
+                        self.pos_known[addr] = False
+                return
+            if cmd == "stop_clear":
+                return
+            addr = int(args[0])
+            if addr not in self.soft_pos:
+                return
+            if cmd == "motor_zero":
+                self.soft_pos[addr] = 0
+                self.pos_known[addr] = True
+            elif cmd == "motor_pos":
+                mode = str(args[5]) if len(args) > 5 else "rel"
+                if mode != "rel":
+                    self.pos_known[addr] = False
+                    return
+                pulses = abs(int(args[4]))
+                negative = bool(int(args[1]))
+                self.soft_pos[addr] += (-pulses if negative else pulses)
+                self._last_motion_s = time.monotonic()
+            elif cmd == "motor_speed":
+                self.pos_known[addr] = False
+                self._last_motion_s = time.monotonic()
+        except (IndexError, TypeError, ValueError):
+            pass
+
+    def home_all(self) -> None:
+        """一键回 0 基准点：按“位置清零”时的原点，把 Z→X→Y→转盘 依次开回来。"""
+        if not self.client.online:
+            self.note("未连接：无法回 0")
+            return
+        order = [1, 4, 5, 3]  # 先抬 Z，再回 X/Y，最后转盘
+        moves = []
+        skipped = []
+        for addr in order:
+            if not self.pos_known.get(addr, False):
+                skipped.append(AXIS_LABELS[addr])
+                continue
+            delta = -self.soft_pos.get(addr, 0)
+            if delta:
+                moves.append((addr, delta))
+        for name in skipped:
+            self.note(f"{name} 位置未知（用过速度/绝对模式或重连过），本次跳过；"
+                      "请手动挪到原点后点该轴『位置清零』")
+        if not moves:
+            self.note("所有轴都已在 0 基准点（或位置未知），没有需要回 0 的轴")
+            return
+        text = "\n".join(f"  {AXIS_LABELS[addr]}：{delta:+d} 脉冲" for addr, delta in moves)
+        if not messagebox.askyesno(
+            "一键回 0 基准点",
+            "将按下面顺序移回 0 基准点：\n\n" + text +
+            "\n\n顺序：Z（先抬）→ X → Y → 转盘。\n"
+            "0 基准点 = 该轴最近一次『位置清零』的位置；如果从没清零过，"
+            "就是上位机启动时的位置。\n"
+            "依据是本机记录的相对脉冲累加（没有回读）：中途手动推过轴或步进丢步会有偏差。\n\n"
+            "确认运动路径上没有人/物再继续。",
+        ):
+            return
+        self._home_queue = list(moves)
+        self.note("开始一键回 0：" + "、".join(AXIS_LABELS[a] for a, _ in moves))
+        self._home_step()
+
+    def _home_step(self) -> None:
+        if not self._home_queue:
+            self.note("一键回 0 完成（各轴软位置已置 0）")
+            return
+        addr, delta = self._home_queue.pop(0)
+        panel = self.axes.get(addr)
+        rpm = int(panel.rpm.get()) if panel is not None else 60
+        acc = int(panel.acc.get()) if panel is not None else 100
+        pulses = abs(delta)
+        direction = 0 if delta > 0 else 1
+        self.client.send("motor_enable", addr, 1)
+        self.client.send("motor_pos", addr, direction, rpm, acc, pulses, "rel")
+        self.soft_pos[addr] = 0
+        self.note(f"回 0：{AXIS_LABELS[addr]} {delta:+d} 脉冲"
+                  f"（方向 {'正' if direction == 0 else '负'}，{rpm}rpm）")
+        per_second = max(1, rpm) * AxisPanel.PULSES_PER_REV / 60.0
+        wait_ms = int(pulses / per_second * 1000) + 900
+        self.root.after(max(800, min(wait_ms, 30000)), self._home_step)
 
     def send_gripper(self, action: str) -> None:
         self.client.send("gripper", action, timeout_ms=2000)
