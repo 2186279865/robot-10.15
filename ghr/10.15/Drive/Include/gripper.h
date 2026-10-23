@@ -21,7 +21,8 @@
  */
 
 #define GRIPPER_STEP_DEG      45U     /* 每次动作改变的角度 */
-#define GRIPPER_OPEN_DEG      180U    /* 松开位置（上电位置） */
+#define GRIPPER_OPEN_DEG      180U    /* 松开位置（上电位置，完全张开） */
+#define GRIPPER_READY_DEG     150U    /* 预备位置：上位机连上后停这里，等抓取指令 */
 #define GRIPPER_GRAB_DEG      135U    /* 夹紧位置 = 180 - 45，不是 0 度 */
 #define GRIPPER_STEP_WAIT_MS  200U    /* 每走一步后给舵机的到位时间 */
 
@@ -39,6 +40,10 @@ uint8_t Gripper_Release(void);
 /* 立刻跳到夹紧位置 / 松开位置（不逐步走），用于需要一步到位的场合 */
 void    Gripper_GrabNow(void);
 void    Gripper_ReleaseNow(void);
+
+/* 立刻跳到预备位置（150 度）。上电仍停在 180，由上位机连上后再调到这里，
+ * 这样抓取前的开口是 150（比全开小、比夹紧大），放货时再全开 180。 */
+void    Gripper_ReadyNow(void);
 
 /* 当前夹爪角度与状态 */
 uint16_t Gripper_GetAngle(void);

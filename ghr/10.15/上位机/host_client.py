@@ -123,6 +123,11 @@ class HostClient:
         self.link_factory: Optional[Callable[[], object]] = None
         #: 运动命令观察钩子：`hook(cmd, args)`，界面用它累计“软位置”（没有回读时也能回 0）。
         self.motion_hook: Optional[Callable[[str, tuple], None]] = None
+        #: 最近一次应答/拒绝，供“点动”这类一次命令的对话框显示结果（不改变事件流）。
+        self.last_ok: Optional[dict] = None
+        self.last_err: Optional[dict] = None
+        #: `motor_query pos` 的驱动器编码器计数（只对有回读的轴有效）：{axis: {'counts','ts','what'}}
+        self.last_counts: Dict[int, dict] = {}
         if service:
             self.start_service()
 
@@ -176,6 +181,7 @@ class HostClient:
             if pending.result == RESULT_WAITING:
                 pending.result = RESULT_UNKNOWN
         self.pending.clear()
+        self.last_counts.clear()
         self.ids = P.RequestIdPool()
         if self.link is not None:
             try:
@@ -301,9 +307,11 @@ class HostClient:
             if frame.kind == "err":
                 pending.result = RESULT_ERR
                 code = frame.error_code or "E05"
+                text = f"{pending.cmd} 被拒绝：{code} {ERROR_TEXT.get(code, '')}".strip()
+                self.last_err = {"ts": self.now_ms(), "cmd": pending.cmd, "code": code, "text": text}
                 self.emit(
                     "err",
-                    f"{pending.cmd} 被拒绝：{code} {ERROR_TEXT.get(code, '')}".strip(),
+                    text,
                     code=code,
                     cmd=pending.cmd,
                     req_id=pending.req_id,
@@ -311,6 +319,7 @@ class HostClient:
                 )
             else:
                 pending.result = RESULT_OK
+                self.last_ok = {"ts": self.now_ms(), "cmd": pending.cmd, "req_id": pending.req_id}
                 self._apply_ok(pending, frame)
                 self.emit(
                     "reply",
@@ -344,6 +353,18 @@ class HostClient:
             self.latched = True
         if pending.cmd == "stop_clear" and pairs.get("latch") == "0":
             self.latched = False
+        if pending.cmd == "motor_query":
+            try:
+                addr = int(pairs.get("addr", 0))
+                counts = int(pairs.get("counts", ""))
+            except (TypeError, ValueError):
+                return
+            if addr > 0:
+                self.last_counts[addr] = {
+                    "counts": counts,
+                    "ts": self.now_ms(),
+                    "what": pairs.get("what", ""),
+                }
 
     def _on_event(self, frame: P.Frame) -> None:
         pairs = frame.pairs

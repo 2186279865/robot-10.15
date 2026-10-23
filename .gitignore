@@ -115,3 +115,8 @@ new_eye/runtime/latest_targets.json
 # final 是自包含发布目录：允许 final 内的 SAM 权重入库（用 Git LFS 存大文件）
 !final/new_eye/models/
 !final/new_eye/models/sam_b.pt
+# 大件二进制：模型权重不进 git 历史（物理备份 / 后续 LFS）
+10.21/vision/models/
+01-交付包/vision/models/
+*.pt
+*.onnx

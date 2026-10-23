@@ -81,6 +81,12 @@ void Gripper_ReleaseNow(void)
     gripper_apply();
 }
 
+void Gripper_ReadyNow(void)
+{
+    gripper_deg = GRIPPER_READY_DEG;
+    gripper_apply();
+}
+
 uint16_t Gripper_GetAngle(void)
 {
     return gripper_deg;

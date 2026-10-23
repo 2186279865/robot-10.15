@@ -60,3 +60,10 @@ void Servo_SetAngle(uint16_t angle)
     TIM_SetCompare1(TIM4, Servo_AngleToPulse(angle));
 }
 
+/* 卸力：把比较值设成 0，占空比 0% → 输出恒低，舵机收不到脉冲就不出力。
+ * 定时器本身不关，下一次 Servo_SetAngle() 直接覆盖比较值即可恢复输出。 */
+void Servo_Release(void)
+{
+    TIM_SetCompare1(TIM4, 0U);
+}
+

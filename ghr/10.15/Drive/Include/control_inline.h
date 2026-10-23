@@ -64,6 +64,11 @@ static uint16_t control_gripper_angle = 180U;   /* 上电停在松开位 */
 static uint8_t  control_gripper_busy = 0U;
 static uint32_t control_gripper_ready_ms = 0U;
 static uint8_t  control_gripper_settled = 0U;   /* 等待刚结束，供上层报一次事件 */
+/* 长时间保持夹紧会堵转发热：hold_max_ms > 0 时，夹爪到位后再等这么久就卸力。
+ * 默认 0 = 不卸力（比赛流程用默认值，夹持只有几秒）。 */
+static uint32_t control_gripper_hold_max_ms = 0U;
+static uint32_t control_gripper_hold_deadline_ms = 0U;
+static uint8_t  control_gripper_pwm_off = 0U;
 
 /* ---------------- 轴查表 ---------------- */
 
@@ -115,6 +120,9 @@ static void control_reset_state(void)
     control_gripper_busy   = 0U;
     control_gripper_ready_ms = 0U;
     control_gripper_settled  = 0U;
+    control_gripper_hold_max_ms = 0U;
+    control_gripper_hold_deadline_ms = 0U;
+    control_gripper_pwm_off = 0U;
 }
 
 /* 夹爪硬件初始化：必须在上电时调用一次，否则 PB6 根本没有 PWM 输出，
@@ -125,6 +133,8 @@ static void control_gripper_init(void)
     control_gripper_busy     = 0U;
     control_gripper_settled  = 0U;
     control_gripper_ready_ms = 0U;
+    control_gripper_hold_deadline_ms = 0U;
+    control_gripper_pwm_off  = 0U;
 }
 
 static uint32_t control_next_task_id(void)
@@ -307,7 +317,17 @@ static uint8_t control_gripper_apply(uint16_t deg, uint16_t settle_ms,
     control_gripper_busy     = 1U;
     control_gripper_settled  = 0U;
     control_gripper_ready_ms = now_ms + (uint32_t)settle_ms;
+    control_gripper_pwm_off  = 0U;      /* 新动作 = 重新上力 */
+    control_gripper_hold_deadline_ms =
+        (control_gripper_hold_max_ms == 0U) ? 0U
+                                            : (now_ms + control_gripper_hold_max_ms);
     return 1U;
+}
+
+/* 设置“夹紧后最多保持多久”，0 = 永不卸力。由 host 命令层在每次夹爪动作前写入。 */
+static void control_gripper_set_hold_max(uint32_t ms)
+{
+    control_gripper_hold_max_ms = ms;
 }
 
 /* 等待结束只报告"等待结束"，不声称夹到位（没有传感器） */
@@ -355,6 +375,16 @@ static uint8_t control_service(uint32_t now_ms, uint16_t gap_ms)
             control_gripper_busy    = 0U;
             control_gripper_settled = 1U;
         }
+    }
+
+    /* 长时间保持夹紧会堵转发热：hold_max_ms>0 且已过期限就停脉冲卸力。
+     * 默认 0 = 不卸力（正常流程夹持只有几秒），只在调试长时间夹住物体时才用。 */
+    if ((control_gripper_hold_max_ms != 0U) && (control_gripper_pwm_off == 0U) &&
+        (control_gripper_busy == 0U) &&
+        ((int32_t)(now_ms - control_gripper_hold_deadline_ms) >= 0))
+    {
+        Servo_Release();
+        control_gripper_pwm_off = 1U;
     }
 
     return sent;

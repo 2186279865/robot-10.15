@@ -24,6 +24,9 @@ void Servo_Init(void);
  * position instead of 0 degrees). */
 void Servo_InitAt(uint16_t angle);
 void Servo_SetAngle(uint16_t angle);
+/* 停止输出脉冲 = 舵机卸力（不再保持角度）。之后任何 Servo_SetAngle() 都会自动恢复输出。
+ * 只用于“夹着东西长时间不动会发热”的兜底场景，正常流程不要调用。 */
+void Servo_Release(void);
 uint16_t Servo_AngleToPulse(uint16_t angle);
 
 #endif

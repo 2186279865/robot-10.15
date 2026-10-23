@@ -65,6 +65,13 @@ class GuiSmokeTest(unittest.TestCase):
             cls.root.destroy()
 
     # -- 连接 ---------------------------------------------------------------
+    def test_00_home_order_filter(self):
+        """回 0 顺序：Z→X→Y→转盘；给 axes 时只保留这些轴。"""
+        self.assertEqual(self.gui.home_order(), [1, 4, 5, 3])
+        self.assertEqual(self.gui.home_order((4, 5)), [4, 5])
+        self.assertEqual(self.gui.home_order([3]), [3])
+        self.assertEqual(self.gui.home_order(()), [])
+
     def test_01_handshake_reaches_online(self):
         self.assertTrue(self.app.client.online, self.app.client.state)
         self.assertTrue(self.app.client.fw_version)

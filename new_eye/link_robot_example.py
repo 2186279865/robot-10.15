@@ -50,7 +50,7 @@ def main():
             time.sleep(.2)
             # 简单超时保护：2 秒没有新帧就当作视觉断开
             if last[0] and time.time() - last[0] > 2.0:
-                print('⚠ 超过 2 秒没有新帧，机器人应停止等待')
+                print('[!] 超过 2 秒没有新帧，机器人应停止等待')
                 last[0] = time.time()
     except KeyboardInterrupt:
         cli.stop()

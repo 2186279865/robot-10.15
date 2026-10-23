@@ -1,0 +1,25 @@
+[Unit]
+Description=Robot Pi Agent (image stream + serial bridge + UDP discovery)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangepi
+Group=orangepi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/orangepi/robot1021/pi
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 pi_agent.py --cam-index 0 --cam-index 2
+# 崩溃/被 OOM 杀掉后 3 秒重启
+Restart=always
+RestartSec=3
+# 退出时先发 SIGTERM（pi_agent 会发停车帧、关相机、关串口）
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# 别用高优先级抢占：会饿死相机线程
+Nice=0
+
+[Install]
+WantedBy=multi-user.target

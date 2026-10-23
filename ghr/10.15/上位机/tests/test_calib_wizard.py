@@ -282,6 +282,112 @@ class TestOrthoSolve(unittest.TestCase):
         self.assertEqual(len(data['points']), 3)
 
 
+class TestMarks(unittest.TestCase):
+    """视觉点标注法：new_eye 点位置 → 上位机记录爪位。"""
+
+    def _write(self, points):
+        path = tmp_path('_tmp_marks.json')
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        path.write_text(json.dumps({'points': points}, ensure_ascii=False), encoding='utf-8')
+        return path
+
+    def test_load_marks_valid_and_roundtrip(self):
+        path = self._write([
+            {'u': 0.2, 'v': 0.3, 'x': 100.0, 'y': 200.0},
+            {'u': 0.8, 'v': 0.3, 'px': 3000, 'py': 0},
+        ])
+        marks = W.load_marks(path)
+        self.assertEqual(len(marks), 2)
+        self.assertAlmostEqual(marks[0]['u'], 0.2)
+        self.assertAlmostEqual(marks[0]['x'], 100.0)
+        self.assertAlmostEqual(marks[1]['px'], 3000.0)
+        W.save_marks(marks, path)
+        again = W.load_marks(path)
+        self.assertEqual(len(again), 2)
+        self.assertAlmostEqual(again[1]['py'], 0.0)
+
+    def test_load_marks_missing_or_bad(self):
+        self.assertEqual(W.load_marks(tmp_path('_nope.json')), [])
+        path = tmp_path('_bad_marks.json')
+        self.addCleanup(lambda: path.unlink(missing_ok=True))
+        path.write_text('{oops', encoding='utf-8')
+        self.assertEqual(W.load_marks(path), [])
+        path.write_text(json.dumps({'points': [{'u': 'x'}, 3]}), encoding='utf-8')
+        self.assertEqual(W.load_marks(path), [])
+
+    def test_marks_points_requires_pulses(self):
+        marks = [{'u': 0.2, 'v': 0.2, 'px': 0.0, 'py': 0.0},
+                 {'u': 0.8, 'v': 0.2, 'px': 3000.0, 'py': 0.0},
+                 {'u': 0.2, 'v': 0.8}]
+        with self.assertRaises(ValueError) as ctx:
+            W.marks_points(marks)
+        self.assertIn('P3', str(ctx.exception))
+
+    def test_marks_points_needs_three(self):
+        with self.assertRaises(ValueError) as ctx:
+            W.marks_points([{'u': 0.2, 'v': 0.2, 'px': 0.0, 'py': 0.0}])
+        self.assertIn('3 个', str(ctx.exception))
+
+    def test_marks_points_recover_affine(self):
+        a, b, c, d = (TRUTH[key] for key in 'abcd')
+        marks = []
+        for u, v in [(0.25, 0.30), (0.75, 0.30), (0.25, 0.80)]:
+            marks.append({'u': u, 'v': v, 'px': a * u + b * v, 'py': c * u + d * v})
+        points = W.marks_points(marks)
+        result = W.solve(points, write=False)
+        self.assertLess(result['max_abs_pulse']['dx'], 1.0)
+        self.assertLess(result['max_abs_pulse']['dy'], 1.0)
+        self.assertAlmostEqual(result['affine']['tx'], 0.0, places=3)
+
+
+class TestJogDirection(unittest.TestCase):
+    """点动按钮的方向换算（脉冲只表大小，方向是独立 dir）。"""
+
+    def test_plain(self):
+        self.assertEqual(W.jog_direction(1), 0)
+        self.assertEqual(W.jog_direction(-1), 1)
+
+    def test_flip(self):
+        self.assertEqual(W.jog_direction(1, flip=True), 1)
+        self.assertEqual(W.jog_direction(-1, flip=True), 0)
+
+    def test_returns_dir_only(self):
+        for sign in (1, -1):
+            for flip in (False, True):
+                self.assertIn(W.jog_direction(sign, flip), (0, 1))
+
+
+class TestPickPulses(unittest.TestCase):
+    """记录爪位时的脉冲来源：优先新鲜双轴回读，否则用软位置。"""
+
+    def test_fresh_readback_wins(self):
+        now = 10000
+        rb = {'x': {'counts': 65536, 'ts': now - 100},
+              'y': {'counts': 32768, 'ts': now - 100}}
+        got = W.pick_pulses((123, 456), rb, now)
+        self.assertEqual(got['source'], 'readback')
+        self.assertAlmostEqual(got['px'], 3200.0)
+        self.assertAlmostEqual(got['py'], 1600.0)
+
+    def test_stale_readback_falls_back(self):
+        now = 10000
+        rb = {'x': {'counts': 65536, 'ts': now - 9000},
+              'y': {'counts': 32768, 'ts': now - 9000}}
+        got = W.pick_pulses((123, 456), rb, now)
+        self.assertEqual(got['source'], 'soft')
+        self.assertEqual((got['px'], got['py']), (123.0, 456.0))
+
+    def test_missing_axis_falls_back(self):
+        now = 10000
+        rb = {'x': {'counts': 65536, 'ts': now}}
+        got = W.pick_pulses((10, 20), rb, now)
+        self.assertEqual(got['source'], 'soft')
+
+    def test_counts_to_pulses_scale(self):
+        self.assertAlmostEqual(W.counts_to_pulses(65536), 3200.0)
+        self.assertAlmostEqual(W.counts_to_pulses(-16384), -800.0)
+
+
 class TestTrayState(unittest.TestCase):
     def test_state_roundtrip(self):
         path = tmp_path('_tmp_tray_state.json')

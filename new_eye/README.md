@@ -25,6 +25,7 @@ powershell -ExecutionPolicy Bypass -File .\new_eye\run_gui_as_admin.ps1
 6. 灰色/黑色物料在“含灰/黑物料”勾选后启用“与空托盘差分”的分支（先点“采集空托盘”拍一张空托盘背景更稳）；
 7. “单次识别”做一次双摄识别（`frames_for_vote` 帧投票分类）并把结果写入 `new_eye/runtime/latest_targets.json`；
 8. **分类**：每个目标自动得到“形状|颜色”键并查 `config.json` 的 `class_map`。要教它会认：点“登记样本” → 点顶视画面里的目标 → 输入类别编号或名称（如 `1`、`五棱体·黄`）。登记内容写入 `new_eye/samples.json`，同时把该“形状|颜色”规则写回 `config.json` 的 `class_map` 和 `class_names`，重启后仍有效。没登记过的组合显示“待登记”，不会乱猜。
+9. **标定点（给上位机 X/Y 标定用）**：点底部“标注点”（按钮变“结束标注”）→ 在顶视画面里点 3~6 个分散的位置（物块中心、贴纸、托盘记号都行），画面上出现青色 `P1…` 十字；右键撤销上一个点，点“结束标注”后自动写入 `new_eye/runtime/calib_marks.json`；上位机“标定向导 → 视觉点标注”里读这份文件，再把夹爪移到同一位置记录脉冲即可。
 
 调试点位、相机索引和旋转角度后点“保存配置”，下次打开自动使用。
 
@@ -72,3 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\new_eye\run_gui_as_admin.ps1
 
 协议细节（JSON 字段、0xAA55 串口帧、CRC16）见 `new_eye/link.py` 顶部注释和
 `new_eye/交接文档.md` 第 19 节。首次使用记得放行 Windows 防火墙 5055 端口。
+
+没接相机、想先验证链路：`python new_eye/link_demo.py`（发假帧）或
+`python new_eye/link_demo.py --selftest`（本机自检）。热点/香橙派的分步操作见
+`new_eye/无线组网联调.md`。

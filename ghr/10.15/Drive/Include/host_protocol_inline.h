@@ -80,7 +80,7 @@ typedef struct
     uint16_t    max;
 } HostParam;
 
-#define HOST_PARAM_COUNT 13U
+#define HOST_PARAM_COUNT 15U
 
 /* 出厂默认值。host_protocol_init() 会把下面的运行参数表恢复成这一份，
  * 所以 MCU 复位后参数一定回到默认，不会带着上一次会话的临时值。 */
@@ -90,9 +90,14 @@ static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
     { "acc",               1U,    0U,  255U   },
     { "speed_rpm_max",     300U,  1U,  6000U  },
     { "gripper_open_deg",  180U,  0U,  270U   },
+    { "gripper_ready_deg", 150U,  0U,  270U   },
     { "gripper_grab_deg",  135U,  0U,  270U   },
     { "gripper_step_deg",  45U,   1U,  270U   },
     { "gripper_settle_ms", 200U,  0U,  60000U },
+    /* 夹紧后最多保持多久就停脉冲卸力，0 = 不卸力（默认）。
+     * 只在调试“长时间夹住物体”时调大，比赛流程保持 0。
+     * 注意 HostParam 是 uint16_t，上限 60000 ms（60 秒）。 */
+    { "gripper_hold_max_ms", 0U,  0U,  60000U },
     { "heartbeat_ms",      500U,  20U, 60000U },
     { "link_timeout_ms",   3000U, 100U, 60000U },
     { "query_timeout_ms",  100U,  10U, 60000U },
@@ -1409,6 +1414,7 @@ static void host_cmd_gripper(uint16_t id, uint8_t nargs)
 {
     uint32_t open_deg;
     uint32_t grab_deg;
+    uint32_t ready_deg;
     uint32_t step_deg;
     uint32_t settle;
     int32_t  target;
@@ -1417,6 +1423,7 @@ static void host_cmd_gripper(uint16_t id, uint8_t nargs)
 
     open_deg = host_param_value("gripper_open_deg");
     grab_deg = host_param_value("gripper_grab_deg");
+    ready_deg = host_param_value("gripper_ready_deg");
     step_deg = host_param_value("gripper_step_deg");
     settle   = host_param_value("gripper_settle_ms");
 
@@ -1427,6 +1434,10 @@ static void host_cmd_gripper(uint16_t id, uint8_t nargs)
     else if (host_streq(host_tokens[2], "grab"))
     {
         target = (int32_t)grab_deg;
+    }
+    else if (host_streq(host_tokens[2], "ready"))
+    {
+        target = (int32_t)ready_deg;
     }
     else if (host_streq(host_tokens[2], "step_grab"))
     {
@@ -1451,6 +1462,7 @@ static void host_cmd_gripper(uint16_t id, uint8_t nargs)
         return;
     }
 
+    control_gripper_set_hold_max((uint32_t)host_param_value("gripper_hold_max_ms"));
     (void)control_gripper_apply((uint16_t)target, (uint16_t)settle, Stepper_Millis());
     host_body_ok(&host_out, id);
     host_kv_str(&host_out, "action", host_tokens[2]);
@@ -1480,6 +1492,7 @@ static void host_cmd_servo_angle(uint16_t id, uint8_t nargs)
         return;
     }
 
+    control_gripper_set_hold_max((uint32_t)host_param_value("gripper_hold_max_ms"));
     (void)control_gripper_apply((uint16_t)deg, (uint16_t)settle, Stepper_Millis());
     host_body_ok(&host_out, id);
     host_kv_u32(&host_out, "deg", deg);

@@ -38,6 +38,16 @@ from simulator import SimulatedDevice, SimulatedLink  # noqa: E402
 
 #: 界面里的轴名字，必须与固件 `stepper.h` 的地址宏一致：Z=1、托盘=3、X=4、Y=5
 AXIS_LABELS = {1: "Z (1)", 3: "托盘 (3)", 4: "X (4)", 5: "Y (5)"}
+
+
+def home_order(axes=None):
+    """回 0 的轴顺序：Z（先抬）→ X → Y → 转盘；axes 给定时只保留这些轴。"""
+    order = [1, 4, 5, 3]
+    if axes is None:
+        return order
+    want = set(int(a) for a in axes)
+    return [addr for addr in order if addr in want]
+
 BAUDRATE = 115200
 POLL_MS = 30
 LOG_MAX_LINES = 2000
@@ -736,12 +746,15 @@ class App:
         except (IndexError, TypeError, ValueError):
             pass
 
-    def home_all(self) -> None:
-        """一键回 0 基准点：按“位置清零”时的原点，把 Z→X→Y→转盘 依次开回来。"""
+    def home_all(self, axes=None) -> None:
+        """一键回 0 基准点：按“位置清零”时的原点，把 Z→X→Y→转盘 依次开回来。
+
+        :param axes: 只回其中的轴（如 (4, 5) 只回 X/Y）；None 表示全部四轴。
+        """
         if not self.client.online:
             self.note("未连接：无法回 0")
             return
-        order = [1, 4, 5, 3]  # 先抬 Z，再回 X/Y，最后转盘
+        order = home_order(axes)
         moves = []
         skipped = []
         for addr in order:

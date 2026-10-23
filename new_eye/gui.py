@@ -19,6 +19,7 @@ from fusion import fuse
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / 'config.json'
+MARKS = ROOT / 'runtime' / 'calib_marks.json'
 
 # 类别配色（最多六类，未知/待登记用琥珀色）
 CLS_COLORS = {'1': '#ff6b6b', '2': '#ffd400', '3': '#6ee06e',
@@ -169,6 +170,8 @@ class App:
         self.side_points = [tuple(p) for p in self.cfg.get('side_points', [])]
         self.point_mode = None
         self.register_mode = False
+        self.mark_mode = False
+        self.marks = self.load_marks()
         self.segmenter = None
         self.samples = classify.load_samples()
         self.fused = []
@@ -288,6 +291,9 @@ class App:
         self.live_btn.pack(side='left', padx=3)
         self.reg_btn = ttk.Button(bot, text='登记样本', command=self.toggle_register)
         self.reg_btn.pack(side='left', padx=3)
+        self.mark_btn = ttk.Button(bot, text='标注点', command=self.toggle_marks)
+        self.mark_btn.pack(side='left', padx=3)
+        ttk.Button(bot, text='清空标注', command=self.clear_marks).pack(side='left', padx=3)
 
     # -------------------------------------------------------------- 文字面板
     def note(self, msg):
@@ -309,12 +315,16 @@ class App:
         if unc:
             ctxt += '  未确认×%d' % unc
         L = ['【运行】' + ('实时分割中' if self.live else ('相机已打开' if self.running else '未打开相机'))
+             + (' · 标注模式' if self.mark_mode else '')
              + (' · 登记模式' if self.register_mode else ''),
              '【帧率】刷新 %.1f | 顶视 %.1f | 副摄 %.1f fps' % (self.disp_fps, fa, fb)]
         if getattr(self, 'live_status', None):
             L.append('【状态】' + self.live_status)
         L += [
              '【分割】%.2f fps   融合目标 %d 个' % (self.det_fps, len(fused))]
+        if self.marks:
+            L.append('【标注】%d 个标定点（给上位机标定用），最近 u=%.3f v=%.3f'
+                     % (len(self.marks), self.marks[-1]['u'], self.marks[-1]['v']))
         fi = getattr(self, 'fuse_info', None) or {}
         if fi.get('n_top') is not None:
             fdir = ('镜像' if fi.get('flip') else '同向')
@@ -462,6 +472,11 @@ class App:
         self.a = self.bstream = None
 
     def cancel_modes(self):
+        if self.mark_mode:
+            self.mark_mode = False
+            if hasattr(self, 'mark_btn'):
+                self.mark_btn.config(text='标注点')
+            self.note('已结束标注：共 %d 个点' % len(self.marks))
         if self.register_mode:
             self.register_mode = False
             self.note('已退出登记模式')
@@ -515,6 +530,9 @@ class App:
                 and cross(p[2], p[3], p[0]) * cross(p[2], p[3], p[1]) <= 0)
 
     def undo_point(self, e, which):
+        if self.mark_mode:
+            self.undo_mark()
+            return
         if self.register_mode:
             self.register_mode = False
             self.note('已退出登记模式')
@@ -613,16 +631,9 @@ class App:
                 self.link_var.set(False)
                 self.note('网络推送启动失败：%s（端口 %d 可能被占用）' % (e, self.link_port))
                 return
-            ip = '127.0.0.1'
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(('8.8.8.8', 80))
-                ip = s.getsockname()[0]
-                s.close()
-            except OSError:
-                pass
-            self.note('网络推送已开启：端口 %d，本机 IP %s（机器人连 tcp://%s:%d）'
-                      % (self.link_port, ip, ip, self.link_port))
+            ips = link._local_ips() or ['127.0.0.1']
+            self.note('网络推送已开启：端口 %d，本机 IP %s（机器人端自动发现即可；手输地址时用热点网段那个，一般是 192.168.137.1）'
+                      % (self.link_port, ', '.join(ips)))
         else:
             if self.link is not None:
                 self.link.stop()
@@ -850,6 +861,7 @@ class App:
                 base = '#ffd400' if f['views'] == 'top+side' else '#ff9f40'
                 self.draw_item(self.cb, self.vb, self.sf.shape, shown, f['id'],
                                self.item_color(t or s, base))
+        self.draw_marks()
 
     # -------------------------------------------------------------- 实时识别
     def toggle_live(self):
@@ -957,6 +969,8 @@ class App:
         self.note('登记样本：点击画面中的物体，输入类别编号/名称；右键或 Esc 取消')
 
     def canvas_click(self, e, which):
+        if self.mark_click(e, which):
+            return True
         if self.point_click(e, which):
             return True
         if not self.register_mode:
@@ -984,6 +998,111 @@ class App:
             if x - 10 <= fx <= x + w + 10 and y - 10 <= fy <= y + h + 10:
                 return it
         return best
+
+    # ---------------------------------------------------------- 标定标注点
+    def load_marks(self):
+        """读 new_eye/runtime/calib_marks.json（上位机“标注点标定”也用这份文件）。"""
+        try:
+            data = json.loads(MARKS.read_text(encoding='utf8'))
+            if isinstance(data, dict):
+                data = data.get('points') or []
+            return [m for m in data if isinstance(m, dict) and 'u' in m and 'v' in m]
+        except Exception:
+            return []
+
+    def save_marks(self):
+        try:
+            MARKS.parent.mkdir(parents=True, exist_ok=True)
+            tmp = MARKS.with_name(MARKS.stem + '.%d.tmp' % threading.get_ident())
+            payload = {'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                       'points': self.marks}
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                           encoding='utf8')
+            tmp.replace(MARKS)
+            return True
+        except Exception as exc:
+            self.note('标注点保存失败：%s' % exc)
+            return False
+
+    def toggle_marks(self):
+        if self.mark_mode:
+            self.mark_mode = False
+            self.mark_btn.config(text='标注点')
+            self.note('已结束标注：共 %d 个点，已存 new_eye/runtime/calib_marks.json'
+                      % len(self.marks))
+            return
+        if len(self.points) != 4:
+            self.note('先完成顶视四点定位，再来标注点')
+            return
+        self.register_mode = False
+        self.mark_mode = True
+        self.mark_btn.config(text='结束标注')
+        self.note('标注点：在顶视画面里点物块/标记的位置（右键撤销上一个，Esc 退出）；'
+                  '记完到上位机“标定向导→标注点法”里把爪子移到同一位置记录脉冲')
+
+    def frame_to_uv(self, fx, fy):
+        """画面像素 → 四点框选区域内的归一化 u,v（与识别结果同一坐标系）。"""
+        if len(self.points) != 4:
+            return None
+        s = 700
+        p = np.array(self.points, dtype=np.float32)
+        dst = np.array([[0, 0], [s, 0], [s, s], [0, s]], dtype=np.float32)
+        H = cv2.getPerspectiveTransform(p, dst)
+        q = cv2.perspectiveTransform(np.float32([[[fx, fy]]]), H)[0][0]
+        return float(q[0] / s), float(q[1] / s)
+
+    def mark_click(self, e, which):
+        if not self.mark_mode:
+            return False
+        if which != 'top' or self.tf is None:
+            return True
+        fx, fy = self.va.canvas_to_frame(e.x, e.y, self.tf.shape)
+        got = self.frame_to_uv(fx, fy)
+        if got is None:
+            self.note('顶视四点还没完成：先点「顶视四点框选」')
+            return True
+        u, v = got
+        if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            self.note('点在四点多边形外面了（u=%.3f v=%.3f）：请点框内的标记' % (u, v))
+            return True
+        self.marks.append({'u': round(u, 4), 'v': round(v, 4),
+                           'x': round(float(fx), 1), 'y': round(float(fy), 1)})
+        self.save_marks()
+        self.note('标注点 P%d：u=%.4f v=%.4f（共 %d 个）'
+                  % (len(self.marks), u, v, len(self.marks)))
+
+    def undo_mark(self):
+        if self.marks:
+            m = self.marks.pop()
+            self.save_marks()
+            self.note('已撤销标注点 P%d（剩 %d 个）' % (len(self.marks) + 1, len(self.marks)))
+
+    def clear_marks(self):
+        if not self.marks:
+            self.note('还没有标注点')
+            return
+        if not messagebox.askyesno('清空标注', '清空全部 %d 个标注点？' % len(self.marks),
+                                   parent=self.r):
+            return
+        self.marks = []
+        self.save_marks()
+        self.note('已清空标注点')
+
+    def draw_marks(self):
+        """顶视画面上画出标注点（青色十字 + P 编号）。"""
+        if self.tf is None or not self.marks:
+            return
+        for i, m in enumerate(self.marks, 1):
+            try:
+                c = self.va.frame_to_canvas(float(m['x']), float(m['y']), self.tf.shape)
+            except Exception:
+                continue
+            x, y = c
+            self.ca.create_line(x - 9, y, x + 9, y, fill='#00e5ff', width=2)
+            self.ca.create_line(x, y - 9, x, y + 9, fill='#00e5ff', width=2)
+            self.ca.create_oval(x - 11, y - 11, x + 11, y + 11, outline='#00e5ff', width=1)
+            self.ca.create_text(x + 13, y - 12, text='P%d' % i, fill='#00e5ff',
+                                anchor='nw', font=('Arial', 11, 'bold'))
 
     def register_item(self, item, which):
         if which != 'top':

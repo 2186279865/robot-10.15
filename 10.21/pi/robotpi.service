@@ -1,0 +1,36 @@
+[Unit]
+# 10.21/pi/robotpi.service —— 树莓派开机自启【示例文件，别直接拷】
+#
+# ⚠ 这里是「树莓派 + 用户 pi + /home/pi/10.21/pi」的示例。
+#   换机器（香橙派 / 用户名 orangepi / 目录 ~/robot1021/pi）直接拷会启动失败，
+#   而 systemd 的错误只在 journal 里，现场表现就是「上位机点了连接没反应」。
+#
+#   正确做法：`bash install.sh` —— 它会按当前机器现场生成 unit
+#   （用户、目录、--cam-index 自动填好）并 enable --now。
+#   手工装也行，但要先改下面 User/Group/WorkingDirectory/ExecStart 四行。
+# 查看：systemctl status robotpi --no-pager -l
+# 日志：journalctl -u robotpi -f
+Description=Robot Pi Agent (image stream + serial bridge + UDP discovery)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/pi/10.21/pi
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 pi_agent.py
+# 崩溃/被 OOM 杀掉后 3 秒重启
+Restart=always
+RestartSec=3
+# 退出时先发 SIGTERM（pi_agent 会发停车帧、关相机、关串口）
+KillSignal=SIGTERM
+TimeoutStopSec=10
+# 树莓派上别用高优先级抢占：会饿死相机线程
+Nice=0
+
+[Install]
+WantedBy=multi-user.target

@@ -236,6 +236,18 @@ class TestEventsAndSafety(ClientTestBase):
         self.assertTrue(any(e.data.get("code") == "E10" for e in errs))
         self.assertNotIn(rid, self.client.pending)
 
+    def test_query_counts_are_cached(self):
+        """motor_query pos 的 counts 会缓存到 client.last_counts，供标定向导记录手推后的脉冲。"""
+        self.connect()
+        self.client.poll_events(100)
+        rid = self.client.send("motor_query", 4, "pos", timeout_ms=HC.TIMEOUT_QUERY_MS)
+        self.pump()
+        self.assertNotIn(rid, self.client.pending)
+        item = self.client.last_counts.get(4)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["counts"], 0)
+        self.assertIn("ts", item)
+
     def test_stop_latch_exempts_queries_and_clear(self):
         self.connect()
         self.device.latch_stop("test")

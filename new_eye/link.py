@@ -88,19 +88,46 @@ def _local_ips():
 
 
 def _beacon_loop(stop_evt, data_port, discover_port, interval=.8):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    """每 0.8s 广播一次"我是视觉端"。
+
+    关键：只往 255.255.255.255 发时，Windows 只会走默认路由那块网卡——笔记本
+    同时开着 VPN / 有线上网时，热点网段（192.168.137.x）根本收不到。所以给
+    每个本地 IPv4 各绑一个 socket 分别广播，热点/有线哪个网段都能收到。
+    """
+    socks = []
     try:
+        for ip in _local_ips() or [None]:
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                if ip:
+                    s.bind((ip, 0))
+                socks.append(s)
+            except OSError:
+                if s is not None:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+        if not socks:                       # 一个都绑不上就退回默认路由
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            socks.append(s)
         while not stop_evt.wait(interval):
             msg = json.dumps({'app': DISCOVER_MAGIC, 'port': data_port,
                               'ips': _local_ips()}).encode('utf8')
-            for dst in ('255.255.255.255', '<broadcast>'):
+            for s in socks:
                 try:
-                    s.sendto(msg, (dst, discover_port))
+                    s.sendto(msg, ('255.255.255.255', discover_port))
                 except OSError:
                     pass
     finally:
-        s.close()
+        for s in socks:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
 def discover(timeout=4.0, discover_port=DISCOVER_PORT):

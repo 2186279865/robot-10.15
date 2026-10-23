@@ -29,6 +29,8 @@ HOST_DIR = Path(__file__).resolve().parent
 ROOT = HOST_DIR.parents[2]
 VISION_JSON = ROOT / 'new_eye' / 'runtime' / 'latest_targets.json'
 CALIB_PATH = ROOT / 'new_eye' / 'tray_calib.json'
+#: new_eye 里“标注点”功能写出的文件（每个点是画面 u/v + 原始像素坐标）
+MARKS_PATH = ROOT / 'new_eye' / 'runtime' / 'calib_marks.json'
 
 #: 视觉约 1 fps；标定用的点也应该是刚拍的，太旧就不要（工件可能已被碰走）
 MAX_AGE_S = 15.0
@@ -44,9 +46,49 @@ COUNTS_PER_REV = 65536.0
 PULSES_PER_REV = 3200.0
 
 
+def jog_direction(sign, flip=False):
+    """点动方向：sign>0 为“正”（命令 dir=0），flip=True 时反过来。
+
+    固件 `motor_pos(axis, dir 0|1, rpm, acc, pulses, mode)` 里脉冲只表大小，
+    方向是独立的 dir 字段，所以这里只算 dir。
+    """
+    return 1 if (sign < 0) != bool(flip) else 0
+
+
 def counts_to_pulses(counts, counts_per_rev=COUNTS_PER_REV, pulses_per_rev=PULSES_PER_REV):
     """编码器计数 → 位置指令脉冲（3200/圈）。手推模式用它把回读换算成“脉冲坐标”。"""
     return float(counts) / float(counts_per_rev) * float(pulses_per_rev)
+
+
+#: 回读轴号：X=4、Y=5（与 `protocol.VALID_AXES` 一致）
+READBACK_AXES = {'x': 4, 'y': 5}
+#: 回读值多久内算“新鲜”（毫秒）；超时就用软位置
+READBACK_MAX_AGE_MS = 2500
+
+
+def pick_pulses(soft, readback, now_ms, max_age_ms=READBACK_MAX_AGE_MS,
+                counts_per_rev=COUNTS_PER_REV, pulses_per_rev=PULSES_PER_REV):
+    """选“记录爪位”用的脉冲来源。
+
+    `soft`：(px, py) 软位置（相对走累加，没有回读时靠它）。
+    `readback`：{'x': {'counts': int, 'ts': ms}|None, 'y': ...}（来自 `motor_query pos`）。
+    返回 {'px','py','source'}；`source` 为 'readback'（回读新鲜、两轴都有）或 'soft'。
+    """
+    px, py = float(soft[0]), float(soft[1])
+    rb = readback or {}
+    pair = (rb.get('x') or {}, rb.get('y') or {})
+    ok = True
+    for item in pair:
+        counts = item.get('counts')
+        ts = item.get('ts')
+        if counts is None or ts is None or now_ms - int(ts) > max_age_ms:
+            ok = False
+            break
+    if ok:
+        px = counts_to_pulses(pair[0]['counts'], counts_per_rev, pulses_per_rev)
+        py = counts_to_pulses(pair[1]['counts'], counts_per_rev, pulses_per_rev)
+        return {'px': px, 'py': py, 'source': 'readback'}
+    return {'px': px, 'py': py, 'source': 'soft'}
 
 
 def wrap_delta(prev_counts, now_counts, counts_per_rev=COUNTS_PER_REV):
@@ -432,3 +474,55 @@ def summary(result):
     return (f"X 正脉冲 → u {per['x']['du']:+.2e}/脉冲、v {per['x']['dv']:+.2e}/脉冲；"
             f"Y 正脉冲 → u {per['y']['du']:+.2e}/脉冲、v {per['y']['dv']:+.2e}/脉冲；"
             f"残差 max |dx|={rx:.0f}、|dy|={ry:.0f} 脉冲")
+
+
+# ---------------- 标注点法（new_eye 里点位置 → 上位机记录爪位） ----------------
+def load_marks(path=None):
+    """读 new_eye“标注点”文件：返回 [{u, v, x?, y?, px?, py?}, ...]，坏文件/缺失返回 []。"""
+    path = MARKS_PATH if path is None else path
+    try:
+        data = json.loads(Path(path).read_text(encoding='utf8'))
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get('points') or []
+    out = []
+    for m in data if isinstance(data, list) else []:
+        if not isinstance(m, dict):
+            continue
+        try:
+            rec = {'u': float(m['u']), 'v': float(m['v'])}
+        except Exception:
+            continue
+        for key in ('x', 'y', 'px', 'py'):
+            if m.get(key) is not None:
+                try:
+                    rec[key] = float(m[key])
+                except Exception:
+                    pass
+        out.append(rec)
+    return out
+
+
+def save_marks(marks, path=None):
+    """把（可能已补上 px/py 的）标注点写回文件，下次打开还能继续记录。"""
+    p = Path(MARKS_PATH if path is None else path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'), 'points': marks}
+    tmp = p.with_name(p.stem + '.tmp')
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding='utf8')
+    tmp.replace(p)
+    return p
+
+
+def marks_points(marks):
+    """标注点 → 标定点；要求每个点都记录过爪位脉冲（px/py）。"""
+    pts = []
+    for i, m in enumerate(marks, 1):
+        if m.get('px') is None or m.get('py') is None:
+            raise ValueError('标注点 P%d 还没有记录爪位：把 X/Y 开到该点上方，再点“记录爪位”' % i)
+        pts.append({'u': float(m['u']), 'v': float(m['v']),
+                    'px': float(m['px']), 'py': float(m['py'])})
+    if len(pts) < 3:
+        raise ValueError('至少要 3 个标注点（现在 %d 个）；点要分散开，别挤在一条线上' % len(pts))
+    return pts

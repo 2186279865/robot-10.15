@@ -1,0 +1,18 @@
+# 10.21 笔记本端依赖（Windows / Linux 通用，2026-10 验证过的组合）
+# 安装：双击 setup.bat  （或 pip install -r requirements.txt）
+
+# --- 视觉（vision/，SAM 分割 + 融合 + 分类）---
+numpy>=1.26,<2.3
+opencv-python>=4.9
+pillow>=10.0
+torch>=2.4            # CUDA 版：pip install torch --index-url https://download.pytorch.org/whl/cu128
+torchvision>=0.19
+ultralytics>=8.3      # 提供 SAM 模型加载
+
+# --- 控制（host/，tkinter 标准库之外只需串口）---
+pyserial>=3.5         # 本地 USB 串口需要；纯 WiFi 模式也需要（派端会用到同名协议）
+
+# --- 说明 ---
+# 1) tkinter 是 Python 自带的，不需要 pip 安装；Linux 上若缺失：sudo apt install python3-tk
+# 2) 没有 NVIDIA GPU 时 torch 会装 CPU 版，SAM 分割约 1.5~4 s/帧（仍能跑，只是慢）
+# 3) WiFi 模式不额外需要任何网络库：全部是标准库 socket
