@@ -38,6 +38,9 @@ STM32 四轴 ◄── /dev/ttyACM0 ◄── 香橙派（串口桥，TCP 5058�
 
 > 首次：`setup.bat` 建本地 `.venv` 并装依赖（numpy/opencv/torch/ultralytics/pyserial，约 1–2 GB，用清华镜像）。
 > 之后：只要双击 `run.bat`。
+>
+> 说明：`.venv` 是**本机产物**，不进 git、不随包拷贝。本机（开发机）里的 `.venv` 是指向 `../03-实验台/Qwen-VLM/.venv`
+> 的目录联接（junction），所以现在直接就能跑；**换一台电脑必须自己跑一次 `setup.bat`**（离线环境见 §9）。
 
 ```bat
 setup.bat            :: 只需一次（或换机器时）
