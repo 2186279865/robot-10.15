@@ -1,0 +1,160 @@
+
+============================================================
+ 10.21 self-test
+ interpreter: D:\study\project\robot-competition\01-äº¤ä»˜åŒ…\.venv\Scripts\python.exe
+============================================================
+
+[1/7] host unit tests (expect 164 OK)
+----------------------------------------------------------------------
+Ran 164 tests in 11.756s
+
+OK
+  [ OK ] host unit tests
+
+[2/7] vision package imports + SAM weights
+  opencv 4.11.0, numpy 2.2.6
+  SAM weights 357.7 MB
+  vision dir D:\study\project\robot-competition\01-½»¸¶°ü\vision
+  [ OK ] vision imports
+
+[3/7] start fake Pi agent (15057/15058)
+  ports 15057, 15058 open
+  [ OK ] fake Pi agent up
+
+[4/7] Pi-side selftest client (expect 24 PASS)
+pi_agent è‡ªæµ‹å®¢æˆ·ç«¯ï¼šhost=127.0.0.1 img=15057 ser=15058 disc=è·³è¿‡
+
+--- A/B/C å›¾ä¼  (img 127.0.0.1:15057) ---
+[PASS] A æ‹‰å¸§æˆåŠŸï¼ˆseq=1, 16400 å­—èŠ‚ï¼‰
+[PASS] A JPEG å¤´ 0xFFD8   (FFD8)
+[PASS] A åº”ç­”å®½é«˜ = 640x480   (640x480)
+[PASS] A cv2.imdecode æˆåŠŸ
+[PASS] A è§£ç å°ºå¯¸ = (480,640)   ((480, 640, 3))
+[PASS] A ç”»é¢éçº¯è‰²ï¼ˆstd>8ï¼‰   (std=24.2)
+[PASS] B w/h=0 â†’ æ´¾ç«¯é…ç½®å°ºå¯¸ 1280x720   (å®é™… 1280x720)
+[PASS] B JPEG å¤´ 0xFFD8   (FFD8)
+[PASS] C ä¸å­˜åœ¨çš„ç›¸æœºå› ER é”™è¯¯åŒ…   ({'code': 1, 'n': 34, 'text': 'ç›¸æœºæœªæ‰“å¼€'})
+[PASS] C é”™è¯¯ç  = E_NO_CAMERA(1)   (code=1 text=ç›¸æœº 9 æœªé…ç½®ï¼ˆå¯é€‰ï¼š0ï¼‰)
+[PASS] C å‡ºé”™åè¿æ¥ä»å¯ç”¨ï¼ˆç»§ç»­æ‹‰ 320x240ï¼‰   (image 320x240)
+
+--- D/E/F/G ä¸²å£æ¡¥ (ser 127.0.0.1:15058) ---
+  å›åŒ…: #1,ok,fw=pi-sim-0.1,proto=1,boot=5A5A0001,axes=1/3/4/5,readback=1/3/4/5*1E
+[PASS] D hello å› ok   (#1,ok,fw=pi-sim-0.1,proto=1,boot=5A5A0001,axes=1/3/4/5,readback=1/3/4/5*1E)
+[PASS] D hello å« fw=
+[PASS] D hello å« axes=1/3/4/5
+[PASS] D hello å« readback=
+[PASS] D hello å« boot=
+  å›åŒ…: #2,ok,ms=38191484*1F
+[PASS] E ping å› ok ä¸”å¸¦ ms=   (#2,ok,ms=38191484*1F)
+  å›åŒ…: #3,ok,addr=4,counts=0,deg=0.0,what=pos,age_ms=578*3B
+[PASS] F motor_query å› ok   (#3,ok,addr=4,counts=0,deg=0.0,what=pos,age_ms=578*3B)
+[PASS] F å« addr=4
+[PASS] F å« counts=
+[PASS] F å« what=pos
+  å›åŒ…: #4,err,E01*15
+[PASS] G æœªçŸ¥å‘½ä»¤å› err E01   (#4,err,E01*15)
+[PASS] G åæ ¡éªŒå¸§ä¸åº”ç­”   (b'')
+[PASS] G åå¸§ä¹‹åè¿æ¥ä»å¯ç”¨   (#6,ok,ms=38191906*1C)
+
+================ æ±‡æ€» ================
+é€šè¿‡ 24 é¡¹ï¼Œå¤±è´¥ 0 é¡¹
+[OK] selftest å…¨éƒ¨é€šè¿‡
+  [ OK ] pi selftest_client
+
+[5/7] Pi to real-host protocol interop (expect 37 PASS)
+çœŸå®ä¸Šä½æœºåè®®äº’æ“ä½œæµ‹è¯•ï¼šç›®æ ‡ 127.0.0.1:15058
+[PASS] æ¡æ‰‹è¿›å…¥ online   (state=online)
+[PASS] å›ºä»¶ç‰ˆæœ¬å¯è§£æ fw=pi-sim-0.1   (pi-sim-0.1)
+[PASS] å¯åŠ¨æ ‡è¯† boot éç©º   (5A5A0002)
+[PASS] è½´åˆ—è¡¨ = 1/3/4/5   ((1, 3, 4, 5))
+[PASS] å›è¯»è½´ = 1/3/4/5   ((1, 3, 4, 5))
+[PASS] ping ok   (ping ok)
+[PASS] status ok ä¸” latch=0   ({'latch': '0', 'owner': 'pc', 'running': '-', 'queued': '0', 'gripper': '180'})
+[PASS] motor_enable addr=1 ä½¿èƒ½   ({'addr': '1', 'enabled': '1'})
+[PASS] motor_speed addr=1 rpm=300 è¢«æ¥çº³   ({'addr': '1', 'rpm': '300', 'task': '1'})
+[PASS] motor_query pos å› addr/counts/what   ({'addr': '1', 'counts': '10157', 'deg': '55.8', 'what': 'pos', 'age_ms': '1250'})
+[PASS] HostClient è®°å½• last_counts[1]   (counts=10157)
+[PASS] motor_query addr=4 å¯æŸ¥   ({'addr': '4', 'counts': '0', 'deg': '0.0', 'what': 'pos', 'age_ms': '687'})
+[PASS] gripper open ok angle=180   ({'action': 'open', 'angle': '180', 'settle_ms': '200'})
+[PASS] gripper ready ok action=ready angle=150 settle_ms=200   ({'action': 'ready', 'angle': '150', 'settle_ms': '200'})
+[PASS] param_get gripper_ready_deg = 150   ({'name': 'gripper_ready_deg', 'value': '150'})
+[PASS] param_set gripper_hold_max_ms å› before=0 value=5000   ({'name': 'gripper_hold_max_ms', 'before': '0', 'value': '5000'})
+[PASS] param_get speed_rpm_max = 300   ({'name': 'speed_rpm_max', 'value': '300'})
+[PASS] param_set å› before=300 value=250   ({'name': 'speed_rpm_max', 'before': '300', 'value': '250'})
+[PASS] param_set ç”Ÿæ•ˆï¼ˆå†æŸ¥ = 250ï¼‰   ({'name': 'speed_rpm_max', 'value': '250'})
+[PASS] tele_on ok   (tele_on ok)
+[PASS] æ”¶åˆ°é¥æµ‹ teleï¼ˆ>=1 æ¡ï¼‰   (å…± 6 æ¡ï¼Œæ ·ä¾‹ #0,tele,addr=4,rpm=0,counts=0,deg=0.0*14)
+[PASS] motor_pos rel è¢«æ¥çº³ï¼ˆmode=relï¼‰   ({'addr': '4', 'pulses': '60000', 'mode': 'rel', 'task': '2'})
+[PASS] æ”¶åˆ° task reached äº‹ä»¶ï¼ˆåˆ°ä½è¯æ®ï¼‰   (task=2)
+[PASS] stop_all ok   ({'axes': '1/3/4/5'})
+[PASS] stop_all å HostClient.latched=True   (latched=True)
+[PASS] é”å­˜æ—¶è¿åŠ¨å‘½ä»¤è¢«æ‹’ E10   ({'code': 'E10', 'cmd': 'motor_speed', 'req_id': 20, 'pairs': {}})
+[PASS] stop_clear ok latch=0   ({'latch': '0'})
+[PASS] stop_clear å HostClient.latched=False   (latched=False)
+[PASS] tele_off ok   (tele_off ok)
+[PASS] æ•´æ®µæµç¨‹ä¸­æ— åå¸§   (bad_frame=0 oversize=0)
+
+--- å¤šå®¢æˆ·ç«¯ + ä¼šè¯å»é‡ ---
+[PASS] ç¬¬äºŒè¿æ¥ hello è¢«æ¥å—ï¼ˆå¤šå®¢æˆ·ç«¯å¹¶å‘ï¼‰   ([Frame(start='#', req_id=900, fields=('ok', 'fw=pi-sim-0.1', 'proto=1', 'boot=5A5A0003', 'axes=1/3/4/5', 'readback=1/3/4/5'), checksum='14', raw='#900,ok,fw=pi-sim-0.1,proto=1,boot=5A5A0003,axes=1/3/4/5,readback=1/3/4/5*14')])
+[PASS] ç¬¬äºŒè¿æ¥ hello pairs å« axes/readback   ({'fw': 'pi-sim-0.1', 'proto': '1', 'boot': '5A5A0003', 'axes': '1/3/4/5', 'readback': '1/3/4/5'})
+[PASS] åŒ id åŒå†…å®¹é‡å‘å¾—åˆ° 2 æ¬¡ç¼“å†²åº”ç­”ï¼ˆå»é‡ï¼‰   (count=2)
+[PASS] åŒ id ä¸åŒå†…å®¹å› E12 å†²çª   ([Frame(start='#', req_id=901, fields=('err', 'E12'), checksum='1B', raw='#901,err,E12*1B')])
+[PASS] æœªçŸ¥å‘½ä»¤å› E01   ([Frame(start='#', req_id=902, fields=('err', 'E01'), checksum='1A', raw='#902,err,E01*1A')])
+[PASS] åæ ¡éªŒå¸§ä¸åº”ç­”   ([])
+[PASS] ä¸»é“¾è·¯åœ¨ç¬¬äºŒè¿æ¥æ´»åŠ¨åä»åœ¨çº¿   (state=online)
+
+================ æ±‡æ€» ================
+é€šè¿‡ 37 é¡¹ï¼Œå¤±è´¥ 0 é¡¹
+[OK] çœŸå®ä¸Šä½æœºåè®®ä¸æ´¾ç«¯å‡å›ºä»¶å®Œå…¨äº’é€š
+  [ OK ] pi host-protocol interop
+
+  stopping fake Pi agent
+  ports 15057, 15058 closed
+
+[6/7] laptop end-to-end over TCP (spawns own agent, expect 5 PASS)
+python : 3.12.10 | D:\study\project\robot-competition\01-½»¸¶°ü\.venv\Scripts\python.exe
+cv2    : 4.11.0 | numpy: 2.2.6
+wire   : IMG_PORT=5057 SER_PORT=5058
+Æô¶¯£ºD:\study\project\robot-competition\01-½»¸¶°ü\.venv\Scripts\python.exe D:\study\project\robot-competition\01-½»¸¶°ü\orangepi\pi\pi_agent.py --fake-camera --fake-serial --img-port 15057 --ser-port 15058 --no-discovery
+pi_agent ÒÑ¾ÍĞ÷£¨15057/15058£©
+[remote_camera] ÒÑÁ¬½ÓÍ¼´« 127.0.0.1:15057£¨cam 0£©
+PASS  (a) Í¼´«£ºRemoteCamera Á¬È¡ 3 Ö¡ 640x480
+PASS  (b) ´®¿ÚÇÅ£ºSocketLink + HostClient ÎÕÊÖ + ËÄÖá motor_query + ¼Ğ×¦ ready/ĞÂ²ÎÊı
+[remote_camera] ÒÑÁ¬½ÓÍ¼´« 127.0.0.1:15059£¨cam 1£©
+[remote_camera] ÅÉ¶Ë±¨´í£¨cam 1£©£ºÏà»úÎ´´ò¿ª£ºÄ£Äâ´íÎó£ºÏà»ú 1 Î´ÅäÖÃ£¨¿ÉÑ¡£º0£©
+PASS  (d) ÅÉ¶Ë ER ´íÎóÖ¡£º6 ×Ö½Ú´íÎóÍ·²»Îó¶Á£¬²»³¬Ê±²»¶ÏÁ¬
+PASS  (e) Ïà»ú±àºÅÓ³Éä£ºROBOT_PI_CAM_MAP / remote.cam_map °Ñ 1¡ú²Û0¡¢2¡ú²Û1
+[remote_camera] Á¬½Ó 127.0.0.1:15999 Ê§°Ü£º[WinError 10061] ÓÉÓÚÄ¿±ê¼ÆËã»ú»ı¼«¾Ü¾ø£¬ÎŞ·¨Á¬½Ó¡£
+[remote_camera] ÔİÊ±Á¬²»ÉÏ 127.0.0.1:15999£¬ºóÌ¨»á°´ 0.5¡ú3.0 s ÍË±ÜÖØÊÔ
+[remote_camera] Á¬½Ó 127.0.0.1:15999 Ê§°Ü£º[WinError 10061] ÓÉÓÚÄ¿±ê¼ÆËã»ú»ı¼«¾Ü¾ø£¬ÎŞ·¨Á¬½Ó¡£
+PASS  (c) Ô¶³Ì²»¿É´ï£ºmake_camera¡úRemoteCamera£¬GUI Ô¤ÀÀÏß³Ì²»±À
+
+½á¹û£º5/5 PASS
+£¨±¾ÂÖÓÃÕæÊµ pi/pi_agent.py Áªµ÷£©
+  [ OK ] test_net_local
+
+[7/7] GUI smoke (2 windows, ~30 s)
+[remote_camera] ÒÑÁ¬½ÓÍ¼´« 127.0.0.1:15057£¨cam 0£©
+[remote_camera] ÒÑÁ¬½ÓÍ¼´« 127.0.0.1:15057£¨cam 0£©
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\remote_gui_smoke.png
+Ô¶³ÌÖ¡Êı£º¶¥ÊÓ 418£¬²àÊÓ 418£»¶¥ÊÓÖ¡³ß´ç (1080, 1920, 3)
+PASS  ÊÓ¾õÒ³¾­ WiFi ÊÕµ½Ô¶³ÌÖ¡²¢äÖÈ¾£¨cam0 (1080, 1920, 3)£©
+[remote_camera] È¡Ö¡Ê§°Ü£º[WinError 10053] ÄãµÄÖ÷»úÖĞµÄÈí¼şÖĞÖ¹ÁËÒ»¸öÒÑ½¨Á¢µÄÁ¬½Ó¡£
+  [ OK ] gui_remote_smoke
+title: »úÆ÷ÈËÊÓ¾õ·Ö¼ğÏµÍ³ ¡ª ÊÓ¾õ + ¿ØÖÆ£¨Ò»Ìå»¯£©
+tabs: ['ÊÓ¾õ', 'ËÄÖá¿ØÖÆ', 'X/Y ±ê¶¨', '¶æ»ú¼Ğ×¦', '²ÎÊı', '¶¯×÷ĞòÁĞ', 'ÊÓ¾õÄ¿±ê', 'Ô­Ê¼ÈÕÖ¾']
+vision: ok | calib: ok
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_1_ÊÓ¾õ.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_2_ËÄÖá¿ØÖÆ.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_3_X_Y_±ê¶¨.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_4_¶æ»ú¼Ğ×¦.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_5_²ÎÊı.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_6_¶¯×÷ĞòÁĞ.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_7_ÊÓ¾õÄ¿±ê.png
+screenshot: D:\study\project\robot-competition\01-½»¸¶°ü\runtime\selftest_8_Ô­Ê¼ÈÕÖ¾.png
+selftest pages: 8 / 8
+  [ OK ] main.py --selftest
+
+============================================================
+ RESULT: ALL CHECKS PASSED
+============================================================

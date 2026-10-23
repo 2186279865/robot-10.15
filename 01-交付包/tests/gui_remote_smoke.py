@@ -50,12 +50,25 @@ def wait_port(port: int, timeout: float = 12.0) -> bool:
     return False
 
 
+def _pi_agent_path() -> Path:
+    """交付包布局在 orangepi/pi/ 下；老布局（10.21）在 pi/ 下。"""
+    for rel in (("orangepi", "pi", "pi_agent.py"), ("pi", "pi_agent.py")):
+        cand = PKG.joinpath(*rel)
+        if cand.is_file():
+            return cand
+    return PKG.joinpath("orangepi", "pi", "pi_agent.py")
+
+
+AGENT = _pi_agent_path()
+
+
 def main() -> int:
     agent = subprocess.Popen(
-        [sys.executable, str(PKG / 'pi' / 'pi_agent.py'), '--fake-camera',
+        [sys.executable, str(AGENT), '--fake-camera',
          '--fake-serial', '--img-port', str(IMG_PORT), '--ser-port', str(SER_PORT),
          '--no-discovery'],
         cwd=str(PKG), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     root = None
     vision = None
     try:
