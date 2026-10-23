@@ -120,3 +120,9 @@ new_eye/runtime/latest_targets.json
 01-交付包/vision/models/
 *.pt
 *.onnx
+
+# --- 2026-10-23 重构后新增 ---
+01-交付包/.venv/
+03-实验台/Qwen-VLM/
+03-实验台/_scratch/
+03-实验台/*/models/

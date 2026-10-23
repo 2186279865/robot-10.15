@@ -1,5 +1,0 @@
--r requirements-camera.txt
-numpy==2.2.6
-ultralytics==8.3.228
-# Install torch==2.7.1 and torchvision==0.22.1 from the cu128 index first.
-# CLIP source: https://github.com/ultralytics/CLIP (local wheel in cache/wheels).

@@ -1,0 +1,66 @@
+{
+  "schema_version": 5,
+  "motion_authorized": false,
+  "points_used": true,
+  "max_classes": 6,
+  "seq": 4091,
+  "ts": 1792503637.951,
+  "classification_logic": "rule features on SAM masks (shape+colour) with on-site sample registration",
+  "fusion": {
+    "axis": "u",
+    "axis_name": "左右(u)",
+    "flip": false,
+    "flip_mode": 0,
+    "axis_mode": 0,
+    "n_top": 1,
+    "n_side": 0,
+    "matched": 0,
+    "mean_dist": null,
+    "unmatched_top": 1,
+    "unmatched_side": 0,
+    "auto": true
+  },
+  "class_summary": {
+    "待登记": 1
+  },
+  "targets": [
+    {
+      "id": 1,
+      "views": "top",
+      "confidence": 0.77,
+      "bbox": [
+        549,
+        330,
+        20,
+        90
+      ],
+      "bbox_warped": [
+        266,
+        335,
+        143,
+        26
+      ],
+      "center_px": [
+        559.17,
+        375.52
+      ],
+      "area_px": 2497.0,
+      "center_tray": [
+        0.483,
+        0.4976
+      ],
+      "shape": "长方体/长方形",
+      "shape_conf": 0.8,
+      "color": "蓝/浅蓝",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "待登记",
+      "class_key": "长方体/长方形|蓝/浅蓝",
+      "class_conf": 0.0,
+      "class_source": "unknown",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    }
+  ]
+}

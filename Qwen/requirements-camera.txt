@@ -1,4 +1,0 @@
-opencv-python==4.11.0.86
-cv2-enumerate-cameras==1.4.0
-imageio-ffmpeg==0.6.0
-comtypes==1.4.17

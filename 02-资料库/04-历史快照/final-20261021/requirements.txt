@@ -1,0 +1,19 @@
+# final/ 一体化软件依赖
+# 安装：pip install -r requirements.txt
+#
+# 版本按 2026-10 现场验证过的组合（Windows + NVIDIA GPU 优先）。
+# 没有 NVIDIA GPU 时，torch 会装 CPU 版，SAM 分割会慢很多（1.5~4 s/帧）。
+
+# --- 视觉（new_eye）---
+numpy>=1.26,<2.3
+opencv-python>=4.9
+pillow>=10.0
+torch>=2.4            # CUDA 版示例: pip install torch --index-url https://download.pytorch.org/whl/cu128
+torchvision>=0.19
+ultralytics>=8.3
+
+# --- 控制（10.15 上位机）---
+pyserial>=3.5         # 真机串口；模拟模式不需要
+
+# --- 打包为 exe（可选）---
+# pyinstaller>=6.6

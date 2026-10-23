@@ -1,0 +1,252 @@
+{
+  "schema_version": 5,
+  "motion_authorized": false,
+  "points_used": true,
+  "max_classes": 6,
+  "seq": 7,
+  "ts": 1792513487.025,
+  "classification_logic": "rule features on SAM masks (shape+colour) with on-site sample registration",
+  "fusion": {
+    "axis": "u",
+    "axis_name": "左右(u)",
+    "flip": true,
+    "flip_mode": 0,
+    "axis_mode": 0,
+    "n_top": 5,
+    "n_side": 3,
+    "matched": 3,
+    "mean_dist": 0.026999999999999986,
+    "unmatched_top": 2,
+    "unmatched_side": 0,
+    "auto": true
+  },
+  "class_summary": {
+    "待登记": 4,
+    "五棱体": 1
+  },
+  "targets": [
+    {
+      "id": 1,
+      "views": "top",
+      "confidence": 0.984,
+      "bbox": [
+        248,
+        204,
+        126,
+        128
+      ],
+      "bbox_warped": [
+        249,
+        205,
+        125,
+        127
+      ],
+      "center_px": [
+        311.4,
+        268.15
+      ],
+      "area_px": 12271.5,
+      "center_tray": [
+        0.4455,
+        0.3836
+      ],
+      "shape": "圆柱/圆形",
+      "shape_conf": 0.71,
+      "color": "黄/橙",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "待登记",
+      "class_key": "圆柱/圆形|黄/橙",
+      "class_conf": 0.0,
+      "class_source": "unknown",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    },
+    {
+      "id": 2,
+      "views": "top+side",
+      "confidence": 0.981,
+      "bbox": [
+        508,
+        292,
+        133,
+        140
+      ],
+      "bbox_warped": [
+        509,
+        293,
+        132,
+        139
+      ],
+      "center_px": [
+        575.58,
+        357.75
+      ],
+      "area_px": 13010.0,
+      "center_tray": [
+        0.8234,
+        0.5118
+      ],
+      "shape": "圆柱/圆形",
+      "shape_conf": 0.68,
+      "color": "黄/橙",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "待登记",
+      "class_key": "圆柱/圆形|黄/橙",
+      "class_conf": 0.0,
+      "class_source": "unknown",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null,
+      "side_bbox": [
+        58,
+        385,
+        54,
+        257
+      ],
+      "side_center_px": [
+        84.89,
+        512.75
+      ],
+      "height_ratio": 0.366
+    },
+    {
+      "id": 3,
+      "views": "top",
+      "confidence": 0.868,
+      "bbox": [
+        251,
+        319,
+        119,
+        200
+      ],
+      "bbox_warped": [
+        252,
+        320,
+        118,
+        199
+      ],
+      "center_px": [
+        307.77,
+        416.41
+      ],
+      "area_px": 18101.5,
+      "center_tray": [
+        0.4403,
+        0.5957
+      ],
+      "shape": "圆柱/圆形",
+      "shape_conf": 0.64,
+      "color": "红",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "待登记",
+      "class_key": "圆柱/圆形|红",
+      "class_conf": 0.0,
+      "class_source": "unknown",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null
+    },
+    {
+      "id": 4,
+      "views": "top+side",
+      "confidence": 0.927,
+      "bbox": [
+        423,
+        389,
+        165,
+        188
+      ],
+      "bbox_warped": [
+        424,
+        390,
+        164,
+        187
+      ],
+      "center_px": [
+        506.0,
+        477.9
+      ],
+      "area_px": 19921.5,
+      "center_tray": [
+        0.7239,
+        0.6837
+      ],
+      "shape": "五棱体",
+      "shape_conf": 0.78,
+      "color": "绿",
+      "color_conf": 0.95,
+      "class_id": "五棱体",
+      "class_name": "五棱体",
+      "class_key": "五棱体|绿",
+      "class_conf": 0.95,
+      "class_source": "rule",
+      "need_review": false,
+      "color_mismatch": false,
+      "class_votes": null,
+      "side_bbox": [
+        111,
+        385,
+        166,
+        256
+      ],
+      "side_center_px": [
+        193.85,
+        512.31
+      ],
+      "height_ratio": 0.364
+    },
+    {
+      "id": 5,
+      "views": "top+side",
+      "confidence": 1.018,
+      "bbox": [
+        184,
+        508,
+        157,
+        149
+      ],
+      "bbox_warped": [
+        185,
+        509,
+        156,
+        148
+      ],
+      "center_px": [
+        261.34,
+        580.47
+      ],
+      "area_px": 17877.5,
+      "center_tray": [
+        0.3739,
+        0.8304
+      ],
+      "shape": "圆柱/圆形",
+      "shape_conf": 0.8,
+      "color": "红",
+      "color_conf": 0.95,
+      "class_id": null,
+      "class_name": "待登记",
+      "class_key": "圆柱/圆形|红",
+      "class_conf": 0.0,
+      "class_source": "unknown",
+      "need_review": true,
+      "color_mismatch": false,
+      "class_votes": null,
+      "side_bbox": [
+        327,
+        385,
+        189,
+        256
+      ],
+      "side_center_px": [
+        420.42,
+        512.29
+      ],
+      "height_ratio": 0.364
+    }
+  ]
+}

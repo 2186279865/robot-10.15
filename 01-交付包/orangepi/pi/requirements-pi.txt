@@ -1,0 +1,17 @@
+# 树莓派端依赖（10.21/pi）
+#
+# 两种装法，任选其一：
+#
+# A) 推荐：Debian 系统源里的预编译包，装得快、不占内存编译、升级走 apt。
+#      sudo apt install -y python3-opencv python3-numpy python3-serial
+#    （python3-opencv 自带 cv2；python3-serial 提供 pyserial 的 serial 模块）
+#
+# B) 系统源没有包时再用 pip（PEP 668 的发行版需要 --break-system-packages）：
+#      pip3 install --break-system-packages -r requirements-pi.txt
+#
+# 不要装 opencv-python（带 GUI 的完整版）——树莓派上没有 X 会白占几十 MB，
+# 用 headless 版；apt 的 python3-opencv 已经够用，装了它就别再 pip 装 opencv。
+
+opencv-python-headless>=4.5
+numpy>=1.20
+pyserial>=3.5
