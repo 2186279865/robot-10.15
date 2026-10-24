@@ -126,3 +126,6 @@ new_eye/runtime/latest_targets.json
 03-实验台/Qwen-VLM/
 03-实验台/_scratch/
 03-实验台/*/models/
+
+# 开发机临时验证脚本（路径绑定本机，不入库）
+.survey/
