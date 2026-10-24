@@ -1,3 +1,6 @@
 
 # ---------- Git LFS：final 里的 SAM 权重 ----------
 final/new_eye/models/*.pt filter=lfs diff=lfs merge=lfs -text
+
+# 交付包里的 SAM 权重同样走 LFS（默认被 .gitignore 排除，手动 add 时才用）
+01-交付包/vision/models/*.pt filter=lfs diff=lfs merge=lfs -text
