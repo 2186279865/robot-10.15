@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import sequence as S
+import box_map
 
 ROOT = Path(__file__).resolve().parent
 CFG_PATH = ROOT / 'vision_grasp.json'
@@ -48,6 +49,7 @@ DEFAULTS = {
         'pulses_per_rev': 3200,        # 转盘一圈脉冲（1 圈 = 360°）
         'box_angle_deg': [0, 60, 120, 180, 240, 300],
         'class_to_box': {},            # 类别名/编号 -> 盒子序号（1..6），空=按类别编号
+        'auto_assign': 1,             # 1=没登记的类别自动占空盒（现场无实物时靠它）
         'start_box': 1,                # 程序启动时转盘停在哪个盒子
         'settle_ms': 800,              # 转盘到位后等多久（无回读）
         'invert': 0,                   # 1 = 正脉冲是反向
@@ -99,8 +101,41 @@ def save_state(box, path=STATE_PATH):
     return path
 
 
+def _class_key(target):
+    """类别的稳定标识：优先 class_name，其次 class_id。"""
+    for key in ('class_name', 'class_id'):
+        value = target.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text not in ('0', 'None', '未知'):
+            return text
+    return ''
+
+
+def ensure_boxes(targets, cfg=None):
+    """给还没登记盒子的类别分配空盒；手动映射（class_to_box）优先，不覆盖。"""
+    cfg = cfg or load_config()
+    if not cfg['tray'].get('auto_assign', 1):
+        return {}
+    manual = {str(k) for k in (cfg['tray'].get('class_to_box') or {})}
+    known = box_map.load()
+    assigned = {}
+    for target in targets:
+        key = _class_key(target)
+        if not key or key in manual or key in known:
+            continue
+        try:
+            box = box_map.assign(key)
+        except ValueError:
+            continue
+        known[key] = box
+        assigned[key] = box
+    return assigned
+
+
 def _box_of(target, cfg):
-    """目标属于哪个储物盒（1..6）。优先类别名/编号映射，其次盒 1。"""
+    """目标属于哪个储物盒（1..6）。手动映射 > 动态登记 > 按 class_id 兜底。"""
     mapping = cfg['tray'].get('class_to_box') or {}
     for key in (str(target.get('class_id') or ''), str(target.get('class_name') or '')):
         if key in mapping:
@@ -108,6 +143,11 @@ def _box_of(target, cfg):
                 return int(mapping[key])
             except (TypeError, ValueError):
                 pass
+    key = _class_key(target)
+    if key:
+        box = box_map.lookup(key)
+        if box:
+            return max(1, min(len(cfg['tray']['box_angle_deg']), int(box)))
     try:
         box = int(str(target.get('class_id') or '1'))
     except (TypeError, ValueError):
@@ -159,6 +199,7 @@ def sort_key(target, cfg):
 def ordered_targets(targets, cfg=None):
     """按储物盒分组排序（同盒先 v 后 u），减少转盘来回转。"""
     cfg = cfg or load_config()
+    ensure_boxes(targets, cfg)
     return sorted(targets, key=lambda target: sort_key(target, cfg))
 
 
@@ -177,6 +218,7 @@ def build_sequence(targets, calib, cfg=None, sequence_name='视觉抓取', start
     `start_box` 为 None 时用 cfg['tray']['start_box']。
     """
     cfg = cfg or load_config()
+    ensure_boxes(targets, cfg)
     warnings = []
     speed = cfg['speed']
     z = cfg['z']

@@ -293,6 +293,31 @@ class HostClient:
             timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000) + 4000
         return self.send("motor_goto", *args, timeout_ms=timeout_ms)
 
+    def angle_zero(self, axis: int, timeout_ms: int = 3000) -> int:
+        """把转盘当前位置记为 0°（人工对准 1 号盒后发一次）。掉电失效。"""
+        return self.send("motor_angle_zero", int(axis), timeout_ms=timeout_ms)
+
+    def angle(
+        self,
+        axis: int,
+        deg: float,
+        rpm: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> int:
+        """转到“基准 + deg 度”（内部是闭环 goto，重复下发同一角度幂等）。
+
+        deg 会被换成立方百分之几度（deg100），负角度按最短路径走。
+        超时默认按 0.6 圈/秒估，最少 8 s。
+        """
+        deg100 = int(round(float(deg) * 100.0)) % 36000
+        args: List[object] = [int(axis), deg100]
+        if rpm is not None:
+            args.append(int(rpm))
+        if timeout_ms is None:
+            timeout_ms = 8000
+        return self.send("motor_angle", *args, timeout_ms=timeout_ms)
+
+
     def wait_reply(self, req_id: int, timeout_ms: int = 8000) -> Optional[Dict[str, object]]:
         """阻塞等待某条请求的应答（只给脚本/自测用；GUI 走事件队列，别调它）。
 

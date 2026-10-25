@@ -70,6 +70,7 @@ PARAM_LABELS = {
     "goto_final_rpm": "闭环补差 RPM",
     "goto_max_passes": "闭环最多补几轮",
     "goto_max_ms": "闭环超时 ms(0=自动)",
+    "angle_tol_counts": "角度容差 counts",
 }
 KNOWN_PARAMS = [(name, PARAM_LABELS[name]) for name in P.PARAM_DEFAULTS if name in PARAM_LABELS]
 

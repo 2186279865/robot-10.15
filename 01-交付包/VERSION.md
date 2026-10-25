@@ -7,8 +7,8 @@
 | 冻结时间 | 2026-10-23 23:50 左右（本机时间） |
 | Git 快照 | 仓库 commit `3a5fec3`，tag `working-20261023` |
 | 物理备份 | `D:\study\backup\robot-competition-2026-10-23`（1.16 GB，含 `_MANIFEST.txt`） |
-| 固件 | `stm32/hex/STM32F429.hex`，89,098 B，2026-10-25 21:43 编译，Code=30,300 / RO=1,116 / RW=528 / ZI=7,344，0 Error 0 Warning（含闭环 `motor_goto`） |
-| 上位机 | 8 页一体化 GUI，单测 164 个全过 |
+| 固件 | `stm32/hex/STM32F429.hex`，92,952 B，2026-10-26 00:13 编译，Code=31,632 / RO=1,152 / RW=532 / ZI=7,396，0 Error 0 Warning（含闭环 `motor_goto` + **转盘角度模式** `motor_angle`/`motor_angle_zero`；修了 goto 负向方向 bug、查询节流、argc 与时间差回绕） |
+| 上位机 | 8 页一体化 GUI，单测 **182** 个全过（含 box_map / auto_runner） |
 | 派端 | `pi_agent.py` 1872 行，假硬件自测 24 项全过 |
 | 视觉 | SAM-B（`vision/models/sam_b.pt`，357.7 MB）+ 双摄融合 + 规则分类 |
 | 跨端 | TCP 端到端 5 项全过（图传 / 串口桥 / ER 包 / cam_map / 不可达降级） |

@@ -28,7 +28,7 @@ echo ============================================================
 
 rem ---------------------------------------------------------------- 1
 echo.
-echo [1/7] host unit tests (expect 164 OK)
+echo [1/7] host unit tests (expect 182 OK)
 pushd host
 "%PY%" -m unittest discover -s tests -t tests -q
 set "RC=%errorlevel%"

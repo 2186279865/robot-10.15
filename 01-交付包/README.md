@@ -132,6 +132,37 @@ stm32/hex/STM32F429.hex
 
 ---
 
+## 5.4 自动抓放状态机（2026-10-26 新增，骨架）
+
+`host/auto_runner.py`——把"拍照 → 规划 → 走通道 → 对准 → 抓 → 抬 → 回 → 放 → 显示"编成状态机，
+每一步都等回包（不是 sleep），失败一律进 `FAULT`：
+
+```
+IDLE → CAPTURE → PLAN → CORRIDOR_OUT → ALIGN → DESCEND → GRASP
+     → LIFT → RETREAT → CORRIDOR_BACK → RELEASE → DISPLAY → (还有货 → CAPTURE / 没货 → DONE)
+```
+
+- 通道固定"先 Y 让开、再抬 Z"（初始位上方有遮挡，机构不能改），回程严格反序取反；
+- **类别 → 盒子动态分配**：`host/box_map.py`，第一件见到某类就占一个空盒（最多 6 类 6 盒），
+  手动 `vision_grasp.json` 的 `tray.class_to_box` 优先；落在 `runtime/box_map.json`；
+- 软限位：`host/limits.json`（`{"4": {"min": -50000, "max": 42000}, ...}`），越界直接 `E15` 进 FAULT；
+- 自测：`cd host && ..\.venv\Scripts\python.exe -m unittest discover -s tests -t tests`
+  （182 个用例，其中 `test_auto_runner.py` 8 个走假后端，不碰硬件）；
+- 试跑：`python host\auto_runner.py --dry-run` 打印通道/限位配置并用假后端跑一遍。
+
+## 5.5 派端显示页（赛题强制要求）
+
+`orangepi/pi/pi_display.py`——派接 HDMI 小屏（我们现在是 7 寸 1024×600），全屏大字显示
+"第几件 / 什么 / 进哪个盒"。上位机用 `host/display_link.py` 往 `tcp://派:5059` 推 JSON 行：
+
+```json
+{"state":"DISPLAY","item":3,"total":12,"name":"五棱柱|蓝","box":2,"placed":3,
+ "message":"第 3 件：五棱柱·蓝 → 2 号盒"}
+```
+
+派上启动：`python3 pi_display.py`（`--windowed` 调试、`--fake` 自演示）。屏保/旋转已设好：
+`~/.local/bin/screen-setup.sh` + `~/.config/autostart/screen-setup.desktop`（不黑屏、旋转 180°）。
+
 ## 6. 自测（改完代码建议跑）
 
 ```bat
@@ -139,7 +170,7 @@ selftest.bat            :: 全部 7 步（约 60 秒）
 selftest.bat /quick     :: 跳过 GUI 截图
 ```
 
-7 步内容：上位机单测（164）→ 视觉包导入 + 权重 → 起假派 → 派端自测（24）→ 派↔真上位机协议（37）→ 笔记本 TCP 端到端（5）→ GUI 冒烟截图。
+7 步内容：上位机单测（182）→ 视觉包导入 + 权重 → 起假派 → 派端自测（24）→ 派↔真上位机协议（37）→ 笔记本 TCP 端到端（5）→ GUI 冒烟截图。
 
 **真机闭环自测**（烧完新固件、接好回读线之后跑；它只动你指定的那根轴）：
 

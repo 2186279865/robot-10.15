@@ -105,6 +105,7 @@ PARAM_DEFAULTS: Dict[str, object] = {
     "goto_max_passes": 4,
     #: 闭环最长耗时（ms，0=按距离自动估算）。
     "goto_max_ms": 0,
+    "angle_tol_counts": 90,          # 转盘角度模式容差 counts
 }
 
 

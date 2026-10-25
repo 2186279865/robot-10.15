@@ -87,8 +87,10 @@ def main() -> int:
     passed = pget("goto_max_passes")
     print(f"counts_per_rev={counts_per_rev}  goto_tol_counts={tol}  goto_rpm={rpm}  goto_max_passes={passed}")
 
-    if hc.latched and not args.no_stop_clear:
-        print("固件锁存了停止（上次异常断开）→ 先发 stop_clear（不产生运动）")
+    if not args.no_stop_clear:
+        # 无条件清一次：固件在「3 秒没收到上位机字节」时会自动锁存停止，
+        # 而 hc.latched 要等收到 status 才更新，靠它判断经常漏（经验：每次连上先清）。
+        print("先发 stop_clear（只解锁存，不产生任何运动）")
         rid = hc.send("stop_clear", timeout_ms=800)
         hc.wait_reply(rid, timeout_ms=1500)
         pump(hc, link, 0.2)
