@@ -97,19 +97,23 @@ python3 pi_agent.py --fake-camera --fake-serial      # 无硬件，假图假电�
 
 ## 4. 固件怎么烧
 
-现成文件（已编译好，含夹爪三档角度 + 接近段示教所需命令）：
+现成文件（**2026-10-25 21:43 这一版，含夹爪三档 + 接近段示教 + 闭环 `motor_goto`**）：
 
 ```
 stm32/hex/STM32F429.hex
 ```
 
 - 用 STM32CubeProgrammer / ST-LINK Utility 直接烧这个 hex；或
-- 用 Keil 打开 `stm32/project/STM32F407.uvprojx` 按 F8。
+- 用 Keil 打开 `stm32/firmware/Project/STM32F407.uvprojx` 按 F8。
 
 > 文件名里的 `F429` 是历史遗留，芯片其实是 **STM32F407**，不影响烧录。
 > 别烧 `stm32/hex/STM32F429_diag.hex`（那是 10 月 16 日的诊断固件）。
 
-烧完的验证：上位机「舵机夹爪」页点 **预备(150)** → 日志回 `action=ready, angle=150` 就是新固件；回 `E02/E01` 就是旧固件没烧进去。
+烧完的验证（两条，都要过）：
+1. 上位机「舵机夹爪」页点 **预备(150)** → 日志回 `action=ready, angle=150`，说明夹爪三档这版在跑；
+2. 命令行 `\.venv\Scripts\python.exe tools\goto_check.py --port COM6 --dry-run` → 能读到 `counts_per_rev / goto_tol_counts / goto_rpm` 三个参数，说明闭环这版在跑（旧固件会显示 `None` 或回 `E02`）。
+
+> ⚠ **老固件没有 `motor_goto`**：四轴页勾「闭环」再点「相对走」会回 `E01/E02`。新固件 hex 大小是 **89,098 字节**（上一版 81,951）。
 
 编译细节见 `stm32/docs/烧录与编译.md`。
 
@@ -136,6 +140,15 @@ selftest.bat /quick     :: 跳过 GUI 截图
 ```
 
 7 步内容：上位机单测（164）→ 视觉包导入 + 权重 → 起假派 → 派端自测（24）→ 派↔真上位机协议（37）→ 笔记本 TCP 端到端（5）→ GUI 冒烟截图。
+
+**真机闭环自测**（烧完新固件、接好回读线之后跑；它只动你指定的那根轴）：
+
+```bat
+.venv\Scripts\python.exe tools\goto_check.py --port COM6 --axis 4 --pulses 3200 --rounds 3
+```
+
+判读：每次输出 `ok err=<残余 counts> passes=<补了几轮>`；`err` 应在 `goto_tol_counts`（默认 200）以内。
+失败码：`E14` 没到位 / `E11` 没接回读 / `E10` 先点「清除停止锁存」/ `E01|E02` 固件是旧的。
 
 ---
 

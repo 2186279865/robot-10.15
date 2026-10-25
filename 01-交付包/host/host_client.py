@@ -231,7 +231,8 @@ class HostClient:
         self._write(raw, f"TX {rid} {cmd}")
         hook = self.motion_hook
         if hook is not None and cmd in ("motor_pos", "motor_speed", "motor_stop",
-                                        "motor_zero", "stop_all", "stop_clear"):
+                                        "motor_zero", "stop_all", "stop_clear",
+                                        "motor_goto"):
             try:
                 hook(cmd, args)
             except Exception as exc:  # 钩子只做界面记账，绝不能影响下发
@@ -264,6 +265,61 @@ class HostClient:
     def stop_all(self) -> int:
         """停止按钮：立即下发 stop_all，并置本地锁存提示。"""
         return self.send("stop_all", timeout_ms=TIMEOUT_QUERY_MS)
+
+    def goto(
+        self,
+        axis: int,
+        pulses: int,
+        tol: Optional[int] = None,
+        rpm: Optional[int] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> int:
+        """闭环相对移动：固件用遥测 counts 自己闭环，ok 回来时已经“走完并校验过”。
+
+        与 `motor_pos` 的区别：`motor_pos` 只保证“指令被接纳”，不保证真的走到；
+        `motor_goto` 的应答里带 `err`（剩余 counts）、`passes`（补了几轮）、
+        `elapsed_ms`，失败回 `E14`。通道段这类“必须走到位”的路径用它。
+        """
+        args: List[object] = [int(axis), int(pulses)]
+        if tol is not None:
+            args.append(int(tol))
+            if rpm is not None:
+                args.append(int(rpm))
+        elif rpm is not None:
+            args.append(int(P.PARAM_DEFAULTS["goto_tol_counts"]))
+            args.append(int(rpm))
+        if timeout_ms is None:
+            speed = int(rpm if rpm is not None else P.PARAM_DEFAULTS["goto_rpm"]) or 1
+            timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000) + 4000
+        return self.send("motor_goto", *args, timeout_ms=timeout_ms)
+
+    def wait_reply(self, req_id: int, timeout_ms: int = 8000) -> Optional[Dict[str, object]]:
+        """阻塞等待某条请求的应答（只给脚本/自测用；GUI 走事件队列，别调它）。
+
+        返回 `{"kind": reply|err|timeout, "text", "code", "cmd", "pairs"}`；超时返回 None。
+        期间会把心跳等其它事件从队列里取走 —— 所以不能在 GUI 线程里用。
+        """
+        deadline = self.now_ms() + timeout_ms
+        while self.now_ms() < deadline:
+            if self.link is not None:
+                try:
+                    data = self.link.read()
+                except Exception:
+                    data = b""
+                if data:
+                    self.feed_bytes(data)
+            self.tick()
+            for ev in self.poll_events(500):
+                if ev.data.get("req_id") == req_id and ev.kind in ("reply", "err", "timeout"):
+                    return {
+                        "kind": ev.kind,
+                        "text": ev.text,
+                        "code": ev.data.get("code"),
+                        "cmd": ev.data.get("cmd"),
+                        "pairs": ev.data.get("pairs") or {},
+                    }
+            time.sleep(0.005)
+        return None
 
     def _write(self, raw: bytes, label: str) -> None:
         if self.link is None:

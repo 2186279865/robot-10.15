@@ -87,7 +87,7 @@ def _hex() -> str:
 
 
 def _uvprojx() -> str:
-    return need(ROOT / "stm32" / "project" / "STM32F407.uvprojx", 10_000)
+    return need(ROOT / "stm32" / "firmware" / "Project" / "STM32F407.uvprojx", 10_000)
 
 
 def _main_c() -> str:
@@ -153,7 +153,7 @@ CHECKS = [
     ("共用协议 common/wire.py", _wire),
     ("视觉权重 vision/models/sam_b.pt", _model),
     ("固件源码 stm32/firmware/MY/main.c", _main_c),
-    ("Keil 工程 stm32/project/STM32F407.uvprojx", _uvprojx),
+    ("Keil 工程 stm32/firmware/Project/STM32F407.uvprojx", _uvprojx),
     ("烧录文件 stm32/hex/STM32F429.hex", _hex),
     ("入口文件齐全", _entry_files),
     ("批处理编码（ASCII+CRLF）", _bat_encoding),

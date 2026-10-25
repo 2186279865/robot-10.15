@@ -64,6 +64,12 @@ PARAM_LABELS = {
     "telemetry_ms": "遥测周期 ms",
     "frame_gap_ms": "电机帧间隔 ms",
     "readback_mask": "回读轴掩码(1/3/4/5=1/2/4/8)",
+    "counts_per_rev": "编码器每圈 counts(标定)",
+    "goto_tol_counts": "闭环容差 counts",
+    "goto_rpm": "闭环首段 RPM",
+    "goto_final_rpm": "闭环补差 RPM",
+    "goto_max_passes": "闭环最多补几轮",
+    "goto_max_ms": "闭环超时 ms(0=自动)",
 }
 KNOWN_PARAMS = [(name, PARAM_LABELS[name]) for name in P.PARAM_DEFAULTS if name in PARAM_LABELS]
 
@@ -95,6 +101,8 @@ class AxisPanel:
         self.degrees = tk.DoubleVar(value=0.0)
         self.mode = tk.StringVar(value="rel")
         self.tele = tk.BooleanVar(value=False)
+        #: 勾上后「相对走」改用 motor_goto：固件用遥测 counts 自己闭环，ok 回来时已校验到位。
+        self.loop = tk.BooleanVar(value=False)
         self.reference_valid = False
 
         row = ttk.Frame(frame)
@@ -151,8 +159,11 @@ class AxisPanel:
             side="left", padx=2
         )
         ttk.Checkbutton(
-            row3, text="订阅遥测", variable=self.tele, command=self.toggle_telemetry
+            row3, text="闭环", variable=self.loop
         ).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(
+            row3, text="订阅遥测", variable=self.tele, command=self.toggle_telemetry
+        ).pack(side="left", padx=(4, 0))
 
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x", padx=4, pady=2)
@@ -268,6 +279,15 @@ class AxisPanel:
             ):
                 return
             self.mark_zeroed()
+        if mode == "rel" and self.loop.get():
+            # 闭环 goto：固件自己读遥测 counts 补差，回复里带 err/passes/elapsed_ms。
+            signed = pulses if not self.direction.get() else -pulses
+            self.app.client.goto(self.addr, signed)
+            self.app.note(
+                "%s 闭环 goto %+d 脉冲（%s）；到位后应答里会给 err/passes"
+                % (AXIS_LABELS.get(self.addr, self.addr), signed, "负向" if signed < 0 else "正向")
+            )
+            return
         self.app.client.send(
             "motor_pos",
             self.addr,
@@ -1069,6 +1089,19 @@ class App:
                     # 所以实际走的就是 pulses；记账必须按真实动作，不能按目标位置差。
                     self.note("%s『绝对走到此』：固件按相对执行，实际走 %d 脉冲（%s向）"
                               % (AXIS_LABELS.get(addr, addr), pulses, "负" if negative else "正"))
+                self._journey_add(addr, direction, rpm, acc, pulses)
+                if self._approach_recording and not self._approach_running and addr in AR.AXES:
+                    self._approach_record(addr, direction, rpm, acc, pulses)
+            elif cmd == "motor_goto":
+                # args = (axis, pulses[, tol[, rpm]])，pulses 带符号
+                signed = int(args[1])
+                pulses = abs(signed)
+                direction = 1 if signed < 0 else 0
+                rpm = int(args[3]) if len(args) > 3 else int(P.PARAM_DEFAULTS["goto_rpm"])
+                acc = 0
+                self.soft_pos[addr] += (-pulses if direction else pulses)
+                self.pos_known[addr] = True
+                self._last_motion_s = time.monotonic()
                 self._journey_add(addr, direction, rpm, acc, pulses)
                 if self._approach_recording and not self._approach_running and addr in AR.AXES:
                     self._approach_record(addr, direction, rpm, acc, pulses)

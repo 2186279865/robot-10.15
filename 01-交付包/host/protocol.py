@@ -62,6 +62,7 @@ ERROR_CODES: Dict[str, str] = {
     "E11": "无回读能力",
     "E12": "请求id冲突",
     "E13": "位置基准无效",
+    "E14": "闭环未到位",
 }
 
 #: 任务完成证据等级；`ok` 只代表命令被接纳，不代表到位。
@@ -92,6 +93,18 @@ PARAM_DEFAULTS: Dict[str, object] = {
     #: 哪些轴接了驱动器回读线：bit0=Z(1)、bit1=托盘(3)、bit2=X(4)、bit3=Y(5)。
     #: 默认 15 = 四轴都接；某个轴还没接就把对应位去掉，不用重烧固件。
     "readback_mask": 15,
+    #: 闭环 motor_goto 用：编码器每圈 counts（EMM V5 标称 65536，必须实测标定）。
+    "counts_per_rev": 65536,
+    #: 闭环到位容差（编码器 counts），200 counts ≈ 1.1°。
+    "goto_tol_counts": 200,
+    #: 闭环首段速度（RPM）。
+    "goto_rpm": 300,
+    #: 闭环补差段速度（RPM）。
+    "goto_final_rpm": 60,
+    #: 闭环最多补几轮（含首段后）。
+    "goto_max_passes": 4,
+    #: 闭环最长耗时（ms，0=按距离自动估算）。
+    "goto_max_ms": 0,
 }
 
 

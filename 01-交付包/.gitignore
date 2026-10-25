@@ -16,3 +16,7 @@ host/tests/_tmp_old/
 tests/_tmp/
 tests/_tmp_old/
 selftest_log.txt
+host/gui_smoke_*/
+vision/runtime/calib_marks.json
+vision/runtime/latest_targets.json
+vision/calib_marks.json

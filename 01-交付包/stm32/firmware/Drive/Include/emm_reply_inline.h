@@ -199,6 +199,51 @@ static int32_t Emm_CountsToDegX10(int32_t counts)
     return (int32_t)(v / (int64_t)EMM_COUNTS_PER_REV);
 }
 
+/* 脉冲 <-> 编码器计数换算（给闭环 goto 用）。
+ * counts_per_rev 由运行参数给出，不写死：标定出来不是 65536 也能改。
+ * 四舍五入到最近的计数，避免每次补差都系统性偏小。 */
+static int32_t Emm_PulsesToCounts(int32_t pulses, uint32_t counts_per_rev,
+                                  uint32_t pulses_per_rev)
+{
+    int64_t v;
+
+    if ((counts_per_rev == 0U) || (pulses_per_rev == 0U))
+    {
+        return 0;
+    }
+    v = (int64_t)pulses * (int64_t)counts_per_rev;
+    if (v >= 0)
+    {
+        v += (int64_t)(pulses_per_rev / 2U);
+    }
+    else
+    {
+        v -= (int64_t)(pulses_per_rev / 2U);
+    }
+    return (int32_t)(v / (int64_t)pulses_per_rev);
+}
+
+static int32_t Emm_CountsToPulses(int32_t counts, uint32_t counts_per_rev,
+                                  uint32_t pulses_per_rev)
+{
+    int64_t v;
+
+    if ((counts_per_rev == 0U) || (pulses_per_rev == 0U))
+    {
+        return 0;
+    }
+    v = (int64_t)counts * (int64_t)pulses_per_rev;
+    if (v >= 0)
+    {
+        v += (int64_t)(counts_per_rev / 2U);
+    }
+    else
+    {
+        v -= (int64_t)(counts_per_rev / 2U);
+    }
+    return (int32_t)(v / (int64_t)counts_per_rev);
+}
+
 /* ---------------- 一次一个查询事务 ---------------- */
 
 typedef struct

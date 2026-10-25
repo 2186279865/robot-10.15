@@ -68,6 +68,9 @@
 #define HOST_E_NO_READBACK        "E11"
 #define HOST_E_ID_CONFLICT        "E12"
 #define HOST_E_NO_POSITION_REF    "E13"
+/* E14：闭环 goto 没能收敛（超时 / 补差次数用完 / 途中被停）。
+ * 只在 motor_goto 上出现，细节见 reason= 字段（timeout / lost / stopped）。 */
+#define HOST_E_GOTO               "E14"
 
 /* ---------------- 运行参数 ---------------- */
 /* 名字必须与上位机 protocol.PARAM_DEFAULTS 完全一致（那边有测试守着这张表）。 */
@@ -75,12 +78,12 @@
 typedef struct
 {
     const char *name;
-    uint16_t    value;
-    uint16_t    min;
-    uint16_t    max;
+    uint32_t    value;   /* 用 uint32：counts_per_rev 要能放 65536，uint16 不够 */
+    uint32_t    min;
+    uint32_t    max;
 } HostParam;
 
-#define HOST_PARAM_COUNT 15U
+#define HOST_PARAM_COUNT 21U
 
 /* 出厂默认值。host_protocol_init() 会把下面的运行参数表恢复成这一份，
  * 所以 MCU 复位后参数一定回到默认，不会带着上一次会话的临时值。 */
@@ -106,7 +109,23 @@ static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
     /* 哪些轴接了驱动器回读线（bit0=Z=1、bit1=托盘=3、bit2=X=4、bit3=Y=5）。
      * 默认 15 = 四轴都接；某个轴还没接就改小这个参数，不用重烧固件。
      * 名单外的轴查询如实回 E11，名单内但收不到回包的轴超时回 E04。 */
-    { "readback_mask",     15U,   1U,  15U    }
+    { "readback_mask",     15U,   1U,  15U    },
+
+    /* ---- 闭环 goto（motor_goto）用的六个参数 ---- */
+    /* 编码器一圈有多少计数。EMM 文档写的是 65536（0x36 回 16 位角度），
+     * 但必须以现场标定为准：X 轴走 3200 脉冲，看 counts 变化多少，填进这里。
+     * 标定方法和数值记录见 docs/标定操作手册。 */
+    { "counts_per_rev",    65536U, 1U,  1048576U },
+    /* 允许多少计数误差算“到位”。默认 200 ≈ 1.1°；机械误差通常比这大，
+     * 设太小会在目标附近来回补差。 */
+    { "goto_tol_counts",   200U,  1U,  65535U },
+    /* 粗走转速 / 补差转速（RPM） */
+    { "goto_rpm",          300U,  1U,  6000U  },
+    { "goto_final_rpm",    60U,   1U,  1000U  },
+    /* 最多补差几次，超过就报 E14 */
+    { "goto_max_passes",   4U,    1U,  20U    },
+    /* 单次 goto 总超时，0 = 按距离自动估算（估算值 ×3 + 4 s） */
+    { "goto_max_ms",       0U,    0U,  120000U }
 };
 
 static HostParam host_params[HOST_PARAM_COUNT];
@@ -332,7 +351,7 @@ static HostParam *host_param_find(const char *name)
     return 0;
 }
 
-static uint16_t host_param_value(const char *name)
+static uint32_t host_param_value(const char *name)
 {
     HostParam *p = host_param_find(name);
 
@@ -806,8 +825,12 @@ static void host_query_service(uint32_t now)
     }
 }
 
+/* 闭环 goto 的实现在本文件稍后；这里先声明，让 sweep 能优先刷 goto 的轴 */
+static uint8_t host_goto_sweep_first(uint32_t now);
+
 /* 遥测开着的时候轮着查接了回读线的轴：一次只起一个事务，
- * 不占 PC 的请求 id，也不和 PC 正在等的查询抢（PC 的优先）。 */
+ * 不占 PC 的请求 id，也不和 PC 正在等的查询抢（PC 的优先）。
+ * goto 激活时优先刷它那个轴：闭环要的是"自己的 counts 尽快变新"。 */
 static void host_query_sweep(uint32_t now)
 {
     uint8_t mask = host_readback_mask();
@@ -819,6 +842,10 @@ static void host_query_sweep(uint32_t now)
         return;
     }
     if ((host_query_pending != 0U) || (host_emm_query.active != 0U))
+    {
+        return;
+    }
+    if (host_goto_sweep_first(now) != 0U)
     {
         return;
     }
@@ -837,6 +864,353 @@ static void host_query_sweep(uint32_t now)
         }
     }
 }
+
+/* ==========================================================================
+ * 闭环 goto：用回读 counts 纠"丢步/背隙"的外层校正
+ * ==========================================================================
+ *
+ * 为什么放固件：counts 就在本文件里，判定延迟 1 ms；放上位机要绕 WiFi 一圈
+ * （200–400 ms），补差段会明显变慢。
+ *
+ * 为什么不用 motor_query 那条路：那条路目前有 bug（timeout 常驻），反正 counts
+ * 已经由遥测轮询缓存好了，goto 直接读 host_axis_read[]，不新开查询通道。
+ *
+ * 流程：粗走一段 → 等 counts 稳定 → 量误差 → 误差超标就补一段 → 再来一次。
+ * 判定"停住"不用固定延时，而是连续两个新样本 counts 不变（堵转也能识别）。
+ */
+
+#define HOST_GOTO_NONE    0U
+#define HOST_GOTO_COARSE  1U
+#define HOST_GOTO_SETTLE  2U
+#define HOST_GOTO_MEASURE 3U
+#define HOST_GOTO_DONE    4U
+#define HOST_GOTO_FAIL    5U
+
+#define HOST_GOTO_FRESH_MS      3000U   /* counts 超过这么久没更新就不敢用它算误差 */
+#define HOST_GOTO_STABLE_COUNTS 40      /* 两个新样本差多少算"没动" */
+#define HOST_GOTO_STABLE_NEED   2U      /* 连续几次"没动"算停稳 */
+
+typedef struct
+{
+    uint8_t  active;
+    uint8_t  phase;
+    uint8_t  addr;
+    uint8_t  dir;
+    uint8_t  passes;
+    uint8_t  stable;
+    uint8_t  pending;        /* 1 = 有 PC 在等这条 goto 的应答 */
+    uint16_t req_id;
+    uint16_t rpm;
+    int32_t  pulses;         /* 这一段发出的脉冲（绝对值） */
+    int32_t  target_counts;  /* 期望 counts 变化量 */
+    int32_t  tol_counts;
+    int32_t  base_counts;    /* 起点 counts */
+    int32_t  last_counts;    /* 最近一个样本 */
+    int32_t  err_counts;     /* 最近一次测得的误差 */
+    uint32_t started_ms;     /* 整条 goto 的起点（算超时） */
+    uint32_t seg_start_ms;   /* 当前这一段的起点 */
+    uint32_t seg_ms;         /* 当前这一段的估算时长 */
+    uint32_t last_stamp;     /* 最近一个样本的时间戳 */
+    uint32_t max_ms;
+    const char *fail_reason;
+} HostGoto;
+
+static HostGoto host_goto;
+
+/* sweep 用：goto 正在跑的轴排在最前，这样它的 counts 刷新最快。
+ * 返回 1 = 已经替它起了查询。 */
+static uint8_t host_goto_sweep_first(uint32_t now)
+{
+    uint8_t idx;
+
+    if (host_goto.active == 0U)
+    {
+        return 0U;
+    }
+    idx = control_index_of(host_goto.addr);
+    if (idx == 0xFFU)
+    {
+        return 0U;
+    }
+    if (((host_readback_mask() >> idx) & 1U) == 0U)
+    {
+        return 0U;
+    }
+    return EmmQuery_Start(&host_emm_query, host_goto.addr, EMM_QUERY_POS,
+                          now, (uint32_t)host_param_value("query_timeout_ms"));
+}
+
+static uint32_t host_goto_counts_per_rev(void)
+{
+    uint32_t v = host_param_value("counts_per_rev");
+
+    return (v == 0U) ? 1U : v;
+}
+
+static uint32_t host_goto_pulses_per_rev(void)
+{
+    /* 与 stepper.h 的 STEPPER_PULSES_PER_REV 保持一致（3200）。
+     * 这里不直接引用宏，避免本文件被单独包含时的依赖。 */
+    return 3200U;
+}
+
+/* 一段脉冲大概要走多久：脉冲 / (RPM × 3200 / 60) 秒，再留 250 ms 余量 */
+static uint32_t host_goto_estimate_ms(int32_t pulses, uint32_t rpm)
+{
+    uint32_t abs_pulses = (uint32_t)((pulses < 0) ? -pulses : pulses);
+    uint32_t ms;
+
+    if (rpm == 0U)
+    {
+        rpm = 60U;
+    }
+    ms = (uint32_t)(((uint64_t)abs_pulses * 60000ULL) /
+                    ((uint64_t)rpm * (uint64_t)host_goto_pulses_per_rev()));
+    return ms + 250U;
+}
+
+static void host_goto_finish(void)
+{
+    if (host_goto.pending != 0U)
+    {
+        if (host_goto.phase == HOST_GOTO_DONE)
+        {
+            host_body_ok(&host_out, host_goto.req_id);
+            host_kv_u32(&host_out, "addr", (uint32_t)host_goto.addr);
+            host_kv_u32(&host_out, "passes", (uint32_t)host_goto.passes);
+            host_kv_i32(&host_out, "err", host_goto.err_counts);
+            host_kv_u32(&host_out, "elapsed_ms",
+                        (uint32_t)(Stepper_Millis() - host_goto.started_ms));
+            (void)host_emit(host_goto.req_id, host_defer_req, host_defer_req_len);
+        }
+        else
+        {
+            host_body_err(&host_out, host_goto.req_id, HOST_E_GOTO);
+            host_kv_u32(&host_out, "addr", (uint32_t)host_goto.addr);
+            host_kv_u32(&host_out, "passes", (uint32_t)host_goto.passes);
+            host_kv_i32(&host_out, "err", host_goto.err_counts);
+            host_kv_str(&host_out, "reason",
+                        (host_goto.fail_reason != 0) ? host_goto.fail_reason : "lost");
+            (void)host_emit(host_goto.req_id, host_defer_req, host_defer_req_len);
+        }
+        host_goto.pending = 0U;
+        host_query_pending = 0U;
+    }
+    host_goto.active = 0U;
+    host_goto.phase  = HOST_GOTO_NONE;
+    host_flush_pending_event();
+}
+
+static void host_goto_fail(const char *reason)
+{
+    host_goto.fail_reason = reason;
+    host_goto.phase = HOST_GOTO_FAIL;
+    host_goto_finish();
+}
+
+/* 发一段相对位移（负数表示反向）。返回 0 = 下发失败 */
+static uint8_t host_goto_move(int32_t pulses, uint16_t rpm)
+{
+    uint8_t dir = (uint8_t)((pulses < 0) ? 1U : 0U);
+    int32_t mag = (pulses < 0) ? -pulses : pulses;
+
+    if (mag <= 0)
+    {
+        return 0U;
+    }
+    host_goto.dir     = dir;
+    host_goto.pulses  = mag;
+    host_goto.rpm     = rpm;
+    host_goto.seg_ms  = host_goto_estimate_ms(mag, (uint32_t)rpm);
+    host_goto.seg_start_ms = Stepper_Millis();
+    host_goto.stable  = 0U;
+    host_goto.phase   = HOST_GOTO_COARSE;
+    return control_apply_position(host_goto.addr, dir, rpm,
+                                  (uint8_t)host_param_value("acc"),
+                                  (uint32_t)mag, 0U, 0);
+}
+
+static void host_goto_begin(uint8_t addr, int32_t pulses, int32_t tol,
+                            uint16_t rpm)
+{
+    HostAxisRead *r = host_read_of(addr);
+
+    host_goto.active       = 1U;
+    host_goto.phase        = HOST_GOTO_COARSE;
+    host_goto.addr         = addr;
+    host_goto.dir          = (uint8_t)((pulses < 0) ? 1U : 0U);
+    host_goto.pulses       = (pulses < 0) ? -pulses : pulses;
+    host_goto.passes       = 0U;
+    host_goto.stable       = 0U;
+    host_goto.err_counts   = 0;
+    host_goto.target_counts = Emm_PulsesToCounts(pulses, host_goto_counts_per_rev(),
+                                                 host_goto_pulses_per_rev());
+    host_goto.tol_counts   = tol;
+    host_goto.base_counts  = (r != 0) ? r->counts : 0;
+    host_goto.last_counts  = host_goto.base_counts;
+    host_goto.last_stamp   = (r != 0) ? r->stamp_ms : 0U;
+    host_goto.started_ms   = Stepper_Millis();
+    host_goto.seg_start_ms = host_goto.started_ms;
+    host_goto.rpm          = rpm;
+    host_goto.fail_reason  = 0;
+
+    {
+        uint32_t max_ms = host_param_value("goto_max_ms");
+
+        host_goto.max_ms = (max_ms != 0U) ? max_ms
+            : (host_goto_estimate_ms(host_goto.pulses, (uint32_t)rpm) * 3U + 4000U);
+    }
+
+    if (!host_goto_move(pulses, rpm))
+    {
+        host_goto_fail("send");
+    }
+}
+
+/* 每轮调用。now 来自任务开头（与 query 同源，避免时间基不一致）。 */
+static void host_goto_service(uint32_t now)
+{
+    HostAxisRead *r;
+    uint32_t elapsed;
+
+    if (host_goto.active == 0U)
+    {
+        return;
+    }
+
+    elapsed = now - host_goto.started_ms;
+    if (elapsed > host_goto.max_ms)
+    {
+        /* 超时也要先停车，别让电机继续跑 */
+        (void)control_apply_stop(host_goto.addr);
+        host_goto_fail("timeout");
+        return;
+    }
+
+    r = host_read_of(host_goto.addr);
+    if (r == 0)
+    {
+        host_goto_fail("lost");
+        return;
+    }
+
+    if (host_goto.phase == HOST_GOTO_COARSE)
+    {
+        /* 已发出这一段，等到估算时间（+250 ms 余量）再开始看 counts */
+        if ((uint32_t)(now - host_goto.seg_start_ms) >= host_goto.seg_ms)
+        {
+            host_goto.phase  = HOST_GOTO_SETTLE;
+            host_goto.stable = 0U;
+        }
+        return;
+    }
+
+    /* 还能用这个样本吗：必须比 base 新，且不超时太旧 */
+    if ((r->have == 0U) || (r->stamp_ms == host_goto.last_stamp) ||
+        ((uint32_t)(now - r->stamp_ms) > HOST_GOTO_FRESH_MS))
+    {
+        /* 没有新样本就先等；整条超时由上面的 elapsed 兜底 */
+        return;
+    }
+
+    /* 有新样本：判断是不是停住了 */
+    {
+        int32_t delta = r->counts - host_goto.last_counts;
+
+        host_goto.last_counts = r->counts;
+        host_goto.last_stamp  = r->stamp_ms;
+
+        if (host_goto.phase == HOST_GOTO_SETTLE)
+        {
+            if ((delta <= HOST_GOTO_STABLE_COUNTS) &&
+                (delta >= -HOST_GOTO_STABLE_COUNTS))
+            {
+                host_goto.stable++;
+            }
+            else
+            {
+                host_goto.stable = 0U;
+            }
+            if (host_goto.stable < HOST_GOTO_STABLE_NEED)
+            {
+                return;
+            }
+            host_goto.phase = HOST_GOTO_MEASURE;
+        }
+    }
+
+    if (host_goto.phase == HOST_GOTO_MEASURE)
+    {
+        int32_t measured = host_goto.last_counts - host_goto.base_counts;
+        int32_t err      = host_goto.target_counts - measured;
+        int32_t err_abs  = (err < 0) ? -err : err;
+        int32_t corr_pulses;
+
+        host_goto.err_counts = err;
+
+        if (err_abs <= host_goto.tol_counts)
+        {
+            host_goto.phase = HOST_GOTO_DONE;
+            host_goto_finish();
+            return;
+        }
+        if (host_goto.passes >= (uint8_t)host_param_value("goto_max_passes"))
+        {
+            host_goto_fail("lost");
+            return;
+        }
+
+        corr_pulses = Emm_CountsToPulses(err, host_goto_counts_per_rev(),
+                                         host_goto_pulses_per_rev());
+        if (corr_pulses == 0)
+        {
+            /* 误差不到一个脉冲的分辨率：再补也是原地踏步，当成到位 */
+            host_goto.phase = HOST_GOTO_DONE;
+            host_goto_finish();
+            return;
+        }
+
+        host_goto.passes++;
+        if (!host_goto_move(corr_pulses,
+                            (uint16_t)host_param_value("goto_final_rpm")))
+        {
+            host_goto_fail("send");
+        }
+    }
+}
+
+/* 外部要求中止（停止字符、stop_all、stop_clear 等）：先停车再报 E14 stopped */
+static void host_goto_abort(const char *reason)
+{
+    if (host_goto.active != 0U)
+    {
+        (void)control_apply_stop(host_goto.addr);
+        host_goto.fail_reason = reason;
+        host_goto.phase  = HOST_GOTO_FAIL;
+        host_goto_finish();
+    }
+}
+
+/* 会话重新握手时静默丢弃 goto（不补发应答：那条连接已经不在了） */
+static void host_goto_drop(void)
+{
+    host_goto.active  = 0U;
+    host_goto.phase   = HOST_GOTO_NONE;
+    host_goto.pending = 0U;
+}
+
+/* goto 跑着的时候，别让别的运动命令插进来抢同一个轴 */
+static uint8_t host_goto_busy_error(uint16_t id)
+{
+    if (host_goto.active == 0U)
+    {
+        return 0U;
+    }
+    host_body_err(&host_out, id, HOST_E_BUSY);
+    host_kv_str(&host_out, "reason", "goto_busy");
+    return 1U;
+}
+
 
 /* ==========================================================================
  * 主动上报
@@ -1112,6 +1486,7 @@ static void host_cmd_hello(uint16_t id, uint8_t nargs)
 
     host_session_clear();           /* 新会话：旧请求 id 全部作废 */
     host_query_reset_all();         /* 也丢掉上一次没回完的查询 */
+    host_goto_drop();               /* 旧连接上没跑完的 goto 直接丢（不补应答） */
     host_ready = 1U;
     host_link_lost = 0U;
     host_boot_id++;
@@ -1181,6 +1556,7 @@ static void host_cmd_motor_enable(uint16_t id, uint8_t nargs)
     if (!host_require_argc(id, nargs, 2U)) { return; }
     if (!host_arg_axis(id, host_tokens[2], &addr)) { return; }
     if (!host_arg_u32(id, host_tokens[3], 0U, 1U, &on)) { return; }
+    if (host_goto_busy_error(id)) { return; }
     if (control_stop_latched())
     {
         host_body_err(&host_out, id, HOST_E_LATCHED);
@@ -1210,6 +1586,7 @@ static void host_cmd_motor_speed(uint16_t id, uint8_t nargs)
     if (!host_arg_u32(id, host_tokens[3], 0U, 1U, &dir)) { return; }
     if (!host_arg_u32(id, host_tokens[4], 1U, 6000U, &rpm)) { return; }
     if (!host_arg_u32(id, host_tokens[5], 0U, 255U, &acc)) { return; }
+    if (host_goto_busy_error(id)) { return; }
     if (rpm > (uint32_t)host_param_value("speed_rpm_max"))
     {
         host_body_err(&host_out, id, HOST_E_ARG);
@@ -1251,6 +1628,7 @@ static void host_cmd_motor_pos(uint16_t id, uint8_t nargs)
     if (!host_arg_u32(id, host_tokens[4], 1U, 6000U, &rpm)) { return; }
     if (!host_arg_u32(id, host_tokens[5], 0U, 255U, &acc)) { return; }
     if (!host_arg_u32(id, host_tokens[6], 0U, 0x7FFFFFFFUL, &pulses)) { return; }
+    if (host_goto_busy_error(id)) { return; }
     if (host_streq(host_tokens[7], "rel"))
     {
         absolute = 0U;
@@ -1305,6 +1683,8 @@ static void host_cmd_motor_stop(uint16_t id, uint8_t nargs)
 
     if (!host_require_argc(id, nargs, 1U)) { return; }
     if (!host_arg_axis(id, host_tokens[2], &addr)) { return; }
+    /* 手动停车：如果正在闭环 goto 就把它中止掉（会补发一条 E14 stopped） */
+    host_goto_abort("stopped");
     if (!control_apply_stop(addr))
     {
         host_body_err(&host_out, id, HOST_E_BUSY);
@@ -1318,6 +1698,7 @@ static void host_cmd_stop_all(uint16_t id, uint8_t nargs)
 {
     if (!host_require_argc(id, nargs, 0U)) { return; }
 
+    host_goto_abort("stopped");
     control_latch_stop(Stepper_Millis());
     host_body_ok(&host_out, id);
     host_kv_str(&host_out, "axes", "1/3/4/5");
@@ -1346,6 +1727,7 @@ static void host_cmd_motor_zero(uint16_t id, uint8_t nargs)
 
     if (!host_require_argc(id, nargs, 1U)) { return; }
     if (!host_arg_axis(id, host_tokens[2], &addr)) { return; }
+    if (host_goto_busy_error(id)) { return; }
     r = control_apply_zero(addr);
     if (r == 2U)
     {
@@ -1408,6 +1790,98 @@ static void host_cmd_motor_query(uint16_t id, uint8_t nargs)
     host_defer_id      = id;
     host_defer_addr    = addr;
     host_defer_what    = what;
+}
+
+/* motor_goto,<axis>,<delta_pulses>[,<tol_counts>[,<rpm>]]
+ *
+ * 走一段相对位移，然后用回读 counts 做外层校正：粗走 → 等停稳 → 量误差 →
+ * 超标就补一小段，直到 |实测变化量 − 期望变化量| ≤ tol。tol 默认取参数
+ * goto_tol_counts。失败（超时/补差用完/被停）回 E14，reason 说明原因。
+ *
+ * 前置：该轴必须在 readback_mask 里，而且手上要有一份不算太旧的 counts
+ * （先 tele_on 或 motor_query 一次）。应答延后，由 host_goto_service 补发。 */
+static void host_cmd_motor_goto(uint16_t id, uint8_t nargs)
+{
+    uint8_t       addr;
+    int32_t       pulses;
+    int32_t       tol;
+    uint32_t      rpm;
+    uint32_t      v;
+    uint32_t      now;
+    HostAxisRead *r;
+
+    if (!host_require_argc(id, nargs, 2U)) { return; }
+    if (!host_arg_axis(id, host_tokens[2], &addr)) { return; }
+    if (!host_parse_i32(host_tokens[3], &pulses))
+    {
+        host_body_err(&host_out, id, HOST_E_ARG);
+        host_kv_str(&host_out, "reason", "pulses");
+        return;
+    }
+    if ((pulses == 0) || (pulses > (100L * 3200L)) || (pulses < -(100L * 3200L)))
+    {
+        host_body_err(&host_out, id, HOST_E_ARG);
+        host_kv_str(&host_out, "reason", "pulses");
+        return;
+    }
+
+    tol = (int32_t)host_param_value("goto_tol_counts");
+    if (nargs >= 3U)
+    {
+        if (!host_arg_u32(id, host_tokens[4], 1U, 65535U, &v)) { return; }
+        tol = (int32_t)v;
+    }
+    rpm = host_param_value("goto_rpm");
+    if (nargs >= 4U)
+    {
+        if (!host_arg_u32(id, host_tokens[5], 1U, 6000U, &v)) { return; }
+        rpm = v;
+    }
+
+    if (control_stop_latched())
+    {
+        host_body_err(&host_out, id, HOST_E_LATCHED);
+        return;
+    }
+    if (!host_axis_has_readback(addr))
+    {
+        host_body_err(&host_out, id, HOST_E_NO_READBACK);
+        host_kv_u32(&host_out, "addr", addr);
+        return;
+    }
+    r   = host_read_of(addr);
+    now = Stepper_Millis();
+    if ((r == 0) || (r->have == 0U) ||
+        ((uint32_t)(now - r->stamp_ms) > HOST_GOTO_FRESH_MS))
+    {
+        /* 没有可用的起点 counts：先 tele_on 或 motor_query 拿一次再来 */
+        host_body_err(&host_out, id, HOST_E_NO_READBACK);
+        host_kv_u32(&host_out, "addr", addr);
+        host_kv_str(&host_out, "reason", "no_fresh_counts");
+        return;
+    }
+    if (host_goto.active != 0U)
+    {
+        host_body_err(&host_out, id, HOST_E_BUSY);
+        host_kv_str(&host_out, "reason", "goto_busy");
+        return;
+    }
+
+    /* 应答先压住（defer）：host_goto_service 收口时再补发。
+     * 注意这里不复用 host_query_pending——那会让 sweep 停摆，goto 自己就没有
+     * 新 counts 可用了；goto 用 host_goto.pending 单独记账。 */
+    host_goto.req_id   = id;
+    host_goto.pending  = 1U;
+    host_defer_line    = 1U;
+    host_defer_id      = id;
+    host_defer_addr    = addr;
+    host_defer_what    = EMM_QUERY_POS;
+
+    host_goto_begin(addr, pulses, tol, (uint16_t)rpm);
+    if (host_goto.active == 0U)
+    {
+        host_defer_line = 0U;   /* begin 里已经补发了失败应答 */
+    }
 }
 
 static void host_cmd_gripper(uint16_t id, uint8_t nargs)
@@ -1535,7 +2009,7 @@ static void host_cmd_param_set(uint16_t id, uint8_t nargs)
         host_kv_str(&host_out, "reason", "range");
         return;
     }
-    if ((value < (int32_t)p->min) || (value > (int32_t)p->max))
+    if ((value < 0) || ((uint32_t)value < p->min) || ((uint32_t)value > p->max))
     {
         host_body_err(&host_out, id, HOST_E_ARG);
         host_kv_str(&host_out, "reason", "range");
@@ -1547,7 +2021,7 @@ static void host_cmd_param_set(uint16_t id, uint8_t nargs)
     host_body_ok(&host_out, id);
     host_kv_str(&host_out, "name", p->name);
     host_kv_u32(&host_out, "before", p->value);
-    p->value = (uint16_t)value;
+    p->value = (uint32_t)value;
     host_kv_u32(&host_out, "value", p->value);
 }
 
@@ -1583,6 +2057,7 @@ static void host_cmd_stop_clear(uint16_t id, uint8_t nargs)
 {
     if (!host_require_argc(id, nargs, 0U)) { return; }
 
+    host_goto_abort("stopped");
     control_clear_stop();
     host_body_ok(&host_out, id);
     host_kv_u32(&host_out, "latch", 0U);
@@ -1616,6 +2091,7 @@ static void host_dispatch(uint16_t id, uint8_t ntok)
     else if (host_streq(cmd, "motor_stall_clear")) { host_cmd_motor_stall_clear(id, nargs); }
     else if (host_streq(cmd, "motor_zero"))  { host_cmd_motor_zero(id, nargs); }
     else if (host_streq(cmd, "motor_query")) { host_cmd_motor_query(id, nargs); }
+    else if (host_streq(cmd, "motor_goto"))  { host_cmd_motor_goto(id, nargs); }
     else if (host_streq(cmd, "gripper"))     { host_cmd_gripper(id, nargs); }
     else if (host_streq(cmd, "servo_angle")) { host_cmd_servo_angle(id, nargs); }
     else if (host_streq(cmd, "param_get"))   { host_cmd_param_get(id, nargs); }
@@ -1739,7 +2215,7 @@ static void host_handle_line(void)
      * 存的是已切分（',' 换成 '\0'）的文本，和会话缓存里的格式一致。
      * 上一条查询还没收完时不能覆盖它——那条查询的应答也要用这段原文。 */
     host_defer_line = 0U;
-    if (host_query_pending == 0U)
+    if ((host_query_pending == 0U) && (host_goto.active == 0U))
     {
         host_save_defer_req(host_line, payload_len);
     }
@@ -1865,10 +2341,16 @@ static void host_protocol_task(void)
     /* 4.5 驱动器回读（PA3）：本轮的字节已经在上面收完，这里解析并补发应答 */
     host_query_service(now);
 
+    /* 4.6 闭环 goto：推进状态机。
+     *     它要的 counts 由 sweep 刷进 host_axis_read，所以下面第 7 步在
+     *     goto 激活时会绕过遥测周期，每拍都试着开一次查询。 */
+    host_goto_service(now);
+
     /* 5. 停止字符：置锁存 + 错发四轴停止 + 报事件 */
     if (host_stop_pending)
     {
         host_stop_pending = 0U;
+        host_goto_abort("stopped");
         if (!control_stop_latched())
         {
             control_latch_stop(now);
@@ -1883,21 +2365,31 @@ static void host_protocol_task(void)
         {
             host_link_lost = 1U;
             host_owner     = "none";
+            host_goto_abort("lost");
             control_latch_stop(now);
             (void)host_emit_link_event("timeout");
         }
     }
 
     /* 7. 遥测：默认关，只有 tele_on 订阅后才发。
-     *    每一拍轮着查一个接了回读线的轴（readback_mask），并且把订阅轴 +
-     *    其余接了回读的轴都各报一帧，所以界面上四个轴的实测值会一起刷新。 */
-    if ((host_ready) && (host_tele_axis != 0U) && (host_tele_interval_ms > 0U))
+     *    goto 激活时每拍都刷 goto 那个轴（闭环要快），遥测仍按自己的周期发。 */
+    if (host_ready)
     {
-        if ((int32_t)(now - host_tele_next_ms) >= 0)
+        uint8_t tele_due = 0U;
+
+        if ((host_tele_axis != 0U) && (host_tele_interval_ms > 0U) &&
+            ((int32_t)(now - host_tele_next_ms) >= 0))
+        {
+            tele_due = 1U;
+        }
+        if ((tele_due != 0U) || (host_goto.active != 0U))
+        {
+            host_query_sweep(now);
+        }
+        if (tele_due != 0U)
         {
             uint8_t i;
 
-            host_query_sweep(now);
             host_emit_telemetry(host_tele_axis);
             for (i = 0U; i < CONTROL_AXIS_COUNT; i++)
             {
