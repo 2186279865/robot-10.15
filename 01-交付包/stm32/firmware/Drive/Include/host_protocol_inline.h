@@ -1163,9 +1163,6 @@ static void host_goto_service(uint32_t now)
                     host_goto_fail("send");
                 }
             }
-            {
-                host_goto_fail("send");
-            }
         }
         return;
     }

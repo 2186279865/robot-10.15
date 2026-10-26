@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "D:\\study\\project\\datasets",
+  "weights_dir": "D:\\study\\project\\robot-competition\\weights",
+  "runs_dir": "D:\\study\\project\\robot-competition\\runs",
+  "uuid": "a3a2bfa1f8d6d8e4c136f6621517016284b7fad29eb56a96d2317667517d220a",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

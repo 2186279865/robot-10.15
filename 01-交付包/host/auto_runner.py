@@ -281,7 +281,32 @@ def load_route(path=None):
 
 
 def load_limits(path=None):
-    return load_json(path or (PKG_ROOT / 'host' / 'limits.json'), {})
+    """读软限位。
+
+    单位口径：**对外一律用脉冲**。文件里若写 `"unit": "counts"`，这里自动换算成脉冲。
+    返回 `{轴号(str): {"min": 脉冲, "max": 脉冲}}`，与 limits.json 的扁平结构一致。
+    """
+    data = load_json(path or (PKG_ROOT / 'host' / 'limits.json'), {})
+    if not isinstance(data, dict):
+        return {}
+    from units import check_unit, counts_to_pulses  # 延迟导入，避免循环
+    try:
+        unit = check_unit(data, name='limits.json')
+    except ValueError:
+        return {}
+    if isinstance(data.get('axes'), dict):
+        axes = dict(data['axes'])
+    else:
+        axes = {str(k): v for k, v in data.items() if str(k).isdigit() and isinstance(v, dict)}
+    out = {}
+    for k, v in axes.items():
+        if not isinstance(v, dict) or 'min' not in v or 'max' not in v:
+            continue
+        lo, hi = v['min'], v['max']
+        if unit == 'counts':
+            lo, hi = int(round(counts_to_pulses(lo))), int(round(counts_to_pulses(hi)))
+        out[str(k)] = {'min': int(lo), 'max': int(hi)}
+    return out
 
 
 def main(argv=None):

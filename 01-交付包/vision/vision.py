@@ -62,7 +62,11 @@ def segment(frame, cfg):
     diff = cv2.absdiff(gray, np.full_like(gray, int(bg_gray)))
     bg_path = cfg.get("empty_background")
     if bg_path:
-        bg = cv2.imread(str(bg_path), cv2.IMREAD_GRAYSCALE)
+        bg = None
+        try:
+            bg = cv2.imread(str(bg_path), cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            bg = None
         if bg is not None and bg.shape == gray.shape:
             diff = cv2.absdiff(gray, bg)
     # 彩色物料优先用饱和度分离；灰黑物料用与边缘背景的亮度差分离。

@@ -437,5 +437,50 @@ class TestTrayState(unittest.TestCase):
             self.assertAlmostEqual(int(args[4]), 3200 / 6, delta=1)
 
 
+#: 2026-10-26 现场记录的 9 个标注点（P1..P9），原样保留便于回归
+FIELD_9 = [
+    (0.0768, 0.1495, 0, -34645), (0.5161, 0.1387, 0, -70645),
+    (0.8907, 0.1422, 0, -102645), (0.8935, 0.5421, 5000, -102645),
+    (0.9088, 0.9344, 9300, -102645), (0.5231, 0.9517, 9300, -72645),
+    (0.0728, 0.9514, 9300, -36645), (0.0793, 0.5651, 5300, -36645),
+    (0.4955, 0.5594, 5300, -72645),
+]
+
+
+class MultiPointCheckTests(unittest.TestCase):
+    """多点标注：不能假设前 3 个点就是「基准 + 只动X + 只动Y」。"""
+
+    def _points(self, rows):
+        return [{'u': u, 'v': v, 'px': float(px), 'py': float(py)}
+                for u, v, px, py in rows]
+
+    def test_nine_field_points_are_not_rejected_as_parallel(self):
+        problems = W.check_points(self._points(FIELD_9), labels=('X', 'Y'))
+        self.assertFalse([m for m in problems if '同方向' in m], problems)
+
+    def test_travel_guard_normalizes_counts_as_pulses(self):
+        # 现在不再直接报错：check_points 会先把“跨度超过行程 1.5 倍”的轴
+        # 按 counts→脉冲 换算，再判几何；换算说明由 solve() 的 notes 带回界面。
+        points = self._points(FIELD_9)
+        travel = {4: (-500, 8878), 5: (-13400, 500)}
+        problems = W.check_points(points, labels=('X', 'Y'), travel=travel)
+        self.assertEqual(problems, [])
+        pts, notes = W.normalize_points(points, travel=travel)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('counts', notes[0])
+        self.assertLess(max(abs(q['py']) for q in pts), max(abs(q['py']) for q in points))
+        rep = W.solve(points, travel=travel)
+        self.assertTrue(any('counts' in n for n in rep.get('notes') or []))
+        # 这里只验证“单位被换算、残差从几万降到百级”，不追求 <100 的精度
+        self.assertLess(rep['max_abs_pulse']['dy'], 200)
+
+    def test_good_grid_has_no_problems(self):
+        rows = [(0.2, 0.2, 0, 0), (0.8, 0.2, 3000, 0),
+                (0.2, 0.8, 0, 3000), (0.8, 0.8, 3000, 3000)]
+        problems = W.check_points(self._points(rows), labels=('X', 'Y'),
+                                  travel={4: (-500, 8878), 5: (-13400, 500)})
+        self.assertEqual(problems, [])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

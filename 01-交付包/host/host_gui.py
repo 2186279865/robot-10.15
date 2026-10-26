@@ -28,6 +28,7 @@ import protocol as P  # noqa: E402
 import approach_route as AR
 import journey as J  # noqa: E402
 import pi_link  # noqa: E402
+import units  # noqa: E402
 import sequence as S  # noqa: E402
 from host_client import (  # noqa: E402
     STATE_DISCONNECTED,
@@ -369,11 +370,14 @@ class AxisPanel:
             self.readback.configure(text="回读：—（等遥测/查询）", foreground="#666666")
             return
         age = max(0, self.app.client.now_ms() - self.last_counts_ms)
-        deg = self.last_counts * 360.0 / 65536.0
-        rpm = f"，{self.last_rpm} RPM" if self.last_rpm is not None else ""
-        stale = "（数据已过期）" if age > 3000 else ""
+        # 单位口径：界面主单位=脉冲；counts 只作括号说明（units.py 是唯一换算处）
         self.readback.configure(
-            text=f"回读：{self.last_counts} 脉冲 / {deg:.1f}°{rpm}，{age / 1000:.1f}s 前{stale}",
+            text=units.fmt_readback(
+                self.last_counts,
+                rpm=self.last_rpm,
+                age_ms=age,
+                stale=age > 3000,
+            ),
             foreground="#0a6b0a" if age <= 3000 else "#8a5a00",
         )
 

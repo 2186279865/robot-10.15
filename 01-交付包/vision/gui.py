@@ -812,7 +812,14 @@ class App:
                 bpath = Path(bgp)
                 if not bpath.is_absolute():
                     bpath = ROOT / bpath
-                bgi = cv2.imread(str(bpath), cv2.IMREAD_GRAYSCALE)
+                bgi = None
+                try:
+                    if bpath.is_file():
+                        bgi = cv2.imread(str(bpath), cv2.IMREAD_GRAYSCALE)
+                    else:
+                        self.note(f'空托盘背景不存在（{bpath.name}），本次跳过灰度差分')
+                except Exception as exc:              # 背景图问题不该让整次识别失败
+                    self.note(f'空托盘背景读不到（{exc}），本次跳过灰度差分')
                 if bgi is not None:
                     bg = cv2.warpPerspective(bgi, H, (s, s))
         masks = self.segmenter.segment(warp, bg, self.cfg)

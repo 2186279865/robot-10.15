@@ -10,14 +10,33 @@
 """
 from __future__ import annotations
 
+import threading
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 import calib_wizard as W
+import prep_pose as PP
 import vision_grasp as VG
 
 AXIS_X, AXIS_Y = VG.AXIS_X, VG.AXIS_Y
 AXIS_NAMES = {AXIS_X: 'X(4)', AXIS_Y: 'Y(5)', VG.AXIS_Z: 'Z(1)', VG.AXIS_TRAY: '托盘(3)'}
+
+
+def _travel_limits():
+    """读软限位（脉冲），给标定自检用：{轴号: (min, max)}。失败返回 None。"""
+    try:
+        import auto_runner as _AR
+        limits = _AR.load_limits() or {}
+        out = {}
+        for key, val in limits.items():
+            try:
+                out[int(key)] = (int(val['min']), int(val['max']))
+            except Exception:
+                continue
+        return out or None
+    except Exception:
+        return None
 
 
 class CalibTab(ttk.Frame):
@@ -31,6 +50,7 @@ class CalibTab(ttk.Frame):
         self.var_flip_y = tk.BooleanVar(value=False)
         self._last_uv = None
         self._jog_token = 0
+        self._prep_running = False
         self._build()
         self._refresh_pos()
         self.on_marks_refresh()
@@ -47,6 +67,8 @@ class CalibTab(ttk.Frame):
 
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=6)
+        ttk.Button(bar, text='一键走出固定路线', command=self.on_prep_route
+                   ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='刷新标注点', command=self.on_marks_refresh).pack(side='left', padx=(0, 6))
         ttk.Button(bar, text='记录爪位', command=self.on_marks_record).pack(side='left', padx=(0, 6))
         ttk.Button(bar, text='清除这个爪位', command=self.on_marks_clearrow).pack(side='left', padx=(0, 6))
@@ -104,6 +126,74 @@ class CalibTab(ttk.Frame):
         self.log.configure(yscrollcommand=sb2.set)
         self.log.pack(side='left', fill='both', expand=True)
         sb2.pack(side='right', fill='y')
+
+    # ------------------------------------------------------- 一键走出固定路线
+    def on_prep_route(self):
+        """从初始位走固定通道（Y 让开 → Z 抬起），走完停在工作位，等你标定。"""
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('还没连接：先在顶部下拉框选「派 robot-pi …」并点「连接」')
+            return
+        if self._prep_running:
+            self.say('固定路线正在走，等它走完')
+            return
+        cfg = PP.load()
+        if not messagebox.askyesno(
+                '一键走出固定路线',
+                '将从初始位走固定通道（目标位置，已经在目标位就不会再走）：\n\n%s\n\n'
+                '过程中手不要挡在机构运动范围内，急停随时可按「停止全部」。\n继续？'
+                % PP.describe(cfg)):
+            return
+        self._prep_running = True
+        self.say('开始走固定路线：%s' % PP.describe(cfg))
+        th = threading.Thread(target=self._prep_worker, args=(client, cfg), daemon=True)
+        th.start()
+
+    def _prep_worker(self, client, cfg):
+        """后台线程执行；事件只在主线程里改界面。"""
+        def waiter(req_id, timeout_ms):
+            end = time.monotonic() + timeout_ms / 1000.0
+            while time.monotonic() < end:
+                got = client.done_of(req_id) if hasattr(client, 'done_of') else None
+                if got is not None:
+                    kind = 'reply' if got.get('kind') == 'reply' else (
+                        'err' if got.get('kind') == 'err' else 'timeout')
+                    return {'kind': kind, 'code': got.get('code', ''),
+                            'text': '', 'pairs': got.get('pairs') or {}}
+                time.sleep(0.05)
+            return None
+
+        soft = dict(getattr(self.app, 'soft_pos', {}) or {})
+        known = dict(getattr(self.app, 'pos_known', {}) or {})
+        # 优先用四轴页收到的“回读 counts”：软位置只按命令累加，超时/断电后会不准。
+        counts = {}
+        now = client.now_ms()
+        panels = getattr(self.app, 'axes', {}) or {}
+        for axis in (PP.AXIS_Y, PP.AXIS_Z):
+            panel = panels.get(axis)
+            if panel is None:
+                continue
+            val = getattr(panel, 'last_counts', None)
+            age = now - int(getattr(panel, 'last_counts_ms', 0) or 0)
+            if val is not None and age < 3000:
+                counts[axis] = int(val)
+        try:
+            results = PP.run(client, cfg, log=lambda t: self.after(0, self.say, t), wait=waiter,
+                             soft=soft, known=known, counts=counts)
+        except Exception as exc:                      # noqa: BLE001
+            self.after(0, self.say, '固定路线异常：%s: %s' % (type(exc).__name__, exc))
+            results = []
+        finally:
+            self._prep_running = False
+
+        ok = all(r.get('ok') for r in results)
+        if ok and not results:
+            self.after(0, self.say, '固定路线：Y/Z 都已在目标位，不需要再动')
+            return
+        if ok:
+            self.after(0, self.say, '固定路线完成：现在应该在工作位了，可以开始标定（用点动把爪子对到标注点上方）')
+        else:
+            self.after(0, self.say, '固定路线没走完：先看上面的失败原因，必要时点「停止所有轴」再重试')
 
     # ---------------------------------------------------------------- 工具
     def say(self, text):
@@ -331,7 +421,8 @@ class CalibTab(ttk.Frame):
     def on_marks_solve(self):
         try:
             points = W.marks_points(self.marks)
-            result = W.solve(points, write=bool(self.var_write.get()))
+            result = W.solve(points, write=bool(self.var_write.get()),
+                             travel=_travel_limits())
         except Exception as exc:
             messagebox.showerror('标注点标定失败', str(exc))
             return

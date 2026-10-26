@@ -102,6 +102,9 @@ class HostClient:
         self.framing = P.FramingBuffer()
         self.ids = P.RequestIdPool()
         self.pending: Dict[int, PendingRequest] = {}
+        #: 已完成请求的结果缓存（req_id -> {'kind','code','pairs'}），给"后台线程等某条应答"用：
+        #: 服务线程会先把 pending 弹掉，光看 pending 会错过应答。
+        self.done: Dict[int, dict] = {}
         self.session_id = random.randint(1, 0xFFFF)
         self.state = STATE_DISCONNECTED
         self.fw_version = ""
@@ -290,7 +293,9 @@ class HostClient:
             args.append(int(rpm))
         if timeout_ms is None:
             speed = int(rpm if rpm is not None else P.PARAM_DEFAULTS["goto_rpm"]) or 1
-            timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000) + 4000
+            # 闭环要先走一段、等稳、再补差（最多 goto_max_passes 次），所以客户端超时
+        # 要按 3 倍行程时间 + 8 s 余量算，否则会把“固件还在跑”误判成请求超时。
+        timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000 * 3) + 8000
         return self.send("motor_goto", *args, timeout_ms=timeout_ms)
 
     def angle_zero(self, axis: int, timeout_ms: int = 3000) -> int:
@@ -386,6 +391,19 @@ class HostClient:
         else:
             self._on_reply(frame)
 
+    def _remember_done(self, req_id: int, kind: str, code: str = "", pairs: Optional[dict] = None) -> None:
+        """记下某条请求的最终结果（最多留 64 条，供后台线程轮询）。"""
+        self.done[int(req_id)] = {'kind': kind, 'code': code, 'pairs': dict(pairs or {})}
+        while len(self.done) > 64:
+            try:
+                self.done.pop(next(iter(self.done)))
+            except (StopIteration, KeyError):
+                break
+
+    def done_of(self, req_id: int) -> Optional[dict]:
+        """查一条请求的最终结果；还没完成返回 None。"""
+        return self.done.get(int(req_id))
+
     def _on_reply(self, frame: P.Frame) -> None:
         pending = self.pending.pop(frame.req_id, None) if frame.req_id != P.ID_EVENT else None
         if pending is not None:
@@ -395,6 +413,7 @@ class HostClient:
                 code = frame.error_code or "E05"
                 text = f"{pending.cmd} 被拒绝：{code} {ERROR_TEXT.get(code, '')}".strip()
                 self.last_err = {"ts": self.now_ms(), "cmd": pending.cmd, "code": code, "text": text}
+                self._remember_done(pending.req_id, 'err', code=code, pairs=frame.pairs)
                 self.emit(
                     "err",
                     text,
@@ -407,6 +426,7 @@ class HostClient:
                 pending.result = RESULT_OK
                 self.last_ok = {"ts": self.now_ms(), "cmd": pending.cmd, "req_id": pending.req_id}
                 self._apply_ok(pending, frame)
+                self._remember_done(pending.req_id, 'reply', pairs=frame.pairs)
                 self.emit(
                     "reply",
                     f"{pending.cmd} ok",
@@ -484,9 +504,11 @@ class HostClient:
             self.ids.release(pending.req_id)
             if pending.cmd in RETRYABLE:
                 pending.result = RESULT_TIMEOUT
+                self._remember_done(pending.req_id, 'timeout')
                 self.emit("timeout", f"{pending.cmd} 无应答（已重试）", cmd=pending.cmd)
             else:
                 pending.result = RESULT_UNKNOWN
+                self._remember_done(pending.req_id, 'timeout', code='UNKNOWN')
                 self.emit(
                     "timeout",
                     f"{pending.cmd} 超时：结果未知，请查状态或停止，不要盲目重发",

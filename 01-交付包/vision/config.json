@@ -75,7 +75,7 @@
     ]
   ],
   "side_rotation": 180,
-  "empty_background": "D:\\study\\project\\robot-competition\\10.21\\vision\\runtime\\empty_background.png",
+  "empty_background": "runtime/empty_background.png",
   "class_names": {
     "五棱体": "五棱体"
   }

@@ -163,6 +163,33 @@ IDLE → CAPTURE → PLAN → CORRIDOR_OUT → ALIGN → DESCEND → GRASP
 派上启动：`python3 pi_display.py`（`--windowed` 调试、`--fake` 自演示）。屏保/旋转已设好：
 `~/.local/bin/screen-setup.sh` + `~/.config/autostart/screen-setup.desktop`（不黑屏、旋转 180°）。
 
+## 5.6 一键走出固定路线（标定前用）
+
+初始位上方有障碍，X 不能动。所以第一次标定（以及以后每次重新标定）之前，先从初始位走固定通道到工作位：
+
+1. 「X/Y 标定」页最左边点 **一键走出固定路线**
+2. 确认弹窗后机器自己走：先 `Y -13144 脉冲`（= -269,194 counts，出通道），再 `Z -152000 脉冲`（抬起，约 47.5 圈 = 最上）
+3. 日志出现「固定路线完成」后，再用点动把爪子对到标注点上方，开始 4 点标定
+
+- 两步都用固件闭环 `motor_goto`：走完并校验过才算 ok；失败写日志（E14/E10 等），先点「停止所有轴」再重试
+- 参数在 `runtime/prep_pose.json`（`y_pulses / y_rpm / z_pulses / z_rpm`），改完保存即生效，不用重启
+- 只动 Y、Z，不动 X、不动托盘；固件处于停止锁存时会先自动 `stop_clear`
+
+## 5.7 单位约定（重要，只看这一段就够）
+
+**对外一律用「脉冲」。** 1 圈 = **3200 脉冲** = 65536 编码器 counts（1 脉冲 = 20.48 counts）。
+
+| 场合 | 单位 | 例子 |
+|---|---|---|
+| 所有运动命令（`motor_pos` / `motor_goto` / `motor_angle`） | 脉冲 | `motor_goto 4 640` |
+| `limits.json` / `prep_pose.json` / `tray_calib.json` / 示教 / 序列 | 脉冲（文件里写 `"unit": "pulse"`） | `"y_pulses": -13144` |
+| 界面「回读」 | 脉冲为主，括号附 counts 与角度 | `回读：-13144 脉冲（-269189 counts，-1478.7°）` |
+| 固件回读 `counts`（`#0,tele` / `motor_query`） | counts | `counts=-269189` |
+| 固件容差 `goto_tol_counts` / `angle_tol_counts` | counts（名字带 counts） | `200` / `500` |
+
+换算只在 `host/units.py` 里做；文件里若写 `"unit": "counts"`，读取时自动换算成脉冲并在日志说明。
+**界面禁止再把 counts 显示成「脉冲」**——历史上就是这个坑，害得标定数据一半脉冲一半 counts。
+
 ## 6. 自测（改完代码建议跑）
 
 ```bat

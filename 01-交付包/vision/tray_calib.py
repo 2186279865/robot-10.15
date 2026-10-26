@@ -95,7 +95,9 @@ def uv_to_pulse(u, v, calib):
 
 
 def save(calib, path=DEFAULT_PATH, points=None):
-    data = {'version': 1, 'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    # 单位口径：标定写入的 px/py 一律是「脉冲」（1 圈=3200 脉冲），不是编码器 counts
+    data = {'version': 1, 'unit': 'pulse',
+            'updated_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
             'affine': {key: float(calib[key]) for key in KEYS}}
     if points:
         data['points'] = [{'u': float(p['u']), 'v': float(p['v']),

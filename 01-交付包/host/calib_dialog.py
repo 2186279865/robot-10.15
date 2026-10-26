@@ -23,6 +23,22 @@ AXIS_Z, AXIS_X, AXIS_Y = 1, 4, 5
 PULSES_PER_REV = 3200
 
 
+def _travel_limits():
+    """读软限位（脉冲），给标定自检用：{轴号: (min, max)}。失败返回 None。"""
+    try:
+        import auto_runner as _AR
+        limits = _AR.load_limits() or {}
+        out = {}
+        for key, val in limits.items():
+            try:
+                out[int(key)] = (int(val['min']), int(val['max']))
+            except Exception:
+                continue
+        return out or None
+    except Exception:
+        return None
+
+
 class CalibDialog:
     def __init__(self, app):
         self.app = app
@@ -516,7 +532,8 @@ class CalibDialog:
     def on_marks_solve(self):
         try:
             points = W.marks_points(self.marks)
-            result = W.solve(points, write=bool(self.var_write.get()))
+            result = W.solve(points, write=bool(self.var_write.get()),
+                             travel=_travel_limits())
         except Exception as exc:
             messagebox.showerror('标注点标定失败', str(exc))
             return

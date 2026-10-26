@@ -92,6 +92,35 @@ def pick_pulses(soft, readback, now_ms, max_age_ms=READBACK_MAX_AGE_MS,
     return {'px': px, 'py': py, 'source': 'soft'}
 
 
+def normalize_points(points, travel=None, labels=('X', 'Y')):
+    """把"混了单位"的标定点自动归一化到脉冲。
+
+    实测里最常见的错：一根轴记的是软位置（脉冲），另一根记的是编码器
+    counts（1 脉冲 = 20.48 counts）。判据：某轴记录跨度超过该轴实测行程
+    的 1.5 倍，就把它按 counts 处理（除以 20.48）。
+
+    返回 (points2, notes)；notes 是给界面显示的中文说明。
+    """
+    pts = [dict(p) for p in points]
+    notes = []
+    if not travel:
+        return pts, notes
+    for key, axis, name in (('px', 4, labels[0]), ('py', 5, labels[1])):
+        lo, hi = travel.get(axis, (None, None))
+        if lo is None or hi is None:
+            continue
+        vals = [float(p.get(key, 0.0)) for p in pts]
+        span = max(vals) - min(vals)
+        allow = abs(hi - lo) * 1.5 + 200.0
+        if span > allow:
+            k = float(COUNTS_PER_REV) / float(PULSES_PER_REV)
+            for pt in pts:
+                pt[key] = float(pt.get(key, 0.0)) / k
+            notes.append('%s 的记录跨度 %.0f 超过行程 %.0f 的 1.5 倍，已按编码器 counts 换算成脉冲（除以 %.2f）'
+                         % (name, span, abs(hi - lo), k))
+    return pts, notes
+
+
 def wrap_delta(prev_counts, now_counts, counts_per_rev=COUNTS_PER_REV):
     """单圈绝对编码器：两次回读之差，按“最短路径”折算到 (-半圈, +半圈]。
 
@@ -231,7 +260,75 @@ def measure_points(base, x, y, pulses):
     ]
 
 
-def check_points(points, min_uv=MIN_UV_DELTA, labels=('X', 'Y')):
+
+def _lsq_affine(points):
+    """多点最小二乘拟合 u,v = A*[px,py] + c，返回 (cu, cv) 每组 3 个系数。"""
+    A = [[float(p['px']), float(p['py']), 1.0] for p in points]
+    n = len(A)
+    M = [[sum(A[k][i] * A[k][j] for k in range(n)) for j in range(3)] for i in range(3)]
+
+    def det(m):
+        return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+    D = det(M)
+    if abs(D) < 1e-12:
+        return None
+    out = []
+    for col in (0, 1):
+        target = [float(p['u' if col == 0 else 'v']) for p in points]
+        b = [sum(A[k][i] * target[k] for k in range(n)) for i in range(3)]
+        coef = []
+        for i in range(3):
+            Mi = [row[:] for row in M]
+            for r in range(3):
+                Mi[r][i] = b[r]
+            coef.append(det(Mi) / D)
+        out.append(coef)
+    return out
+
+
+def _check_multi(points, min_uv=MIN_UV_DELTA, travel=None, labels=('X', 'Y')):
+    """多点（>=4）标定点的工程检查：拟合出一对方向向量再判。"""
+    problems = []
+    xs = [float(p['px']) for p in points]
+    ys = [float(p['py']) for p in points]
+    fit = _lsq_affine(points)
+    if fit is None:
+        return ['脉冲坐标退化（所有点在同一条线上）：X/Y 要分别动出两个方向']
+    cu, cv = fit
+    jx = (cu[0], cv[0])
+    jy = (cu[1], cv[1])
+    nx = math.hypot(*jx)
+    ny = math.hypot(*jy)
+    if nx < 1e-9 or ny < 1e-9:
+        problems.append('有一根轴在画面里几乎不动：检查是不是只动了一个轴，或某个轴没记录到移动')
+    else:
+        cos = (jx[0] * jy[0] + jx[1] * jy[1]) / (nx * ny)
+        if abs(cos) > 0.985:
+            problems.append(f'X 与 Y 在画面里几乎同方向（夹角 {math.degrees(math.acos(max(-1, min(1, cos)))):.1f}°）：'
+                            '检查是不是两个轴都被同一个方向影响，或点没分开')
+    # 行程合理性：超过实测行程太多，多半是把编码器 counts 当成脉冲记了
+    if travel:
+        for axis, name, vals in ((4, labels[0], xs), (5, labels[1], ys)):
+            lo, hi = travel.get(axis, (None, None))
+            if lo is None or hi is None:
+                continue
+            span = max(vals) - min(vals)
+            allow = abs(hi - lo) * 1.5 + 200
+            if span > allow:
+                problems.append(
+                    f'{name} 记录到的跨度 {span:.0f} 超过实测行程 {abs(hi - lo):.0f} 脉冲的 1.5 倍：'
+                    f'像是把编码器 counts（1 脉冲=20.48 counts）当脉冲记了。请用「相对走」小步重记，'
+                    f'并确认「记录爪位」日志里的来源是「软位置」或「回读」')
+    if not problems:
+        # 画面跨度过小（几乎没动）也挡掉
+        if max(xs) - min(xs) < 1 and max(ys) - min(ys) < 1:
+            problems.append('所有点的脉冲都一样（没记录到移动）')
+    return problems
+
+def check_points(points, min_uv=MIN_UV_DELTA, labels=('X', 'Y'), travel=None):
     """检查三个点够不够“张开”：返回问题列表（空=可以用）。
 
     labels: (第二个点的名字, 第三个点的名字)，自动走标定时是 ('X','Y')，
@@ -240,6 +337,11 @@ def check_points(points, min_uv=MIN_UV_DELTA, labels=('X', 'Y')):
     problems = []
     if len(points) < 3:
         return ['至少要 3 个点（基准 + X + Y）']
+    if len(points) > 3:
+        # 手推/多点模式：点不是「基准 + 只动 X + 只动 Y」，要用全部点拟合。
+        # 先做单位归一化（把误记成 counts 的轴换算回脉冲），再做几何检查。
+        pts, _notes = normalize_points(points, travel=travel, labels=labels)
+        return _check_multi(pts, min_uv=min_uv, travel=None, labels=labels)
     auto = tuple(labels) == ('X', 'Y')
     base, x, y = points[0], points[1], points[2]
     dx_u, dx_v = x['u'] - base['u'], x['v'] - base['v']
@@ -280,11 +382,16 @@ def check_points(points, min_uv=MIN_UV_DELTA, labels=('X', 'Y')):
 
 
 def solve(points, path=CALIB_PATH, write=False, backup=True, min_uv=MIN_UV_DELTA,
-          labels=('X', 'Y')):
-    """反解仿射，返回报告用 dict；write=True 时写标定文件（默认备份旧文件）。"""
-    problems = check_points(points, min_uv=min_uv, labels=labels)
+          labels=('X', 'Y'), travel=None):
+    """反解仿射，返回报告用 dict；write=True 时写标定文件（默认备份旧文件）。
+
+    travel: {轴号: (min,max)} 软限位（脉冲），用于抓「把 counts 当脉冲记」这种错。
+    """
+    pts, notes = normalize_points(points, travel=travel, labels=labels)
+    problems = check_points(pts, min_uv=min_uv, labels=labels, travel=None)
     if problems:
         raise ValueError('标定点不合格：\n· ' + '\n· '.join(problems))
+    points = pts
     tray = _tray_calib()
     affine = tray.solve(points)
     res = tray.residuals(points, affine)
@@ -304,6 +411,7 @@ def solve(points, path=CALIB_PATH, write=False, backup=True, min_uv=MIN_UV_DELTA
                      'px': float(point['px']), 'py': float(point['py']),
                      'px_pred': px, 'py_pred': py})
     result = {'affine': affine, 'residuals': res, 'predict': pred,
+              'notes': notes,
               'max_abs_pulse': {'dx': max_dx, 'dy': max_dy},
               'per_pulse': per_pulse, 'path': None, 'backup': None,
               'points': points}
