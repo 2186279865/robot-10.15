@@ -169,7 +169,6 @@ def main(argv=None) -> int:
 
     app = host_gui.App(root, args)         # 控制页（自带 Notebook 与 6 个标签页）
 
-    run_tab = None
     vision = None
     calib = None
     if not args.no_vision:
@@ -179,22 +178,11 @@ def main(argv=None) -> int:
             app.notebook.select(0)
         except Exception as exc:           # 理论上已被 build_vision_tab 兜住
             messagebox.showwarning('视觉页', f'视觉页加载失败：{exc}')
-    # 运行台：比赛当天唯一操作页，插到最前面（index 0）
     try:
-        import run_tab as RT
-        run_tab = RT.build_run_tab(app.notebook, app, index=0)
-        if vision is not None:
-            run_tab.attach_vision(vision)
-        app.run_tab = run_tab
-    except Exception as exc:
-        print('运行台加载失败：', exc)
-    try:
-        calib = build_calib_tab(app.notebook, app, index=3)   # 运行台占了 0，标定页顺延
+        calib = build_calib_tab(app.notebook, app, index=2)
         app.calib_tab = calib              # 让「视觉目标」页的“标定向导”按钮切到这个标签
         if vision is not None and hasattr(vision, 'attach_calib'):
             vision.attach_calib(calib)     # 视觉页右栏的「自动抓一件/连续抓/分盒清零」直接复用标定页实现
-        if run_tab is not None:
-            run_tab.attach_calib(calib)    # 运行台复用标定页的位置来源（counts/软位置）
     except Exception as exc:
         print('标定页加载失败：', exc)
     root.geometry('1760x980')              # 放在 App 之后，覆盖它的默认尺寸
