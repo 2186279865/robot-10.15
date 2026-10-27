@@ -1054,7 +1054,10 @@ class App:
             return
         t_item = max(top, key=lambda z: z.get('area_px') or 0)
         s_item = max(side, key=lambda z: z.get('area_px') or 0)
-        res = SC.measure(t_item.get('bbox'), s_item.get('bbox'),
+        # detect_targets 的 item 里，bbox 是原始图像素的键叫 bbox_orig；
+        # 托盘校正图（700×700）里的键叫 bbox_warped —— 标定必须用后者。
+        res = SC.measure(t_item.get('bbox_warped') or t_item.get('bbox'),
+                         s_item.get('bbox_warped') or s_item.get('bbox'),
                          tray_mm=float(self.cfg.get('tray_mm') or 160.0),
                          known_mm=float(known))
         self.note('[形状标定] ' + SC.fmt(res))
