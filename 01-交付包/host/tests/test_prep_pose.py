@@ -97,49 +97,52 @@ class LoadSaveTests(unittest.TestCase):
         self.assertGreaterEqual(short, 8000)
 
 
+_ZERO = {PP.AXIS_Y: 0, PP.AXIS_Z: 0}
+
+
 class RunTests(unittest.TestCase):
     def test_order_is_y_then_z(self):
         client = FakeClient()
-        res = PP.run(client, _cfg(), log=lambda t: None)
+        res = PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO)
         self.assertEqual([c[0] for c in client.calls], [PP.AXIS_Y, PP.AXIS_Z])
         self.assertEqual(len(res), 2)
         self.assertTrue(all(r['ok'] for r in res))
 
     def test_latched_clears_stop_first(self):
         client = FakeClient(latched=True)
-        PP.run(client, _cfg(), log=lambda t: None)
+        PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO)
         self.assertEqual(client.sent[0][0], 'stop_clear')
 
     def test_stop_clear_always_sent_first(self):
         # 界面上的 latched 会过期（比如重连后），所以无条件先清一次锁存
         client = FakeClient(latched=False)
-        PP.run(client, _cfg(), log=lambda t: None)
+        PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO)
         cmds = [s[0] for s in client.sent]
         self.assertEqual(cmds[0], 'stop_clear')
         self.assertIn('param_set', cmds)
 
     def test_failure_stops_after_that_step(self):
         client = FakeClient(fail_on=PP.AXIS_Y)
-        res = PP.run(client, _cfg(), log=lambda t: None)
+        res = PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO)
         self.assertEqual(len(res), 1)
         self.assertFalse(res[0]['ok'])
         self.assertEqual(len(client.calls), 1)
 
     def test_exception_is_reported(self):
         client = FakeClient(raise_on=PP.AXIS_Y)
-        res = PP.run(client, _cfg(), log=lambda t: None)
+        res = PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO)
         self.assertEqual(res[0]['code'], 'EXC')
         self.assertIn('RuntimeError', res[0]['text'])
 
     def test_waiter_timeout(self):
         client = FakeClient()
-        res = PP.run(client, _cfg(), log=lambda t: None, wait=lambda rid, ms: None)
+        res = PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO, wait=lambda rid, ms: None)
         self.assertEqual(res[0]['code'], 'TIMEOUT')
         self.assertEqual(len(res), 1)
 
     def test_zero_pulses_skipped(self):
         client = FakeClient()
-        res = PP.run(client, _cfg(y_pulses=0), log=lambda t: None)
+        res = PP.run(client, _cfg(y_pulses=0), log=lambda t: None, counts=_ZERO)
         self.assertEqual([c[0] for c in client.calls], [PP.AXIS_Z])
         self.assertEqual(len(res), 1)
 
@@ -151,7 +154,7 @@ class RunTests(unittest.TestCase):
             return {'kind': 'reply', 'code': '', 'text': '', 'pairs': {'err': '3'}}
 
         client = FakeClient()
-        PP.run(client, _cfg(), log=lambda t: None, wait=waiter)
+        PP.run(client, _cfg(), log=lambda t: None, counts=_ZERO, wait=waiter)
         self.assertEqual(len(seen), 2)
 
 class SoftPositionTests(unittest.TestCase):
