@@ -295,6 +295,7 @@ class App:
                    command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
+        ttk.Button(bot, text='形状标定', command=self.on_shape_calib).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bot, text='高级', variable=self.adv_var,
                         command=self.toggle_adv).pack(side='right', padx=6)
@@ -989,6 +990,60 @@ class App:
             self.note('网络推送已关闭')
 
     # ------------------------------------------------------------- 识别：双摄
+    # ------------------------------------------------------------ 形状标定
+    def on_shape_calib(self):
+        """用已知边长的方块标出 mm/px、顶视深度修正 k_front、副摄高度修正 k_h。"""
+        try:
+            import shape_calib as SC
+        except Exception as exc:                       # noqa: BLE001
+            messagebox.showerror('形状标定', '缺少 shape_calib.py：%s' % exc)
+            return
+        if not (self.a and self.bstream):
+            messagebox.showwarning('形状标定', '先点「打开双画面」，标定要用到顶视 + 副摄两路。')
+            return
+        tf, sf = self.a.get(), self.bstream.get()
+        if tf is None or sf is None:
+            messagebox.showwarning('形状标定', '还没取到画面，等两路出图后再点。')
+            return
+        known = self.cfg.get('shape_calib', {}).get('known_mm') or 25.0
+        known = simpledialog.askfloat('形状标定', '方块实际边长（mm）：', initialvalue=float(known),
+                                      minvalue=5.0, maxvalue=200.0)
+        if not known:
+            return
+        try:
+            top, _tw = self.detect_targets(tf, 'top')
+            side, _sw = self.detect_targets(sf, 'side')
+        except Exception as exc:                       # noqa: BLE001
+            messagebox.showerror('形状标定', '分割失败：%s' % exc)
+            return
+        if not top or not side:
+            messagebox.showwarning('形状标定',
+                                   '顶视/副摄至少一路没找到目标。\n'
+                                   '把方块单独放在托盘中间、确认两路都看得到再试。')
+            return
+        t_item = max(top, key=lambda z: z.get('area_px') or 0)
+        s_item = max(side, key=lambda z: z.get('area_px') or 0)
+        res = SC.measure(t_item.get('bbox'), s_item.get('bbox'),
+                         tray_mm=float(self.cfg.get('tray_mm') or 160.0),
+                         known_mm=float(known))
+        self.note('[形状标定] ' + SC.fmt(res))
+        if not res.get('ok'):
+            messagebox.showwarning('形状标定（有警告）',
+                                   SC.fmt(res) + '\n\n' + '\n'.join(res.get('warn') or []))
+            return
+        cal = self.cfg.setdefault('shape_calib', {})
+        cal.update({'k_front': res['k_front'], 'k_h': res['k_h'],
+                    'known_mm': float(known), 'mm_per_px': res['mm_per_px'],
+                    'source': 'measured'})
+        try:
+            CONFIG.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding='utf8')
+        except Exception as exc:                       # noqa: BLE001
+            messagebox.showerror('形状标定', '写配置失败：%s' % exc)
+            return
+        messagebox.showinfo('形状标定完成',
+                            SC.fmt(res) + '\n\n已写入 vision/config.json，'
+                            '之后形状判定就按这些系数走。')
+
     def detect_targets(self, frame, which='top', stats=None):
         pts = self.points if which == 'top' else self.side_points
         if frame is None or len(pts) != 4:

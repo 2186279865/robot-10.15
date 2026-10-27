@@ -76,7 +76,7 @@ def clean_mask(mask, close_ksize=3):
     return _fill_holes(m)
 
 
-def features(mask, contour, mm_per_px=1.0, cfg=None):
+def features(mask, contour, mm_per_px=1.0, cfg=None, depth_scale=1.0):
     """算出一组几何基元特征（全部与位置无关）。"""
     c = cfg_of(cfg)
     out = {
@@ -124,7 +124,7 @@ def features(mask, contour, mm_per_px=1.0, cfg=None):
         'rect_fit': round(area / rect_area, 3),
         'nv': int(len(approx)),
         'w_mm': round(float(w) * mm_per_px, 1),
-        'h_mm': round(float(h) * mm_per_px, 1),
+        'h_mm': round(float(h) * mm_per_px * depth_scale, 1),   # 深度方向按 k_front 修正
         'ratio_mm': round(long_mm / short_mm, 3),
         'hu': [round(x, 3) for x in hu_list],
     })
@@ -204,3 +204,67 @@ def describe(feats):
             % (f.get('circ') or 0, f.get('solidity') or 0, f.get('rect_fit') or 0,
                f.get('nv') or 0, f.get('w_mm') or 0, f.get('h_mm') or 0,
                f.get('ratio_mm') or 1.0))
+
+
+# ---------------------------------------------------------------- 侧视融合
+def side_info_of(side_mask, side_contour, mm_per_px=1.0, k_h=1.0):
+    """副摄：量物体高度 mm，并判侧影是"平顶(矩形)"还是"弧顶"。
+
+    返回 {'height_mm': float|None, 'curv': float|None, 'kind': 'rect'|'arc'|None}
+    """
+    out = {'height_mm': None, 'curv': None, 'kind': None}
+    if side_mask is None or side_contour is None:
+        return out
+    x, y, w, h = cv2.boundingRect(side_contour)
+    if h <= 2 or w <= 2:
+        return out
+    out['height_mm'] = round(float(h) * mm_per_px * k_h, 1)
+    curv = _side_curv(side_mask, side_contour)
+    out['curv'] = None if curv is None else round(curv, 3)
+    if curv is not None:
+        out['kind'] = 'arc' if curv < 0.80 else 'rect'
+    return out
+
+
+def _side_curv(mask, contour):
+    """侧影顶部相对中部收窄程度：弧顶(球) <0.80，平顶(柱/方) ≈1。"""
+    x, y, w, h = cv2.boundingRect(contour)
+    if h < 15 or w < 8:
+        return None
+    prof = []
+    for f in (.12, .22, .32, .55, .75):
+        row = min(h - 1, int(h * f))
+        seg = mask[y + row:y + row + 1, x:x + w]
+        prof.append(float((seg > 0).mean()) if seg.size else 0.0)
+    mid = max(prof[3], prof[4], 1e-6)
+    return float(min(prof[0], prof[1], prof[2]) / mid)
+
+
+def refine_with_side(shape, conf, feats, side, cfg=None):
+    """用副摄的高度/侧影形状做二次判定（球/圆柱、正方体/扁长方体）。"""
+    c = cfg_of(cfg)
+    if not side or side.get('height_mm') is None:
+        return shape, conf
+    h_mm = float(side['height_mm'])
+    kind = side.get('kind')
+    curv = side.get('curv')
+    w_mm = float((feats or {}).get('w_mm') or 0.0)
+    d_mm = float((feats or {}).get('h_mm') or 0.0)
+
+    if shape == SHAPE_ROUND:
+        if kind == 'arc' or (curv is not None and curv < float(c['sphere_curv'])):
+            return SHAPE_SPHERE, max(conf, 0.85)
+        return SHAPE_ROUND, max(conf, 0.80)
+
+    if shape in (SHAPE_CUBE, SHAPE_BOX) and w_mm > 1:
+        if h_mm <= 0.70 * w_mm:
+            return SHAPE_BOX, max(conf, 0.80)           # 扁平 → 长方体
+        near_w = abs(h_mm - w_mm) <= 0.28 * w_mm
+        near_d = d_mm <= 0 or abs(d_mm - w_mm) <= 0.30 * w_mm
+        if near_w and near_d:
+            return SHAPE_CUBE, max(conf, 0.85)
+        return SHAPE_BOX, max(conf, 0.75)
+
+    if shape == SHAPE_RHOMBUS and kind == 'rect':
+        return SHAPE_RHOMBUS, max(conf, 0.82)           # 菱柱（有侧面）
+    return shape, conf

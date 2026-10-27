@@ -70,7 +70,7 @@
   "side_rotation": 180,
   "empty_background": "runtime/empty_background.png",
   "class_names": {},
-  "tray_mm": 200.0,
+  "tray_mm": 160.0,
   "shape_cfg": {
     "nv_eps": 0.02,
     "min_area_px": 400,
@@ -87,5 +87,12 @@
     "prism_extent_min": 0.66
   },
   "_shape_cfg_note": "tray_mm=托盘内框实际边长(mm)，用于像素→毫米；shape_cfg 是形状容错链阈值，现场按 12 件实测微调即可。",
-  "_class_map_note": "2026-10-27 清空了旧的 6 条按形状×颜色的硬映射（备份见 config.20261027-214711.class_map.bak.json）。原因：那些键会把\"其他几何体|红\"这类错误判定直接定成类别5（conf 0.95 rule），抢在形状判定之前给出错误答案。现在全部走\"待登记 + 动态分盒\"。"
+  "_class_map_note": "2026-10-27 清空了旧的 6 条按形状×颜色的硬映射（备份见 config.20261027-214711.class_map.bak.json）。原因：那些键会把\"其他几何体|红\"这类错误判定直接定成类别5（conf 0.95 rule），抢在形状判定之前给出错误答案。现在全部走\"待登记 + 动态分盒\"。",
+  "shape_calib": {
+    "k_front": 1.0,
+    "k_h": 1.0,
+    "known_mm": 25.0,
+    "source": "default"
+  },
+  "_shape_calib_note": "点「形状标定」按钮后，k_front（顶视深度修正）与 k_h（副摄高度修正）会用已知边长方块实测覆盖；known_mm=方块边长(mm)。"
 }

@@ -149,7 +149,9 @@ def _shape_of_v2(mask, contour, cfg=None):
     """几何基元版形状判定（毫米尺寸 + 容错链），细节见 vision/shape_features.py。"""
     tray_mm = float((cfg or {}).get('tray_mm') or 200.0)
     mm_per_px = tray_mm / 700.0
-    feats = _SF.features(mask, contour, mm_per_px=mm_per_px, cfg=cfg)
+    cal = (cfg or {}).get('shape_calib') or {}
+    k_front = float(cal.get('k_front') or 1.0)
+    feats = _SF.features(mask, contour, mm_per_px=mm_per_px, cfg=cfg, depth_scale=k_front)
     name, conf, why = _SF.classify_shape(feats, cfg=cfg)
     info = {'circ': feats['circ'], 'ratio': feats['ratio_mm'], 'nv': feats['nv'],
             'solidity': feats['solidity'], 'extent': feats['extent'],
@@ -223,6 +225,16 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
         return item
     color, color_conf, hist = _color_stats(warp, mask)
     shape, shape_conf, info = _shape_of(mask, contour, cfg)
+    side = None
+    if side_item is not None and side_item.get('mask') is not None and _SF is not None:
+        cal = (cfg or {}).get('shape_calib') or {}
+        try:
+            side = _SF.side_info_of(side_item['mask'], side_item['contour'],
+                                    mm_per_px=float((cfg or {}).get('tray_mm') or 160.0) / 700.0,
+                                    k_h=float(cal.get('k_h') or 1.0))
+            shape, shape_conf = _SF.refine_with_side(shape, shape_conf, info, side, cfg)
+        except Exception:                # noqa: BLE001
+            side = None
     side_curv = None
     if (side_item is not None and side_item.get('mask') is not None
             and cfg.get('side_shape_refine', True) and shape in ('圆柱/圆形', '其他几何体')):
@@ -238,6 +250,8 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
     item.update({'color': color, 'color_conf': round(color_conf, 2),
                  'shape': shape, 'shape_conf': round(shape_conf, 2),
                  'side_curv': None if side_curv is None else round(side_curv, 2),
+                 'height_mm': (side or {}).get('height_mm'),
+                 'side_kind': (side or {}).get('kind'),
                  'feature': feat, **cls})
     return item
 
