@@ -97,6 +97,7 @@ def save(cfg: Dict[str, object], path: Optional[Path] = None) -> Path:
 
 
 #: 实测转速上限（EMM 驱动器侧限速，rpm 写多大都差不多）：约 50 圈/分。
+MAX_STEP_PULSES = {AXIS_Z: 200000, AXIS_Y: 20000, 4: 20000, 3: 6000}   # 单步位移硬上限（脉冲）
 EFFECTIVE_RPM_CAP = 50
 
 
@@ -131,6 +132,115 @@ def describe(cfg: Dict[str, object]) -> str:
     return ('Y %+d 脉冲 (= %s counts, %d RPM)  →  Z %+d 脉冲 (= %s counts, %d RPM)'
             % (y, format(counts_of(y), ','), int(cfg['y_rpm']),
                z, format(counts_of(z), ','), int(cfg['z_rpm'])))
+
+
+AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
+
+
+def move_abs(client, targets, order=None, rpm=50, log=None, wait=None,
+             soft=None, known=None, counts=None) -> List[Dict[str, object]]:
+    """按 `{轴号: 目标脉冲}` 依次闭环走到目标（增量由回读 counts / 软位置算出）。
+
+    给「回 P1」「Z 抬顶」「Z 降底」「走通道」「退通道」这类固定位置按钮用：
+    - 先 `stop_clear`（只解锁，不动）；长行程放宽固件 goto 超时；
+    - 有回读 counts（3000 ms 内）优先按 counts 算增量，否则用软位置；
+    - 两种位置来源都没有 → `POS_UNKNOWN` 拒绝（绝不按目标值盲走）；
+    - 单步超过该轴行程 1.5 倍 → `RANGE` 拒绝；
+    - 已在目标位（|Δ| ≤ 2 脉冲）→ 跳过（重复点按钮安全）。
+    """
+    say = log or (lambda _t: None)
+    waiter = wait or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
+    results: List[Dict[str, object]] = []
+
+    try:
+        client.send('stop_clear', timeout_ms=1500)
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
+        client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+    except Exception:                                 # noqa: BLE001
+        pass
+
+    axes = [int(a) for a in (order or list(targets.keys()))]
+    for axis in axes:
+        if axis not in targets:
+            continue
+        target = int(targets[axis])
+        rpm_i = int(rpm)
+        label = '%s 目标 %+d 脉冲' % (AXIS_LABEL.get(axis, axis), target)
+        pulses = target
+        cur_counts = None if counts is None else counts.get(axis)
+        if cur_counts is not None:
+            want = int(round(target * COUNTS_PER_PULSE))
+            pulses = int(round((want - int(cur_counts)) / COUNTS_PER_PULSE))
+            if abs(pulses) <= 2:
+                say('%s：已经在目标位（回读 %d counts），跳过' % (label, int(cur_counts)))
+                continue
+            say('%s：回读 %d counts → 走 %+d 脉冲（%d RPM）'
+                % (label, int(cur_counts), pulses, rpm_i))
+        elif soft is not None:
+            if not bool((known or {}).get(axis, False)):
+                item = {'axis': axis, 'pulses': 0, 'rpm': rpm_i, 'ok': False,
+                        'code': 'POS_UNKNOWN', 'text': '当前位置未知', 'pairs': {}}
+                results.append(item)
+                say('%s：位置未知，拒绝执行（先复位或在四轴页对 Y/Z 点「位置清零」）' % label)
+                return results
+            pulses = target - int((soft or {}).get(axis, 0))
+            if abs(pulses) <= 2:
+                say('%s：已经在目标位（%+d 脉冲），跳过' % (label, int((soft or {}).get(axis, 0))))
+                continue
+            say('%s：现在 %+d → 走 %+d 脉冲（%d RPM）'
+                % (label, int((soft or {}).get(axis, 0)), pulses, rpm_i))
+        elif pulses == 0:
+            say('%s：脉冲 0，跳过' % label)
+            continue
+        else:
+            item = {'axis': axis, 'pulses': 0, 'rpm': rpm_i, 'ok': False,
+                    'code': 'POS_UNKNOWN', 'text': '没有位置来源，拒绝盲走', 'pairs': {}}
+            results.append(item)
+            say('%s：没有位置来源，拒绝执行' % label)
+            return results
+
+        max_step = MAX_STEP_PULSES.get(axis, 20000)
+        if abs(pulses) > max_step:
+            item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
+                    'code': 'RANGE', 'text': '单步超行程 1.5 倍', 'pairs': {}}
+            results.append(item)
+            say('%s：单步 %+d 脉冲超过 %d，拒绝执行' % (label, pulses, max_step))
+            return results
+
+        item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
+                'code': '', 'text': '', 'pairs': {}}
+        try:
+            req = client.goto(axis, pulses, rpm=rpm_i)
+            rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
+        except Exception as exc:                      # noqa: BLE001
+            item['code'] = 'EXC'
+            item['text'] = '%s: %s' % (type(exc).__name__, exc)
+            results.append(item)
+            say('%s：异常 %s' % (label, item['text']))
+            return results
+        if rep is None:
+            item['code'] = 'TIMEOUT'
+            item['text'] = '客户端等待超时'
+            results.append(item)
+            say('%s：%s' % (label, item['text']))
+            return results
+        item.update({k: rep.get(k, '') for k in ('code', 'text')})
+        item['pairs'] = rep.get('pairs') or {}
+        item['ok'] = (rep.get('kind') == 'reply') and not item['code']
+        results.append(item)
+        pairs = item['pairs'] or {}
+        detail = ' '.join('%s=%s' % (k, pairs[k])
+                          for k in ('err', 'passes', 'elapsed_ms', 'tx', 'reason')
+                          if k in pairs)
+        say('%s：%s %s' % (label, 'ok' if item['ok'] else ('失败 %s' % (item['code'] or '?')),
+                          detail))
+        if not item['ok']:
+            return results
+    if not results:
+        say('全部轴都已在目标位，不需要动')
+    return results
 
 
 def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
@@ -197,7 +307,25 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
             say('%s：跳冲（pulses=0）' % title)
             continue
         else:
-            say('%s：走 %+d 脉冲（%d RPM）' % (title, pulses, rpm))
+            # 既没有回读 counts，也没有软位置 —— 绝不能按"目标值"整段走：
+            # 那会在"其实已经走过通道"的机器上再走一遍（2026-10-27 撞机就是这么来的）。
+            item = {'key': key, 'axis': axis, 'pulses': 0, 'rpm': rpm, 'ok': False,
+                    'code': 'POS_UNKNOWN',
+                    'text': '没有位置来源：既不传 counts 也没有软位置，拒绝盲走',
+                    'pairs': {}}
+            results.append(item)
+            say('%s：没有位置来源（counts / 软位置都没给），拒绝执行以免重走整段' % title)
+            return results
+        # 硬护栏：单步位移不能超过该轴全程行程的 1.5 倍（Z 全程 ~152k 脉冲，Y/X 只有 ~13k）
+        max_step = MAX_STEP_PULSES.get(axis, 20000)
+        if abs(pulses) > max_step:
+            item = {'key': key, 'axis': axis, 'pulses': pulses, 'rpm': rpm, 'ok': False,
+                    'code': 'RANGE',
+                    'text': '单步 %d 脉冲超过 %d（疑似位置错），拒绝执行' % (pulses, max_step),
+                    'pairs': {}}
+            results.append(item)
+            say('%s：单步 %+d 脉冲超过 %d，拒绝执行（先检查位置）' % (title, pulses, max_step))
+            return results
         item: Dict[str, object] = {'key': key, 'axis': axis, 'pulses': pulses, 'rpm': rpm,
                                    'ok': False, 'code': '', 'text': '', 'pairs': {}}
         try:

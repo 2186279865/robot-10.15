@@ -69,6 +69,11 @@ class CalibTab(ttk.Frame):
         bar.pack(fill='x', pady=6)
         ttk.Button(bar, text='一键走出固定路线', command=self.on_prep_route
                    ).pack(side='left', padx=(0, 12))
+        for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
+                          ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
+            ttk.Button(bar, text=text, width=10,
+                       command=lambda k=key: self.on_preset(k)
+                       ).pack(side='left', padx=(0, 4))
         ttk.Button(bar, text='刷新标注点', command=self.on_marks_refresh).pack(side='left', padx=(0, 6))
         ttk.Button(bar, text='记录爪位', command=self.on_marks_record).pack(side='left', padx=(0, 6))
         ttk.Button(bar, text='清除这个爪位', command=self.on_marks_clearrow).pack(side='left', padx=(0, 6))
@@ -126,6 +131,85 @@ class CalibTab(ttk.Frame):
         self.log.configure(yscrollcommand=sb2.set)
         self.log.pack(side='left', fill='both', expand=True)
         sb2.pack(side='right', fill='y')
+
+    # ------------------------------------------------- 固定位置按钮（回 P1 等）
+    PRESETS = {
+        'p1': ('回到 P1（X 0 / Y -13144 / Z 顶 -152000）',
+               {4: 0, 5: -13144, 1: -152000}, (4, 5, 1), 80),
+        'z_up': ('Z 抬到顶（-152000 脉冲）', {1: -152000}, (1,), 60),
+        'z_down': ('Z 降到底（0 脉冲）', {1: 0}, (1,), 40),
+        'to_p1': ('走通道：P0 → P1（Y -13144）', {5: -13144}, (5,), 60),
+        'to_p0': ('退通道：P1 → P0（Y 0）', {5: 0}, (5,), 60),
+    }
+
+    def on_preset(self, key):
+        """固定位置按钮：按目标位置闭环走「增量」，已在目标位就跳过。"""
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('还没连接：先在顶部下拉框选「派 robot-pi …」并点「连接」')
+            return
+        if self._prep_running:
+            self.say('还有动作在跑，等它跑完再点')
+            return
+        title, targets, order, rpm = self.PRESETS[key]
+        lines = []
+        for axis in order:
+            target = int(targets[axis])
+            lines.append('%s %+d 脉冲（%s counts）'
+                         % (PP.AXIS_LABEL.get(axis, axis), target,
+                            format(PP.counts_of(target), ',')))
+        if not messagebox.askyesno(title, '将走到固定位置（已经在目标位就不会动）：\n\n%s\n\n'
+                                          '顺序：%s\n\n手不要挡在运动范围内，急停可按「停止全部」。\n继续？'
+                                          % ('\n'.join(lines),
+                                             ' → '.join(PP.AXIS_LABEL.get(a, str(a)) for a in order))):
+            return
+        self._prep_running = True
+        self.say('开始：%s' % title)
+        threading.Thread(target=self._preset_worker,
+                         args=(client, title, dict(targets), tuple(order), int(rpm)),
+                         daemon=True).start()
+
+    def _preset_worker(self, client, title, targets, order, rpm):
+        def waiter(req_id, timeout_ms):
+            end = time.monotonic() + timeout_ms / 1000.0
+            while time.monotonic() < end:
+                got = client.done_of(req_id) if hasattr(client, 'done_of') else None
+                if got is not None:
+                    kind = 'reply' if got.get('kind') == 'reply' else (
+                        'err' if got.get('kind') == 'err' else 'timeout')
+                    return {'kind': kind, 'code': got.get('code', ''),
+                            'text': '', 'pairs': got.get('pairs') or {}}
+                time.sleep(0.05)
+            return None
+
+        soft = dict(getattr(self.app, 'soft_pos', {}) or {})
+        known = dict(getattr(self.app, 'pos_known', {}) or {})
+        counts = {}
+        now = client.now_ms()
+        panels = getattr(self.app, 'axes', {}) or {}
+        for axis in order:
+            panel = panels.get(axis)
+            if panel is None:
+                continue
+            val = getattr(panel, 'last_counts', None)
+            age = now - int(getattr(panel, 'last_counts_ms', 0) or 0)
+            if val is not None and age < 3000:
+                counts[axis] = int(val)
+        try:
+            results = PP.move_abs(client, targets, order=order, rpm=rpm,
+                                  log=lambda t: self.after(0, self.say, t), wait=waiter,
+                                  soft=soft, known=known, counts=counts)
+        except Exception as exc:                      # noqa: BLE001
+            self.after(0, self.say, '%s 异常：%s: %s' % (title, type(exc).__name__, exc))
+            results = []
+        finally:
+            self._prep_running = False
+        if results and all(r.get('ok') for r in results):
+            self.after(0, self.say, '%s：完成' % title)
+        elif not results:
+            self.after(0, self.say, '%s：不需要动（已在目标位）' % title)
+        else:
+            self.after(0, self.say, '%s：没走完，看上面的失败原因' % title)
 
     # ------------------------------------------------------- 一键走出固定路线
     def on_prep_route(self):
