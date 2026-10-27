@@ -25,3 +25,6 @@ host/tray_state.json
 host/_tmp/
 tools/__pycache__/
 vision/tray_calib.*.bak.json
+
+# 抓取点单测产生的临时目录
+*host/grasp_io_*/
