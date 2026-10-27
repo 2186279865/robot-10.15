@@ -29,6 +29,10 @@ TIMEOUT_DEFAULT_MS = 600
 #: 可安全重试的命令（幂等）。
 RETRYABLE = {"ping", "status", "motor_query", "param_get", "hello"}
 
+#: goto / angle 不传 rpm 时的兜底转速（圈/分）。固件默认 60，Z 满行程要 72 s，
+#: 现场实测 1500 才能把 152,000 脉冲压到 3 s 内（见 10-27 日志）。
+GOTO_DEFAULT_RPM = 1500
+
 ERROR_TEXT: Dict[str, str] = {
     "E01": "未知命令",
     "E02": "参数错误",
@@ -321,7 +325,9 @@ class HostClient:
         """
         deg100 = int(round(float(deg) * 100.0)) % 36000
         args: List[object] = [int(axis), deg100]
-        args.append(int(GOTO_DEFAULT_RPM if rpm is None else rpm))
+        if rpm is None:
+            rpm = P.GOTO_RPM_BY_AXIS.get(int(axis), GOTO_DEFAULT_RPM)
+        args.append(int(rpm))
         if timeout_ms is None:
             timeout_ms = 8000
         return self.send("motor_angle", *args, timeout_ms=timeout_ms)

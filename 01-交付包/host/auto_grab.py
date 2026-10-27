@@ -186,3 +186,59 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     say('完成，用时 %.1f s' % elapsed)
     return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
             'target': describe(target)}
+
+
+def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
+             pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
+             stop_flag: Optional[Callable[[], bool]] = None) -> Dict[str, object]:
+    """连续抓 N 件：每件都"重新识别 → 挑目标 → 走一遍 run_once"。
+
+    recognize() 由 GUI 传入（阻塞式单次识别，返回值得能从中读 latest_targets.json），
+    本函数每轮调用一次，然后重新读 targets 文件挑目标——这样后一件不会去抓
+    已经被拿走的那件（它的 u,v 已经从画面里消失）。
+
+    drop=True 时每件都会执行"转盘 60° + 松爪"，物块按 6 个盒位轮流落；
+    stop_flag() 返回 True 时在当前件结束后停下（界面的「停止全部」也能中断）。
+    """
+    done = 0
+    failed = 0
+    started = time.perf_counter()
+    results: List[Dict[str, object]] = []
+    for i in range(max(0, int(count))):
+        if stop_flag is not None and stop_flag():
+            log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
+            break
+        log('=== 第 %d/%d 件：单次识别 ===' % (i + 1, count))
+        try:
+            recognize()
+        except Exception as exc:                       # noqa: BLE001
+            failed += 1
+            log('[连续抓] 第 %d 件识别失败：%s' % (i + 1, exc))
+            break
+        targets = load_targets()
+        if not targets:
+            log('[连续抓] 画面里没有可抓的物块了，结束（已抓 %d 件）' % done)
+            break
+        try:
+            target = pick_target(targets)
+        except GrabError as exc:
+            log('[连续抓] 挑目标失败：%s' % exc)
+            break
+        try:
+            one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
+                           drop=drop)
+        except GrabError as exc:
+            failed += 1
+            log('[连续抓] 第 %d 件失败：%s' % (i + 1, exc))
+            break
+        except Exception as exc:                       # noqa: BLE001
+            failed += 1
+            log('[连续抓] 第 %d 件异常：%s: %s' % (i + 1, type(exc).__name__, exc))
+            break
+        done += 1
+        results.append(one)
+        log('[连续抓] 第 %d 件完成（累计 %d 件）' % (i + 1, done))
+    elapsed = time.perf_counter() - started
+    log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s' % (done, failed, elapsed))
+    return {'ok': failed == 0, 'done': done, 'failed': failed,
+            'elapsed': elapsed, 'items': results}

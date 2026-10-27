@@ -62,6 +62,7 @@ class CalibTab(ttk.Frame):
         self._last_uv = None
         self._jog_token = 0
         self._prep_running = False
+        self._many_stop = False
         self._prep_started = 0.0
         self._build()
         self._refresh_pos()
@@ -83,6 +84,12 @@ class CalibTab(ttk.Frame):
                    ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='自动抓一件', command=self.on_auto_grab
                    ).pack(side='left', padx=(0, 6))
+        ttk.Button(bar, text='连续抓', command=self.on_auto_many
+                   ).pack(side='left', padx=(0, 3))
+        self.many_var = tk.IntVar(value=6)
+        ttk.Spinbox(bar, from_=1, to=20, width=3, textvariable=self.many_var
+                    ).pack(side='left', padx=(0, 2))
+        ttk.Label(bar, text='件').pack(side='left', padx=(0, 12))
         self.drop_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text='抓完落货（转盘60°+松爪）', variable=self.drop_var
                         ).pack(side='left', padx=(0, 12))
@@ -527,6 +534,57 @@ class CalibTab(ttk.Frame):
             self.after(0, self._refresh_pos)
 
     # ------------------------------------------------------- 一键走出固定路线
+    def on_auto_many(self):
+        """连续抓 N 件：每件都重新识别，按 drop 勾选决定是否落货。"""
+        if self._prep_running:
+            self._log('还有动作在跑，等它跑完再点')
+            return
+        client = self._client()
+        if client is None or not client.online:
+            messagebox.showwarning('还没连接', '先连上控制板（右上角显示「在线」）')
+            return
+        vision = getattr(self.app, 'vision', None)
+        if vision is None or not getattr(vision, 'running', False):
+            messagebox.showwarning('视觉没开', '先到「视觉」页点「打开双画面」')
+            return
+        try:
+            count = int(self.many_var.get())
+        except Exception:                                  # noqa: BLE001
+            count = 6
+        count = max(1, min(20, count))
+        drop = bool(self.drop_var.get())
+        extra = '（含转盘 60° + 松爪）' if drop else '（不落货，只抓到 P0）'
+        if not messagebox.askyesno(
+                '连续抓 %d 件' % count,
+                '将连续抓 %d 件%s。\n\n每件都会重新识别一次（约 9 s），'
+                '失败会立刻停下并报原因。\n过程中手不要放在机构运动范围内，'
+                '急停可点「停止全部」。\n\n继续？' % (count, extra)):
+            return
+        self._prep_running = True
+        self._many_stop = False
+        self._log('开始连续抓 %d 件…' % count)
+        threading.Thread(target=self._many_worker, args=(client, vision, count, drop),
+                         daemon=True).start()
+
+    def _many_worker(self, client, vision, count, drop):
+        try:
+            res = AG.run_many(
+                client, count,
+                recognize=vision.recognize_safe,
+                log=self._log,
+                pos_source=self._pos_source(),
+                drop=drop,
+                stop_flag=lambda: bool(self._many_stop),
+            )
+            self._log('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
+                      % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
+        except Exception as exc:                            # noqa: BLE001
+            self._log('连续抓失败：%s: %s' % (type(exc).__name__, exc))
+        finally:
+            self._prep_running = False
+            self._many_stop = False
+            self._refresh_pos()
+
     def on_prep_route(self):
         """从初始位走固定通道（Y 让开 → Z 抬起），走完停在工作位，等你标定。"""
         client = getattr(self.app, 'client', None)
