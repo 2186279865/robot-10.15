@@ -113,9 +113,12 @@ def describe(target: dict) -> str:
 
 
 def run_once(client, target: dict, log=print, wait=None, calib=None,
-             pos_source: Optional[Callable[[], tuple]] = None) -> Dict[str, object]:
+             pos_source: Optional[Callable[[], tuple]] = None,
+             drop: bool = True) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
+    drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
+    drop=False 抓完停在 P0（手里还夹着），交给人工决定要不要放。
     pos_source() 返回 (soft, known, counts) 三个 dict，给 move_abs 判断当前位置；
     缺省时从 client 的软位置里取（GUI 应传入自己的面板数据，能拿到回读 counts）。
     """
@@ -165,6 +168,11 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     move({AXIS_X: 0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y])   # 7 只动 X/Y 回 P1（高位）
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
     move({AXIS_Y: P0_Y}, [AXIS_Y])                      # 9 再退 Y 回 P0
+    if not drop:
+        say('已回到 P0，物块还在爪里（按要求不落货）')
+        elapsed = time.perf_counter() - t0
+        return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
+                'target': describe(target), 'dropped': False}
     say('转盘 %.0f°' % TRAY_DEG)
     client.angle(AXIS_TRAY, TRAY_DEG)                   # 10 空盒到落料位
     time.sleep(0.5)

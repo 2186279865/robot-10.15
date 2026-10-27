@@ -72,7 +72,10 @@ class CalibTab(ttk.Frame):
         ttk.Button(bar, text='一键走出固定路线', command=self.on_prep_route
                    ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='自动抓一件', command=self.on_auto_grab
-                   ).pack(side='left', padx=(0, 12))
+                   ).pack(side='left', padx=(0, 6))
+        self.drop_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text='抓完落货（转盘60°+松爪）', variable=self.drop_var
+                        ).pack(side='left', padx=(0, 12))
         for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
                           ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
             ttk.Button(bar, text=text, width=10,
@@ -284,26 +287,29 @@ class CalibTab(ttk.Frame):
             self.say('准备失败：%s: %s' % (type(exc).__name__, exc))
             return
 
+        drop = bool(self.drop_var.get())
         msg = ('目标：%s\n\nX %+.0f 脉冲 / Y %+.0f 脉冲\n\n'
                '会做（前两步就是固定路线，穿通道时 Z 在底部）：\n'
                '1) Y 进通道到末端 → 2) Z 抬顶 → 3) X/Y 到物块上方 → '
                '4) Z 降底 → 5) 夹紧 → 6) Z 抬顶 → 7) X/Y 回通道末端 → '
-               '8) Z 降底 → 9) Y 退 P0 → 10) 转盘 60° → 11) 松爪回预备。\n\n'
+               '8) Z 降底 → 9) Y 退 P0%s\n\n'
                '手不要放在机构运动范围内，急停可点「停止全部」。\n继续？'
-               % (AG.describe(target), x, y))
+               % (AG.describe(target), x, y,
+                  (' → 10) 转盘 60° → 11) 松爪回预备' if drop
+                   else '（到这里停，物块还在爪里）')))
         if not messagebox.askyesno('自动抓一件', msg):
             return
         self._prep_running = True
         self._prep_started = time.monotonic()
         self.say('开始自动抓一件…')
         try:
-            threading.Thread(target=self._auto_worker, args=(client, target),
+            threading.Thread(target=self._auto_worker, args=(client, target, drop),
                              daemon=True).start()
         except Exception as exc:                      # noqa: BLE001
             self._prep_running = False
             self.say('启动线程失败：%s: %s' % (type(exc).__name__, exc))
 
-    def _auto_worker(self, client, target):
+    def _auto_worker(self, client, target, drop=True):
         def waiter(req_id, timeout_ms):
             end = time.monotonic() + timeout_ms / 1000.0
             while time.monotonic() < end:
@@ -318,7 +324,7 @@ class CalibTab(ttk.Frame):
 
         try:
             AG.run_once(client, target, log=lambda t: self.after(0, self.say, t),
-                        wait=waiter, pos_source=self._pos_source)
+                        wait=waiter, pos_source=self._pos_source, drop=drop)
         except Exception as exc:                      # noqa: BLE001
             self.after(0, self.say, '自动抓一件失败：%s: %s'
                        % (type(exc).__name__, exc))
