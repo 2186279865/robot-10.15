@@ -481,8 +481,32 @@ class App:
         self.stop_button.pack(side="right", padx=6)
         self.clear_latch_button = ttk.Button(bar, text="清除停止锁存", command=self.clear_latch)
         self.clear_latch_button.pack(side="right", padx=4)
+        self.zero_button = tk.Button(
+            bar, text="⚠ 位置清零", command=self.zero_all_axes,
+            bg="#fff3e0", fg="#b23c00", activebackground="#ffe0b2",
+            relief="solid", borderwidth=1, padx=8, pady=1)
+        self.zero_button.pack(side="right", padx=6)
+        self.init_button = tk.Button(
+            bar, text="初始化", command=self.initialize_all,
+            bg="#e3f2fd", fg="#0b3d91", activebackground="#bbdefb",
+            relief="solid", borderwidth=1, padx=10, pady=1)
+        self.init_button.pack(side="right", padx=4)
         self.last_rx_label = ttk.Label(bar, text="最后通信 —")
         self.last_rx_label.pack(side="right", padx=6)
+
+        # 第二行：四轴实时位置（等宽字体，遥测刷新）
+        bar2 = ttk.Frame(self.root, padding=(6, 0, 6, 4))
+        bar2.pack(fill="x")
+        self.pos_labels = {}
+        for addr in (4, 5, 1, 3):
+            lbl = ttk.Label(bar2, text="%s —" % AXIS_LABELS[addr],
+                            font=("Consolas", 10), width=20)
+            lbl.pack(side="left", padx=(0, 10))
+            self.pos_labels[addr] = lbl
+        self.pos_hint = ttk.Label(bar2, text="（点「初始化」订阅遥测后显示）",
+                                  foreground="#888888")
+        self.pos_hint.pack(side="left")
+
         self.root.bind("<Escape>", lambda _event: self.emergency_stop())
 
     def _build_tabs(self) -> None:
@@ -493,12 +517,15 @@ class App:
         self.notebook.add(axes_tab, text="四轴控制")
         for column in range(2):
             axes_tab.columnconfigure(column, weight=1)
+        self._build_axes_toolbar(axes_tab)
         for index, addr in enumerate(AXIS_LABELS):
             panel = AxisPanel(axes_tab, self, addr)
-            panel.frame.grid(row=index // 2, column=index % 2, sticky="nsew", padx=4, pady=4)
+            panel.frame.grid(row=index // 2 + 1, column=index % 2, sticky="nsew",
+                             padx=4, pady=4)
             self.axes[addr] = panel
-        self._build_approach(axes_tab, row=(len(AXIS_LABELS) + 1) // 2)
-        self._build_journey(axes_tab, row=(len(AXIS_LABELS) + 1) // 2 + 1)
+        base_row = (len(AXIS_LABELS) + 1) // 2 + 1
+        self._build_approach(axes_tab, row=base_row)
+        self._build_journey(axes_tab, row=base_row + 1)
         gripper_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(gripper_tab, text="舵机夹爪")
         self._build_gripper(gripper_tab)
@@ -519,11 +546,71 @@ class App:
         self.notebook.add(log_tab, text="原始日志")
         self._build_log(log_tab)
 
+        self._toggle_axes_adv()          # 默认折叠「接近段示教 / 回初始位」
+
+    # -- 四轴页顶部：状态总览 + 固定位置按钮 --------------------------------
+    def _build_axes_toolbar(self, parent: ttk.Frame) -> None:
+        box = ttk.Frame(parent)
+        box.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 2))
+
+        ov = ttk.Frame(box)
+        ov.pack(fill="x")
+        self.ov_labels = {}
+        for addr in AXIS_LABELS:
+            cell = ttk.Frame(ov, relief="groove", borderwidth=1)
+            cell.pack(side="left", padx=(0, 6))
+            ttk.Label(cell, text=AXIS_LABELS[addr],
+                      font=("Consolas", 10, "bold")).pack(side="left", padx=(6, 4))
+            lbl = ttk.Label(cell, text="—  等遥测", width=26,
+                            font=("Consolas", 10))
+            lbl.pack(side="left", padx=(0, 6))
+            self.ov_labels[addr] = lbl
+
+        row = ttk.Frame(box)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Label(row, text="固定位置：").pack(side="left")
+        for key, text in (("p1", "回 P1"), ("z_up", "Z 抬顶"), ("z_down", "Z 降底"),
+                          ("to_p1", "走通道(P1)"), ("to_p0", "退通道(P0)")):
+            ttk.Button(row, text=text, width=11,
+                       command=lambda k=key: self._preset(k)).pack(side="left", padx=2)
+        ttk.Label(row, text="（同一套参数在「X/Y 标定」页也有）",
+                  foreground="#777777").pack(side="left", padx=8)
+
+        self.axes_adv = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="高级（接近段示教 / 回初始位）",
+                        variable=self.axes_adv,
+                        command=self._toggle_axes_adv).pack(side="right")
+
+    def _preset(self, key: str) -> None:
+        calib = getattr(self, "calib_tab", None)
+        if calib is None or not hasattr(calib, "on_preset"):
+            messagebox.showwarning("固定位置", "标定页还没加载，无法执行")
+            return
+        try:
+            calib.on_preset(key)
+        except Exception as exc:                # noqa: BLE001
+            self._log("固定位置 %s 失败：%s: %s" % (key, type(exc).__name__, exc), "err")
+
+    def _toggle_axes_adv(self) -> None:
+        show = bool(self.axes_adv.get())
+        for name in ("_approach_frame", "_journey_frame"):
+            frame = getattr(self, name, None)
+            if frame is None:
+                continue
+            try:
+                if show:
+                    frame.grid()
+                else:
+                    frame.grid_remove()
+            except tk.TclError:
+                pass
+
     # -- 接近段示教（X/Y/Z：整机上电起点 → 抓取位） ---------------------------
     def _build_approach(self, parent: ttk.Frame, row: int) -> None:
         frame = ttk.LabelFrame(
             parent, text="接近段示教（X/Y/Z：整机上电起点 → 抓取位，托盘不参与）")
         frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 8))
+        self._approach_frame = frame
         line1 = ttk.Frame(frame)
         line1.pack(fill="x", padx=6, pady=4)
         ttk.Button(line1, text="开始示教", width=9,
@@ -1049,6 +1136,122 @@ class App:
         self.journey_refresh()
         self.note("已下发停止全部；请确认机械确实停下")
 
+    # ------------------------------------------------------------ 初始化
+    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", 158))
+
+    def initialize_all(self) -> None:
+        """上电初始化：清锁存 → 订阅四轴遥测 → 兜底参数 → 报告四轴位置。
+
+        只读，不发任何运动命令，也不清零。
+        """
+        client = getattr(self, "client", None)
+        if client is None or not getattr(client, "online", False):
+            messagebox.showwarning("初始化", "还没连上控制器：先选端口并点「连接」")
+            return
+        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 兜底参数（acc=0, goto_max_ms=120000, ready=158）")
+        try:
+            client.send("stop_clear", timeout_ms=800)
+        except Exception as exc:                    # noqa: BLE001
+            self._log("初始化：stop_clear 失败：%s" % exc, "err")
+        for addr in AXIS_LABELS:
+            try:
+                client.send("tele_on", addr, 200)
+            except Exception:                       # noqa: BLE001
+                pass
+            panel = self.axes.get(addr)
+            if panel is not None:
+                try:
+                    panel.tele.set(True)
+                except tk.TclError:
+                    pass
+        for name, value in self._INIT_PARAMS:
+            try:
+                client.send("param_set", name, value)
+            except Exception:                       # noqa: BLE001
+                pass
+        self._log("已订阅四轴遥测（200 ms），等回读…")
+        self.root.after(1200, self._init_report)
+
+    def _init_report(self) -> None:
+        parts = []
+        missing = 0
+        for addr in (4, 5, 1, 3):
+            panel = self.axes.get(addr)
+            counts = getattr(panel, "last_counts", None) if panel is not None else None
+            if counts is None:
+                missing += 1
+                parts.append("%s —" % AXIS_LABELS[addr])
+            else:
+                parts.append("%s %+.0f" % (AXIS_LABELS[addr],
+                                           units.counts_to_pulses(counts)))
+        self._log("初始化完成：%s（未清零）" % "  ".join(parts))
+        if missing:
+            self._log("有 %d 个轴还没有回读：查一下该轴驱动器是否上电/接线" % missing, "warn")
+        else:
+            try:
+                self.pos_hint.configure(text="（位置来自四轴遥测，0.2 s 刷新）",
+                                        foreground="#0a6b0a")
+            except tk.TclError:
+                pass
+
+    def _update_pos_label(self, addr: int) -> None:
+        panel = self.axes.get(addr)
+        lbl = getattr(self, "pos_labels", {}).get(addr)
+        if panel is None or lbl is None:
+            return
+        counts = getattr(panel, "last_counts", None)
+        if counts is None:
+            return
+        try:
+            lbl.configure(text="%s %+.0f 脉冲" % (AXIS_LABELS[addr],
+                                                 units.counts_to_pulses(counts)))
+        except tk.TclError:
+            pass
+        ov = getattr(self, "ov_labels", {}).get(addr)
+        if ov is not None:
+            try:
+                pulses = units.counts_to_pulses(counts)
+                rpm = getattr(panel, "last_rpm", None)
+                age = ""
+                stamp = getattr(panel, "last_counts_ms", None)
+                if stamp is not None and getattr(self, "client", None) is not None:
+                    age = "  0.1s前"
+                ov.configure(text="%+.0f 脉冲 / %d 计数%s%s"
+                             % (pulses, int(counts),
+                                ("  %d RPM" % int(rpm)) if rpm else "",
+                                age))
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+    def zero_all_axes(self) -> None:
+        """四轴位置清零（危险）：只在 P0 用，会把当前物理位置定义成 0。"""
+        client = getattr(self, "client", None)
+        if client is None or not getattr(client, "online", False):
+            messagebox.showwarning("位置清零", "还没连上控制器：先连接")
+            return
+        ok = messagebox.askyesno(
+            "位置清零（四轴）",
+            "把 X / Y / Z / 托盘 的【当前位置】定义成 0？\n\n"
+            "只在 P0 时使用：Y 已退到底、Z 在底、X 在 0。\n"
+            "在别处清零会让整套标定（route.json 走廊 / tray_calib 抓取点）整体平移。\n\n"
+            "确定现在是 P0？")
+        if not ok:
+            return
+        for addr in AXIS_LABELS:
+            try:
+                client.send("motor_zero", addr)
+            except Exception as exc:                # noqa: BLE001
+                self._log("位置清零：%s 下发失败：%s" % (AXIS_LABELS[addr], exc), "err")
+            panel = self.axes.get(addr)
+            if panel is not None:
+                try:
+                    panel.mark_zeroed()
+                except Exception:                   # noqa: BLE001
+                    pass
+        self._log("位置清零已下发（4 轴）：X/Y/Z/托盘 当前位置 = 0")
+        self._log("如当前不在 P0，请用 tools\\calib_shift.py 平移标定，否则自动抓会走偏", "warn")
+        self.root.after(800, self._init_report)
+
     def clear_latch(self) -> None:
         """解除固件的停止锁存：按过停止（或发过 '!'）之后，必须显式解除才能继续跑运动。"""
         if not self.client.online:
@@ -1149,6 +1352,7 @@ class App:
         box = ttk.LabelFrame(
             parent, text="回上电初始位（自动记录本次上电后的全部移动，四轴都记）")
         box.grid(row=row, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
+        self._journey_frame = box
         line = ttk.Frame(box)
         line.pack(fill="x", padx=6, pady=(4, 2))
         self.journey_status = ttk.Label(line, text=J.describe(self.journey))
@@ -1514,6 +1718,7 @@ class App:
             panel = self.axes.get(addr)
             if panel is not None:
                 panel.update_telemetry(pairs)
+                self._update_pos_label(addr)
             self._log(event.text, "tele")
             return
         if event.kind == "reply":

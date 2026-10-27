@@ -160,10 +160,15 @@ class View:
 
 
 class App:
-    def __init__(self, r, embedded=False, ctrl=None):
+    def __init__(self, r, embedded=False, ctrl=None, with_ctrl=True):
         self.r = r
         self.embedded = bool(embedded)
         self.ctrl = ctrl
+        self.with_ctrl = bool(with_ctrl)
+        self.calib = None
+        self._tree_sig = None
+        self._axis_labels = {}          # with_ctrl=False 时没有控制面板
+        self.ctrl_state = None
         if not self.embedded:
             r.title('new_eye 双相机视觉预览（顶视+副摄融合）')
             r.geometry('1680x920')
@@ -206,7 +211,7 @@ class App:
         self.va.angle = int(self.cfg.get('top_rotation', 0))
         self.vb.angle = int(self.cfg.get('side_rotation', 0))
         self.r.bind('<Escape>', lambda e: self.cancel_modes())
-        if self.ctrl is not None:
+        if self.ctrl is not None and self.with_ctrl:
             self.r.after(800, self._ctrl_tick)
         if not self.embedded:
             self.r.after(300, self.start)
@@ -230,20 +235,20 @@ class App:
         ttk.Checkbutton(bar, text='含灰/黑物料', variable=self.gray,
                         command=lambda: self.cfg.__setitem__('gray_objects', self.gray.get())
                         ).pack(side='left', padx=4)
-        ttk.Button(bar, text='保存配置', command=self.save).pack(side='left')
-        self.link_var = tk.BooleanVar(value=bool(self.cfg.get('link_enabled', False)))
-        ttk.Checkbutton(bar, text='网络推送', variable=self.link_var,
-                        command=self.toggle_link).pack(side='left', padx=4)
         self.st = tk.StringVar(value='先扫描相机')
 
         body = ttk.Frame(self.r, padding=(8, 4, 8, 0))
         body.pack(fill='both', expand=True)
+        self._body = body
 
-        # 右侧：四轴 / 夹爪 紧凑控制 + 文字面板
+        # 右侧：控制面板（独立运行）或 目标列表 + 抓取按钮（一体化）
         rp = ttk.Frame(body, width=440)
         rp.pack(side='right', fill='y', padx=(8, 0))
         rp.pack_propagate(False)
-        self._build_ctrl(rp)
+        if self.with_ctrl:
+            self._build_ctrl(rp)
+        else:
+            self._build_targets(rp)
         ttk.Label(rp, text='目标详情 / 状态（所有文字信息）',
                   font=('Microsoft YaHei', 10, 'bold')).pack(anchor='w', pady=(6, 0))
         tf = ttk.Frame(rp)
@@ -280,38 +285,21 @@ class App:
         self.cb.bind('<Button-3>', lambda e: self.undo_point(e, 'side'))
         self.update_text()
 
+        # ---------------- 基础工具条（现场只用这些） ----------------
         bot = ttk.Frame(self.r, padding=(8, 4, 8, 2))
         bot.pack(fill='x', before=body)
-        for name, v in [('顶视', self.va), ('侧视', self.vb)]:
-            ttk.Label(bot, text=name).pack(side='left', padx=(8, 2))
-            ttk.Button(bot, text='↶左转90°', command=lambda v=v: self.rotate(v, -90)).pack(side='left', padx=1)
-            ttk.Button(bot, text='↷右转90°', command=lambda v=v: self.rotate(v, 90)).pack(side='left', padx=1)
-            ttk.Button(bot, text='复位', command=lambda v=v: self.reset_view(v)).pack(side='left', padx=2)
-        ttk.Button(bot, text='顶视四点框选', command=lambda: self.start_points('top')).pack(side='left', padx=3)
-        ttk.Button(bot, text='副摄四点框选', command=lambda: self.start_points('side')).pack(side='left', padx=3)
-        ttk.Label(bot, text='副摄方向').pack(side='left', padx=(8, 2))
-        self.flip_var = tk.StringVar(value={0: '自动', 1: '同向', 2: '镜像'}.get(
-            int(self.cfg.get('side_flip', 0) or 0), '自动'))
-        cb = ttk.Combobox(bot, textvariable=self.flip_var, values=['自动', '同向', '镜像'],
-                          width=5, state='readonly')
-        cb.pack(side='left')
-        cb.bind('<<ComboboxSelected>>', lambda e: self.set_flip(self.flip_var.get()))
-        ttk.Label(bot, text='对齐轴').pack(side='left', padx=(8, 2))
-        self.axis_var = tk.StringVar(value={0: '自动', 1: '左右', 2: '前后'}.get(
-            int(self.cfg.get('side_axis', 0) or 0), '自动'))
-        cba = ttk.Combobox(bot, textvariable=self.axis_var, values=['自动', '左右', '前后'],
-                           width=5, state='readonly')
-        cba.pack(side='left')
-        cba.bind('<<ComboboxSelected>>', lambda e: self.set_axis(self.axis_var.get()))
-        ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
+        self.bot_frame = bot
+        ttk.Button(bot, text='顶视四点框选',
+                   command=lambda: self.start_points('top')).pack(side='left', padx=3)
+        ttk.Button(bot, text='副摄四点框选',
+                   command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
-        self.reg_btn = ttk.Button(bot, text='登记样本', command=self.toggle_register)
-        self.reg_btn.pack(side='left', padx=3)
-        self.mark_btn = ttk.Button(bot, text='标注点', command=self.toggle_marks)
-        self.mark_btn.pack(side='left', padx=3)
-        ttk.Button(bot, text='清空标注', command=self.clear_marks).pack(side='left', padx=3)
+        ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
+        self.adv_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bot, text='高级', variable=self.adv_var,
+                        command=self.toggle_adv).pack(side='right', padx=6)
 
-        # 识别行：把「单次识别」从拥挤的工具栏挪出来，配一条进度条
+        # ---------------- 识别行 ----------------
         rrow = ttk.Frame(self.r, padding=(8, 0, 8, 2))
         rrow.pack(fill='x', before=body)
         self.rec_btn = ttk.Button(rrow, text='单次识别', width=12,
@@ -325,7 +313,172 @@ class App:
         self.live_btn = ttk.Button(rrow, text='实时分割', command=self.toggle_live)
         self.live_btn.pack(side='left', padx=3)
 
+        # ---------------- 高级工具条（默认隐藏） ----------------
+        self.adv_bar = ttk.Frame(self.r, padding=(8, 0, 8, 2))
+        for name, v in [('顶视', self.va), ('侧视', self.vb)]:
+            ttk.Label(self.adv_bar, text=name).pack(side='left', padx=(8, 2))
+            ttk.Button(self.adv_bar, text='↶左转90°',
+                       command=lambda v=v: self.rotate(v, -90)).pack(side='left', padx=1)
+            ttk.Button(self.adv_bar, text='↷右转90°',
+                       command=lambda v=v: self.rotate(v, 90)).pack(side='left', padx=1)
+            ttk.Button(self.adv_bar, text='复位',
+                       command=lambda v=v: self.reset_view(v)).pack(side='left', padx=2)
+        ttk.Label(self.adv_bar, text='副摄方向').pack(side='left', padx=(8, 2))
+        self.flip_var = tk.StringVar(value={0: '自动', 1: '同向', 2: '镜像'}.get(
+            int(self.cfg.get('side_flip', 0) or 0), '自动'))
+        cb = ttk.Combobox(self.adv_bar, textvariable=self.flip_var,
+                          values=['自动', '同向', '镜像'], width=5, state='readonly')
+        cb.pack(side='left')
+        cb.bind('<<ComboboxSelected>>', lambda e: self.set_flip(self.flip_var.get()))
+        ttk.Label(self.adv_bar, text='对齐轴').pack(side='left', padx=(8, 2))
+        self.axis_var = tk.StringVar(value={0: '自动', 1: '左右', 2: '前后'}.get(
+            int(self.cfg.get('side_axis', 0) or 0), '自动'))
+        cba = ttk.Combobox(self.adv_bar, textvariable=self.axis_var,
+                           values=['自动', '左右', '前后'], width=5, state='readonly')
+        cba.pack(side='left')
+        cba.bind('<<ComboboxSelected>>', lambda e: self.set_axis(self.axis_var.get()))
+        ttk.Button(self.adv_bar, text='保存配置', command=self.save).pack(side='left', padx=6)
+        self.link_var = tk.BooleanVar(value=bool(self.cfg.get('link_enabled', False)))
+        ttk.Checkbutton(self.adv_bar, text='网络推送', variable=self.link_var,
+                        command=self.toggle_link).pack(side='left', padx=4)
+        self.reg_btn = ttk.Button(self.adv_bar, text='登记样本', command=self.toggle_register)
+        self.reg_btn.pack(side='left', padx=3)
+        self.mark_btn = ttk.Button(self.adv_bar, text='标注点', command=self.toggle_marks)
+        self.mark_btn.pack(side='left', padx=3)
+        ttk.Button(self.adv_bar, text='清空标注',
+                   command=self.clear_marks).pack(side='left', padx=3)
+
     # ------------------------------------------------------------ 四轴/夹爪
+    # ------------------------------------------------- 高级条 / 目标列表
+    def toggle_adv(self):
+        try:
+            if self.adv_var.get():
+                self.adv_bar.pack(fill='x', before=self._body)
+            else:
+                self.adv_bar.pack_forget()
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def _build_targets(self, parent):
+        """一体化模式右栏：目标列表 + 抓取按钮（替代原本的四轴点动面板）。"""
+        ttk.Label(parent, text='识别目标（点一行看明细）',
+                  font=('Microsoft YaHei', 10, 'bold')).pack(anchor='w')
+        cols = ('cls', 'uv', 'conf')
+        self.tree = ttk.Treeview(parent, columns=cols, show='headings', height=7)
+        for key, title, width in (('cls', '类别', 168), ('uv', 'u , v', 96),
+                                  ('conf', '置信/投票', 96)):
+            self.tree.heading(key, text=title)
+            self.tree.column(key, width=width, anchor='w', stretch=False)
+        self.tree.pack(fill='x', pady=(2, 4))
+        self.tree.bind('<<TreeviewSelect>>', self._on_target_pick)
+
+        r1 = ttk.Frame(parent)
+        r1.pack(fill='x', pady=(2, 0))
+        self.drop_var2 = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r1, text='抓完落货（转盘+松爪）',
+                        variable=self.drop_var2).pack(side='left')
+        ttk.Label(r1, text='件数').pack(side='left', padx=(10, 2))
+        self.many_var2 = tk.StringVar(value='6')
+        ttk.Entry(r1, textvariable=self.many_var2, width=4).pack(side='left')
+
+        r2 = ttk.Frame(parent)
+        r2.pack(fill='x', pady=(4, 2))
+        self.grab_one_btn = ttk.Button(r2, text='自动抓一件', command=self.on_grab_one)
+        self.grab_one_btn.pack(side='left')
+        ttk.Button(r2, text='连续抓', command=self.on_grab_many).pack(side='left', padx=6)
+        ttk.Button(r2, text='分盒清零', command=self.on_box_reset).pack(side='left')
+
+    def attach_calib(self, calib):
+        """main.py 建好标定页后调用：视觉页的抓取按钮直接复用标定页的实现。"""
+        self.calib = calib
+
+    def _sync_calib_opts(self):
+        calib = getattr(self, 'calib', None)
+        if calib is None:
+            self.note('标定页没加载，抓取按钮不可用')
+            return None
+        try:
+            if hasattr(calib, 'drop_var') and hasattr(self, 'drop_var2'):
+                calib.drop_var.set(bool(self.drop_var2.get()))
+            if hasattr(calib, 'many_var') and hasattr(self, 'many_var2'):
+                calib.many_var.set(str(self.many_var2.get()).strip() or '6')
+        except Exception:                       # noqa: BLE001
+            pass
+        return calib
+
+    def on_grab_one(self):
+        calib = self._sync_calib_opts()
+        if calib is None:
+            return
+        try:
+            calib.on_auto_grab()
+        except Exception as exc:                # noqa: BLE001
+            self.note('自动抓一件失败：%s: %s' % (type(exc).__name__, exc))
+
+    def on_grab_many(self):
+        calib = self._sync_calib_opts()
+        if calib is None:
+            return
+        try:
+            calib.on_auto_many()
+        except Exception as exc:                # noqa: BLE001
+            self.note('连续抓失败：%s: %s' % (type(exc).__name__, exc))
+
+    def on_box_reset(self):
+        calib = _calib = getattr(self, 'calib', None)
+        if _calib is None:
+            self.note('标定页没加载，分盒清零不可用')
+            return
+        try:
+            _calib.on_box_reset()
+        except Exception as exc:                # noqa: BLE001
+            self.note('分盒清零失败：%s: %s' % (type(exc).__name__, exc))
+
+    def _fill_targets(self):
+        """把当前识别结果刷到列表里（内容没变就不重建，避免闪）。"""
+        with self.sam_lock:
+            fused = list(self.fused or [])
+        rows = []
+        for i, item in enumerate(fused, start=1):
+            t = item.get('top') or item.get('side') or {}
+            uv = t.get('center_tray') or [0.0, 0.0]
+            conf = item.get('confidence')
+            conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+            votes = t.get('class_votes')
+            cls = t.get('class_name') or t.get('class_key') or '待登记'
+            if t.get('shape'):
+                cls = '%s | %s' % (t.get('shape'), t.get('color') or '')
+            rows.append((i, cls, '%.3f , %.3f' % (uv[0], uv[1]),
+                         '%.2f%s' % (conf, (' ' + votes) if votes else '')))
+        sig = tuple((r[1], r[2], r[3]) for r in rows)
+        if sig == self._tree_sig:
+            return
+        self._tree_sig = sig
+        try:
+            self.tree.delete(*self.tree.get_children())
+            for i, cls, uv, cf in rows:
+                self.tree.insert('', 'end', iid=str(i), values=(cls, uv, cf))
+        except Exception:                       # noqa: BLE001
+            pass
+
+    def _on_target_pick(self, _event=None):
+        try:
+            sel = self.tree.selection()
+            if not sel:
+                return
+            idx = int(sel[0]) - 1
+            with self.sam_lock:
+                fused = list(self.fused or [])
+            if 0 <= idx < len(fused):
+                item = fused[idx]
+                t = item.get('top') or item.get('side') or {}
+                uv = t.get('center_tray') or [0, 0]
+                self.note('选中 #%d：%s（u=%.3f v=%.3f，视图 %s，投票 %s）'
+                          % (idx + 1, t.get('shape') or '待登记', uv[0], uv[1],
+                             item.get('views', '?'), t.get('class_votes', '-')))
+        except Exception:                       # noqa: BLE001
+            pass
+
     def _build_ctrl(self, parent):
         box = ttk.LabelFrame(parent, text='四轴 / 夹爪', padding=6)
         box.pack(fill='x')
@@ -451,9 +604,10 @@ class App:
                     lbl.configure(text=('%+d' % val) if ok else '未知',
                                   foreground='#333333' if ok else '#b00020')
                 online = getattr(getattr(ctrl, 'client', None), 'online', False)
-                self.ctrl_state.configure(
-                    text='已连接（软位置）' if online else '未连接控制板',
-                    foreground='#1b5e20' if online else '#b00020')
+                if self.ctrl_state is not None:
+                    self.ctrl_state.configure(
+                        text='已连接（软位置）' if online else '未连接控制板',
+                        foreground='#1b5e20' if online else '#b00020')
         finally:
             self.r.after(800, self._ctrl_tick)
 
@@ -626,6 +780,8 @@ class App:
         self.draw_targets()
         self.sync_live()
         self.update_text()
+        if getattr(self, 'tree', None) is not None:
+            self._fill_targets()
 
     def _loop(self):
         self._loop_armed = False

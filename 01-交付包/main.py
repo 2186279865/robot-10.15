@@ -85,7 +85,7 @@ def build_vision_tab(notebook, index=0, ctrl=None):
     notebook.insert(index, frame, text='  视觉  ')
     try:
         import gui as vision_gui          # 10.21/vision/gui.py
-        app = vision_gui.App(frame, embedded=True, ctrl=ctrl)
+        app = vision_gui.App(frame, embedded=True, ctrl=ctrl, with_ctrl=(ctrl is None))
         return frame, app
     except Exception as exc:              # 缺依赖 / 模型缺失 / 远程连不上
         msg = f'{type(exc).__name__}: {exc}'
@@ -181,6 +181,8 @@ def main(argv=None) -> int:
     try:
         calib = build_calib_tab(app.notebook, app, index=2)
         app.calib_tab = calib              # 让「视觉目标」页的“标定向导”按钮切到这个标签
+        if vision is not None and hasattr(vision, 'attach_calib'):
+            vision.attach_calib(calib)     # 视觉页右栏的「自动抓一件/连续抓/分盒清零」直接复用标定页实现
     except Exception as exc:
         print('标定页加载失败：', exc)
     root.geometry('1760x980')              # 放在 App 之后，覆盖它的默认尺寸
