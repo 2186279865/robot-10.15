@@ -138,3 +138,30 @@ Ultralytics/
 .yolo_config/
 # --- 队友包离线输出 ---
 04-队友视觉调试包/out/
+# 例外：交付包的 SAM 权重走 Git LFS 入库（约 358MB），队友 clone 即可拿到
+!01-交付包/vision/models/
+!01-交付包/vision/models/sam_b.pt
+
+
+# ---------- 例外：Qwen 实验台的“代码/数据/样例”入库（运行环境与模型仍排除） ----------
+!03-实验台/Qwen-VLM/
+!03-实验台/Qwen-VLM/*.py
+!03-实验台/Qwen-VLM/*.md
+!03-实验台/Qwen-VLM/*.ps1
+!03-实验台/Qwen-VLM/*.cmd
+!03-实验台/Qwen-VLM/*.txt
+!03-实验台/Qwen-VLM/.gitignore
+!03-实验台/Qwen-VLM/config
+!03-实验台/Qwen-VLM/config/**
+!03-实验台/Qwen-VLM/data
+!03-实验台/Qwen-VLM/data/**
+!03-实验台/Qwen-VLM/samples
+!03-实验台/Qwen-VLM/samples/**
+03-实验台/Qwen-VLM/.venv/
+03-实验台/Qwen-VLM/__pycache__/
+03-实验台/Qwen-VLM/cache/
+03-实验台/Qwen-VLM/downloads/
+03-实验台/Qwen-VLM/home/
+03-实验台/Qwen-VLM/logs/
+03-实验台/Qwen-VLM/models/
+03-实验台/Qwen-VLM/runtime/

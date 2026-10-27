@@ -1,0 +1,11 @@
+/downloads/
+/runtime/
+/models/
+/logs/
+/data/
+/samples/
+/home/
+/.venv/
+/cache/
+/config/
+/__pycache__/
