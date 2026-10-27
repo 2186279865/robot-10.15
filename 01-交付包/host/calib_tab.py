@@ -15,6 +15,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+import auto_grab as AG
 import calib_wizard as W
 import prep_pose as PP
 import vision_grasp as VG
@@ -69,6 +70,8 @@ class CalibTab(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(fill='x', pady=6)
         ttk.Button(bar, text='一键走出固定路线', command=self.on_prep_route
+                   ).pack(side='left', padx=(0, 12))
+        ttk.Button(bar, text='自动抓一件', command=self.on_auto_grab
                    ).pack(side='left', padx=(0, 12))
         for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
                           ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
@@ -223,6 +226,96 @@ class CalibTab(ttk.Frame):
             self.after(0, self.say, '%s：不需要动（已在目标位）' % title)
         else:
             self.after(0, self.say, '%s：没走完，看上面的失败原因' % title)
+
+    # ------------------------------------------------------------- 自动抓一件
+    def _pos_source(self):
+        """给 auto_grab/move_abs 用：回读 counts（3 s 内）+ 软位置 + 位置可信标志。"""
+        client = getattr(self.app, 'client', None)
+        soft = dict(getattr(self.app, 'soft_pos', {}) or {})
+        known = dict(getattr(self.app, 'pos_known', {}) or {})
+        counts = {}
+        try:
+            now = client.now_ms() if client is not None else 0
+        except Exception:                             # noqa: BLE001
+            now = 0
+        for axis, panel in (getattr(self.app, 'axes', {}) or {}).items():
+            val = getattr(panel, 'last_counts', None)
+            age = now - int(getattr(panel, 'last_counts_ms', 0) or 0)
+            if val is not None and age < 3000:
+                counts[int(axis)] = int(val)
+        return soft, known, counts
+
+    def on_auto_grab(self):
+        """识别一件 → 确认 → 自动抓放（顺序见 auto_grab 模块）。"""
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('还没连接：先在顶部下拉框选「派 robot-pi …」并点「连接」')
+            return
+        if self._prep_running:
+            self.say('还有动作在跑，等它跑完再点')
+            return
+
+        vision = (getattr(self.app, 'vision', None)
+                  or getattr(self.app, 'vision_app', None))
+        if vision is not None and hasattr(vision, 'recognize'):
+            self.say('先做一次视觉识别（约 5~9 秒，界面会卡一下）…')
+            try:
+                self.update_idletasks()
+                vision.recognize()
+            except Exception as exc:                  # noqa: BLE001
+                self.say('识别失败：%s: %s' % (type(exc).__name__, exc))
+                return
+
+        try:
+            targets = AG.load_targets()
+            target = AG.pick_target(targets)
+            x, y = AG.target_xy(target)
+        except AG.GrabError as exc:
+            self.say(str(exc))
+            return
+        except Exception as exc:                      # noqa: BLE001
+            self.say('准备失败：%s: %s' % (type(exc).__name__, exc))
+            return
+
+        msg = ('目标：%s\n\nX %+.0f 脉冲 / Y %+.0f 脉冲\n\n'
+               '会做：Z 抬顶 → 到物块上方 → Z 降底 → 夹紧 → 抬顶 → 回 P1 → '
+               'Z 降底 → 退 P0 → 转盘 60° → 松爪 → 回预备。\n\n'
+               '手不要放在机构运动范围内，急停可点「停止全部」。\n继续？'
+               % (AG.describe(target), x, y))
+        if not messagebox.askyesno('自动抓一件', msg):
+            return
+        self._prep_running = True
+        self._prep_started = time.monotonic()
+        self.say('开始自动抓一件…')
+        try:
+            threading.Thread(target=self._auto_worker, args=(client, target),
+                             daemon=True).start()
+        except Exception as exc:                      # noqa: BLE001
+            self._prep_running = False
+            self.say('启动线程失败：%s: %s' % (type(exc).__name__, exc))
+
+    def _auto_worker(self, client, target):
+        def waiter(req_id, timeout_ms):
+            end = time.monotonic() + timeout_ms / 1000.0
+            while time.monotonic() < end:
+                got = client.done_of(req_id) if hasattr(client, 'done_of') else None
+                if got is not None:
+                    kind = 'reply' if got.get('kind') == 'reply' else (
+                        'err' if got.get('kind') == 'err' else 'timeout')
+                    return {'kind': kind, 'code': got.get('code', ''),
+                            'text': '', 'pairs': got.get('pairs') or {}}
+                time.sleep(0.05)
+            return None
+
+        try:
+            AG.run_once(client, target, log=lambda t: self.after(0, self.say, t),
+                        wait=waiter, pos_source=self._pos_source)
+        except Exception as exc:                      # noqa: BLE001
+            self.after(0, self.say, '自动抓一件失败：%s: %s'
+                       % (type(exc).__name__, exc))
+        finally:
+            self._prep_running = False
+            self.after(0, self._refresh_pos)
 
     # ------------------------------------------------------- 一键走出固定路线
     def on_prep_route(self):
