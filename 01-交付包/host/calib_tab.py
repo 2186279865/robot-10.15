@@ -502,21 +502,40 @@ class CalibTab(ttk.Frame):
         vision = (getattr(self.app, 'vision', None)
                   or getattr(self.app, 'vision_app', None))
         if vision is not None and hasattr(vision, 'recognize'):
-            self.say('先做一次视觉识别（约 5~9 秒，界面会卡一下）…')
+            self.say('先做一次视觉识别（进度见「单次识别」旁的进度条）…')
             try:
-                self.update_idletasks()
-                ok = True
-                if hasattr(vision, 'recognize_safe'):
-                    ok = bool(vision.recognize_safe())
-                else:
-                    vision.recognize()
-                if not ok:
-                    self.say('识别没成功（堆栈见 vision/runtime/vision_error.log）')
+                started = vision.recognize(
+                    callback=lambda ok, info: self.after(
+                        0, self._after_recognize_grab, ok, info))
+            except TypeError:                     # 老版本没有 callback 参数
+                started = True
+                try:
+                    ok = bool(vision.recognize_safe()) if hasattr(vision, 'recognize_safe') else True
+                except Exception as exc:          # noqa: BLE001
+                    self.say('识别失败：%s: %s' % (type(exc).__name__, exc))
                     return
-            except Exception as exc:                  # noqa: BLE001
+                self._after_recognize_grab(ok, '')
+                started = True
+            except Exception as exc:              # noqa: BLE001
                 self.say('识别失败：%s: %s' % (type(exc).__name__, exc))
                 return
+            if not started:
+                return
+            return
+        self._start_auto_grab(client)
 
+    def _after_recognize_grab(self, ok, info):
+        """视觉识别结束后（主线程）继续：读目标 → 弹确认 → 起执行线程。"""
+        if not ok:
+            self.say('识别没成功（堆栈见 vision/runtime/vision_error.log）：%s' % (info or ''))
+            return
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('连接断开了，先重新连接')
+            return
+        self._start_auto_grab(client)
+
+    def _start_auto_grab(self, client):
         try:
             targets = AG.load_targets()
             target = AG.pick_target(targets)
@@ -645,7 +664,8 @@ class CalibTab(ttk.Frame):
         try:
             res = AG.run_many(
                 client, count,
-                recognize=vision.recognize_safe,
+                recognize=(vision.recognize_blocking
+                       if hasattr(vision, 'recognize_blocking') else vision.recognize_safe),
                 log=self.say,
                 pos_source=self._pos_source,
                 drop=drop,

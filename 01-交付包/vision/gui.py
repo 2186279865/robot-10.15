@@ -1,4 +1,5 @@
 import json
+import queue
 import socket
 import threading
 import time
@@ -181,6 +182,9 @@ class App:
         self.samples = classify.load_samples()
         self.fused = []
         self.sam_lock = threading.Lock()
+        self._rec_q = queue.Queue()
+        self._rec_busy = False
+        self._rec_cb = None
         self.live = False
         self.live_thread = None
         self.live_msg = None
@@ -301,14 +305,25 @@ class App:
         cba.bind('<<ComboboxSelected>>', lambda e: self.set_axis(self.axis_var.get()))
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
-        ttk.Button(bot, text='单次识别', command=self.recognize_safe).pack(side='left', padx=3)
-        self.live_btn = ttk.Button(bot, text='实时分割', command=self.toggle_live)
-        self.live_btn.pack(side='left', padx=3)
         self.reg_btn = ttk.Button(bot, text='登记样本', command=self.toggle_register)
         self.reg_btn.pack(side='left', padx=3)
         self.mark_btn = ttk.Button(bot, text='标注点', command=self.toggle_marks)
         self.mark_btn.pack(side='left', padx=3)
         ttk.Button(bot, text='清空标注', command=self.clear_marks).pack(side='left', padx=3)
+
+        # 识别行：把「单次识别」从拥挤的工具栏挪出来，配一条进度条
+        rrow = ttk.Frame(self.r, padding=(8, 0, 8, 2))
+        rrow.pack(fill='x', before=body)
+        self.rec_btn = ttk.Button(rrow, text='单次识别', width=12,
+                                  command=self.recognize_safe)
+        self.rec_btn.pack(side='left', padx=(0, 6))
+        self.rec_pb = ttk.Progressbar(rrow, mode='determinate', length=260,
+                                      maximum=100, value=0)
+        self.rec_pb.pack(side='left', padx=(0, 8))
+        self.rec_pb_lbl = ttk.Label(rrow, text='空闲', width=38)
+        self.rec_pb_lbl.pack(side='left', padx=(0, 10))
+        self.live_btn = ttk.Button(rrow, text='实时分割', command=self.toggle_live)
+        self.live_btn.pack(side='left', padx=3)
 
     # ------------------------------------------------------------ 四轴/夹爪
     def _build_ctrl(self, parent):
@@ -582,6 +597,9 @@ class App:
             self.note('双画面运行中')
             self._loop_armed = False
             self._schedule_loop()
+            if not getattr(self, '_rec_pump_armed', False):
+                self._rec_pump_armed = True
+                self.r.after(120, self._rec_pump)
         except Exception as e:
             messagebox.showerror('打开失败', str(e))
 
@@ -1359,61 +1377,142 @@ class App:
                     it[k] = val
         return base
 
+    # ---------------- 单次识别（非阻塞 + 进度条） ----------------
     def recognize_safe(self):
-        """点「单次识别」的入口：异常时把完整 traceback 落盘，界面只提示一句话。
+        """「单次识别」按钮入口：起工作线程，主线程只负责进度条与提示。"""
+        return self.recognize()
 
-        以前异常直接抛到 Tk 回调里，界面上只有 "识别失败：TypeError ..."，
-        没有行号，排查要猜。现在写 `vision/runtime/vision_error.log`。
-        """
+    def _rec_set(self, pct, text, busy=None):
+        """主线程：更新进度条/标签（只在主线程调用）。"""
         try:
-            self.recognize()
-            return True
-        except Exception:
-            text = traceback.format_exc()
-            try:
-                out = ROOT / 'runtime'
-                out.mkdir(exist_ok=True)
-                (out / 'vision_error.log').write_text(text, encoding='utf8')
-            except Exception:                     # noqa: BLE001 —— 落盘失败也要提示
-                pass
-            lines = [ln for ln in text.strip().splitlines() if ln.strip()]
-            self.note('识别异常（完整堆栈见 vision/runtime/vision_error.log）：'
-                      + (lines[-1] if lines else '未知错误'))
-            return False
+            if pct is not None:
+                self.rec_pb.configure(value=max(0.0, min(100.0, pct)))
+            if text is not None:
+                self.rec_pb_lbl.configure(text=text)
+            if busy is not None:
+                self.rec_btn.configure(state=('disabled' if busy else 'normal'))
+                if busy:
+                    self.rec_pb.configure(mode='determinate')
+        except Exception:                      # noqa: BLE001 —— 界面刷新失败不影响识别
+            pass
 
-    def recognize(self):
+    @staticmethod
+    def _call_cb(cb, ok, info):
+        """回调分发：支持函数，也支持 {'fn':..., 'quiet':bool} 字典。"""
+        if cb is None:
+            return
+        fn = cb.get('fn') if isinstance(cb, dict) else cb
+        if not callable(fn):
+            return
+        try:
+            fn(ok, info)
+        except Exception:                      # noqa: BLE001
+            pass
+
+    def _rec_pump(self):
+        """主线程轮询工作线程的进度/结果（100 ms）。"""
+        try:
+            while True:
+                kind, *rest = self._rec_q.get_nowait()
+                if kind == 'progress':
+                    i, n = rest
+                    self._rec_set(100.0 * i / max(1, n), '识别中 %d/%d 帧' % (i, n))
+                elif kind == 'stage':
+                    self._rec_set(None, str(rest[0]))
+                elif kind == 'note':
+                    self.note(str(rest[0]))
+                elif kind == 'done':
+                    fused, cb, info = rest
+                    self._rec_busy = False
+                    self._rec_set(100, '完成：%d 个目标' % len(fused), busy=False)
+                    self._call_cb(cb, True, info)
+                elif kind == 'error':
+                    cb, msg = rest
+                    self._rec_busy = False
+                    self._rec_set(0, '识别失败', busy=False)
+                    self.note('识别失败：' + msg)
+                    self._call_cb(cb, False, msg)
+        except queue.Empty:
+            pass
+        try:
+            self.r.after(100, self._rec_pump)
+        except Exception:                      # noqa: BLE001
+            pass
+
+    def _recognize_precheck(self):
+        """主线程前置检查：返回 (n_frames, error_text)。"""
         if self.tf is None:
-            return
+            return 0, '还没有画面：先点「打开双画面」'
         if len(self.points) != 4:
-            self.note('请先完成顶视四点定位，再识别')
-            messagebox.showwarning('缺少识别区域', '请先点击“顶视四点框选”，依次选择四个角点')
-            return
+            return 0, '请先完成顶视四点定位，再识别'
         if not self.ensure_segmenter():
-            return
+            return 0, 'SAM 模型没加载成功'
+        n = int(self.cfg.get('frames_for_vote', 3) or 3)
+        return max(2, min(5, n)), ''
+
+    def recognize(self, callback=None):
+        """起线程做识别；callback(ok, info) 在识别结束后于主线程被调用。"""
+        if getattr(self, '_rec_busy', False):
+            self.note('正在识别中，请稍候…')
+            return False
+        n, err = self._recognize_precheck()
+        if err:
+            self.note(err)
+            if callback:
+                callback(False, err)
+            return False
+        self._rec_busy = True
+        self._rec_cb = callback
+        self._rec_set(0, '识别中 0/%d 帧' % n, busy=True)
+
+        def work():
+            try:
+                fused, info = self._recognize_core(n)
+            except Exception:                  # noqa: BLE001
+                tb = traceback.format_exc()
+                try:
+                    out = ROOT / 'runtime'
+                    out.mkdir(exist_ok=True)
+                    (out / 'vision_error.log').write_text(tb, encoding='utf8')
+                except Exception:              # noqa: BLE001
+                    pass
+                last = [ln for ln in tb.strip().splitlines() if ln.strip()][-1]
+                self._rec_q.put(('error', callback, last))
+                return
+            self._rec_q.put(('done', fused, callback, info))
+
+        threading.Thread(target=work, daemon=True, name='recognize').start()
+        return True
+
+    def recognize_blocking(self):
+        """工作线程内使用：同步跑完识别（不碰 Tk，只往队列里塞进度）。"""
+        n, err = 0, ''
+        # 前置状态由调用方（主线程）已检查；这里只做最保守的兜底
+        if len(self.points) != 4:
+            raise RuntimeError('请先完成顶视四点定位')
         n = int(self.cfg.get('frames_for_vote', 3) or 3)
         n = max(2, min(5, n))
-        self.note(f'双摄识别中（{n} 帧投票）...')
-        self.r.update_idletasks()
+        return self._recognize_core(n)
+
+    def _recognize_core(self, n):
+        """真正的识别计算：不碰任何 Tk 控件，可在任意线程运行。"""
         runs = []
         stats_all = []
         t_start = time.perf_counter()
-        try:
-            for _ in range(n):
-                tf = self.a.get() if self.a else self.tf
-                sf = (self.bstream.get() if (self.bstream is not None
-                                             and len(self.side_points) == 4) else None)
-                if tf is None:
-                    break
-                r0 = time.perf_counter()
-                runs.append(self.detect_and_fuse(tf, sf, stats_out=stats_all))
-                self._merge_times({'frame': time.perf_counter() - r0})
-                time.sleep(.08)
-        except Exception as e:
-            self.note(f'识别失败：{e}')
-            return
+        for i in range(n):
+            tf = self.a.get() if self.a else self.tf
+            sf = (self.bstream.get() if (self.bstream is not None
+                                         and len(self.side_points) == 4) else None)
+            if tf is None:
+                break
+            self._rec_q.put(('progress', i + 1, n))
+            r0 = time.perf_counter()
+            runs.append(self.detect_and_fuse(tf, sf, stats_out=stats_all))
+            self._merge_times({'frame': time.perf_counter() - r0})
+            time.sleep(.08)
         if not runs:
-            self.note('没有可用画面')
-            return
+            raise RuntimeError('没有可用画面')
+        self._rec_q.put(('stage', '投票…'))
         fused = self.vote_runs(runs)
         ntop = sum(1 for f in fused if f.get('top'))
         nside = sum(1 for f in fused if f.get('side'))
@@ -1424,7 +1523,6 @@ class App:
         wr = time.perf_counter() - w0
         self._merge_times({'write': wr})
         total = time.perf_counter() - t_start
-        # 本次识别的各阶段累计耗时（{n} 帧相加，不是单帧平均）
         acc = {}
         for st in stats_all:
             for k, v in st.items():
@@ -1435,10 +1533,12 @@ class App:
         sw_ = sum(acc.get(k, 0.0) for k in ('side.warp', 'side.sam', 'side.post'))
         cs = classify.class_summary(fused)
         ctxt = ' '.join(f'{k}×{v}' for k, v in cs.items())
-        self.note(f'单次识别完成：{len(fused)} 个目标（顶视{ntop}/副摄{nside}，{n} 帧投票），'
-                  f'用时 {total:.2f}s（顶视 {tw_:.2f}s / 副摄 {sw_:.2f}s / 融合 '
-                  f'{acc.get("fuse", 0.0):.2f}s / 分类 {acc.get("classify", 0.0):.2f}s / '
-                  f'写JSON {wr:.2f}s）| {ctxt}')
+        msg = (f'单次识别完成：{len(fused)} 个目标（顶视{ntop}/副摄{nside}，{n} 帧投票），'
+               f'用时 {total:.2f}s（顶视 {tw_:.2f}s / 副摄 {sw_:.2f}s / 融合 '
+               f'{acc.get("fuse", 0.0):.2f}s / 分类 {acc.get("classify", 0.0):.2f}s / '
+               f'写JSON {wr:.2f}s）| {ctxt}')
+        self._rec_q.put(('note', msg))
+        return fused, msg
 
 
 if __name__ == '__main__':
