@@ -58,7 +58,7 @@ PARAM_LABELS = {
     "acc": "默认加速度档",
     "speed_rpm_max": "速度上限 RPM",
     "gripper_open_deg": "夹爪松开角度",
-    "gripper_ready_deg": "夹爪预备角度(150=待抓)",
+    "gripper_ready_deg": "夹爪预备角度(158=待抓)",
     "gripper_grab_deg": "夹爪夹紧角度",
     "gripper_step_deg": "夹爪单步角度",
     "gripper_settle_ms": "夹爪等待 ms",
@@ -720,7 +720,7 @@ class App:
     def _build_gripper(self, parent: ttk.Frame) -> None:
         grab_default = int(P.PARAM_DEFAULTS["gripper_grab_deg"])
         open_default = int(P.PARAM_DEFAULTS["gripper_open_deg"])
-        ready_default = int(P.PARAM_DEFAULTS["gripper_ready_deg"])
+        ready_default = int(P.GRIPPER_READY_DEG)
         ttk.Label(
             parent,
             text=(
@@ -1267,7 +1267,7 @@ class App:
         if action == "ready":
             text = ("状态：已请求 ready 预备位 %d°（无到位传感器，"
                     "'等待结束'只代表 %dms 等待走完）"
-                    % (int(P.PARAM_DEFAULTS["gripper_ready_deg"]),
+                    % (int(P.GRIPPER_READY_DEG),
                        int(P.PARAM_DEFAULTS["gripper_settle_ms"])))
         else:
             text = (f"状态：已请求 {action}（无到位传感器，"
@@ -1291,7 +1291,22 @@ class App:
                 self.note("连接成功：上次断开时固件锁存了停止，已自动清除（不产生任何运动）")
             except Exception as exc:             # noqa: BLE001 —— 尽力而为
                 self.note(f"自动清除停止锁存失败（可手动点『清除停止锁存』）：{exc}")
-        ready_deg = int(P.PARAM_DEFAULTS["gripper_ready_deg"])
+        ready_deg = int(P.GRIPPER_READY_DEG)
+        # 固件里 gripper_ready_deg 的默认值还是 150（RAM 参数）：连上就改成 158，
+        # 这样改角度不用重烧固件。
+        try:
+            self.client.send("param_set", "gripper_ready_deg", ready_deg, timeout_ms=1500)
+        except Exception as exc:             # noqa: BLE001 —— 尽力而为
+            self.note(f"设置预备角度 {ready_deg}° 失败（固件将用 150°）：{exc}")
+        # 速度：固件默认 acc=1（≈32 圈/分，Z 抬一次要十几秒）。
+        # acc=0 = 直接到速度（最快）。连上就统一设成 0，这样手动闭环、动作序列、
+        # auto_runner 里的每一个 Z/X/Y 动作都是快的，而不只是"一键走出固定路线"。
+        try:
+            self.client.send("param_set", "acc", 0, timeout_ms=1500)
+            self.client.send("param_set", "goto_max_ms", 120000, timeout_ms=1500)
+            self.note("连接成功：已设 acc=0（最快加速度）、goto_max_ms=120000")
+        except Exception as exc:             # noqa: BLE001 —— 尽力而为
+            self.note(f"设置速度参数失败（可用参数页手动写 acc=0）：{exc}")
         try:
             self.client.send("gripper", "ready", timeout_ms=1000)
         except Exception as exc:             # noqa: BLE001 —— 自动动作用尽力而为
@@ -1508,7 +1523,7 @@ class App:
                 # 新会话：驱动器可能已掉电，绝对位置基准一律作废。
                 for panel in self.axes.values():
                     panel.reset_reference()
-                # 连上后把夹爪摆到预备位（150°）：放到下一轮 after 里发，
+                # 连上后把夹爪摆到预备位（158°）：放到下一轮 after 里发，
                 # 重连/握手期间卡住也只记日志，不弹框、不阻塞界面。
                 try:
                     self.root.after(10, self._auto_gripper_ready)

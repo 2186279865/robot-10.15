@@ -74,6 +74,10 @@ EVIDENCE_SETTLE_ELAPSED = "settle_elapsed"
 EVENT_TYPES = ("task", "latch", "link", "reset")
 
 #: 运行参数默认值（方案 5 节）。界面默认速度上限 300RPM。
+#: 本版使用的「预备位」角度（比 150° 再张开一点：下探时爪尖不蹭物块）。
+#: 固件参数 gripper_ready_deg 出厂默认仍是 150，上位机连上时会 param_set 成这个值。
+GRIPPER_READY_DEG = 158
+
 PARAM_DEFAULTS: Dict[str, object] = {
     "speed_rpm": 60,
     "acc": 1,

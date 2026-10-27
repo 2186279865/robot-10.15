@@ -111,7 +111,7 @@ stm32/hex/STM32F429.hex
 > 别烧 `stm32/hex/STM32F429_diag.hex`（那是 10 月 16 日的诊断固件）。
 
 烧完的验证（两条，都要过）：
-1. 上位机「舵机夹爪」页点 **预备(150)** → 日志回 `action=ready, angle=150`，说明夹爪三档这版在跑；
+1. 上位机「舵机夹爪」页点 **预备(158)** → 日志回 `action=ready, angle=158`，说明夹爪三档这版在跑；
 2. 命令行 `\.venv\Scripts\python.exe tools\goto_check.py --port COM6 --dry-run` → 能读到 `counts_per_rev / goto_tol_counts / goto_rpm` 三个参数，说明闭环这版在跑（旧固件会显示 `None` 或回 `E02`）。
 
 > ⚠ **老固件没有 `motor_goto`**：四轴页勾「闭环」再点「相对走」会回 `E01/E02`。新固件 hex 大小是 **89,098 字节**（上一版 81,951）。
@@ -225,7 +225,7 @@ selftest.bat /quick     :: 跳过 GUI 截图
 | 日志刷"相机 N 连续抓帧失败" | USB 带宽不足（没走 MJPG）。`pi_agent` 已默认 MJPG；仍失败就降分辨率 |
 | 重连后运动命令被 `E10` 拒 | 断线 3 秒固件会自动锁存停止；上位机连上后会自动 `stop_clear`，也可手动点「清除停止锁存」 |
 | 四轴 `motor_query` 全 `E04` | 编码器回读线（PA3）没接，属于已知硬件缺口，不影响发命令 |
-| 夹爪不回到 150° 预备位 | 固件是旧的，重烧 `stm32/hex/STM32F429.hex` |
+| 夹爪不回到 158° 预备位 | 固件是旧的，重烧 `stm32/hex/STM32F429.hex` |
 | 双击 run.bat 报 `'m' is not recognized` | 这文件被另存成了 UTF-8/LF。本包里的 .bat 都是纯 ASCII+CRLF，改动时别破坏 |
 
 更多：`docs/比赛现场操作卡.md`（10 条故障速查 + 赛前 10 分钟清单）。
