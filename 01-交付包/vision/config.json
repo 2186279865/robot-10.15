@@ -78,5 +78,18 @@
   "empty_background": "runtime/empty_background.png",
   "class_names": {
     "五棱体": "五棱体"
-  }
+  },
+  "tray_mm": 200.0,
+  "shape_cfg": {
+    "nv_eps": 0.02,
+    "min_area_px": 400,
+    "circ_round": 0.85,
+    "solidity_round": 0.93,
+    "rect_fit": 0.95,
+    "solidity_rect": 0.97,
+    "cube_tol": 0.12,
+    "ratio_long": 1.3,
+    "sphere_curv": 0.8
+  },
+  "_shape_cfg_note": "tray_mm=托盘内框实际边长(mm)，用于像素→毫米；shape_cfg 是形状容错链阈值，现场按 12 件实测微调即可。"
 }
