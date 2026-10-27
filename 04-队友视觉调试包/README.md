@@ -51,8 +51,8 @@ cd robot-10.15
    ├─ README.md               ← 样本说明
    ├─ real_cam0.jpg           ← 旧机顶视（俯视托盘）
    ├─ real_cam1.jpg           ← 旧机侧视
-   ├─ real_new0.jpg           ← 新机顶视
-   └─ real_new1.jpg           ← 新机侧视
+   ├─ real_new0.jpg           ← 新机侧视
+   └─ real_new1.jpg           ← 新机顶视（俯视托盘）
 ```
 
 **真正的代码不在这里**：视觉算法在 `01-交付包/vision/`，上位机在 `01-交付包/host/`，协议在 `01-交付包/docs/`。本包只是"入口 + 工具 + 指南"。
