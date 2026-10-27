@@ -230,6 +230,15 @@ def _lookup(key, shape, color, cfg, samples, feat):
     for cid, c in classes.items():
         if key in (c.get('keys') or []):
             return _result(cid, _class_name(cid, cfg, samples), key, .9, 'sample-key', cfg)
+    # 没有特征向量就没法做近邻匹配：直接判"待登记"，不要拿 None 去算范数
+    # （副摄单独看到的目标 feature 就是 None，之前会把整次识别打成 TypeError）
+    if feat is None:
+        return {'class_id': None, 'class_name': '待登记', 'class_key': key,
+                'class_conf': 0.0, 'class_source': 'unknown', 'need_review': True}
+    feat = np.asarray(feat, dtype=np.float32).reshape(-1)
+    if feat.size == 0:
+        return {'class_id': None, 'class_name': '待登记', 'class_key': key,
+                'class_conf': 0.0, 'class_source': 'unknown', 'need_review': True}
     best = None
     fn = float(np.linalg.norm(feat)) + 1e-9
     for cid, c in classes.items():

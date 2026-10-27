@@ -3,6 +3,7 @@ import socket
 import threading
 import time
 import tkinter as tk
+import traceback
 from collections import Counter
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog
@@ -300,7 +301,7 @@ class App:
         cba.bind('<<ComboboxSelected>>', lambda e: self.set_axis(self.axis_var.get()))
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
-        ttk.Button(bot, text='单次识别', command=self.recognize).pack(side='left', padx=3)
+        ttk.Button(bot, text='单次识别', command=self.recognize_safe).pack(side='left', padx=3)
         self.live_btn = ttk.Button(bot, text='实时分割', command=self.toggle_live)
         self.live_btn.pack(side='left', padx=3)
         self.reg_btn = ttk.Button(bot, text='登记样本', command=self.toggle_register)
@@ -1327,13 +1328,37 @@ class App:
                     continue
                 val, cnt = Counter(arr).most_common(1)[0]
                 if k == 'class_key':
-                    aligned = classify._lookup(val, *val.split('|', 1), self.cfg,
-                                               self.samples, it.get('feature'))
+                    shape, _, color = str(val).partition('|')
+                    aligned = classify._lookup(val, shape or None, color or None,
+                                               self.cfg, self.samples,
+                                               it.get('feature'))
                     it.update(aligned)
                     it['class_votes'] = f'{cnt}/{len(arr)}'
                 else:
                     it[k] = val
         return base
+
+    def recognize_safe(self):
+        """点「单次识别」的入口：异常时把完整 traceback 落盘，界面只提示一句话。
+
+        以前异常直接抛到 Tk 回调里，界面上只有 "识别失败：TypeError ..."，
+        没有行号，排查要猜。现在写 `vision/runtime/vision_error.log`。
+        """
+        try:
+            self.recognize()
+            return True
+        except Exception:
+            text = traceback.format_exc()
+            try:
+                out = ROOT / 'runtime'
+                out.mkdir(exist_ok=True)
+                (out / 'vision_error.log').write_text(text, encoding='utf8')
+            except Exception:                     # noqa: BLE001 —— 落盘失败也要提示
+                pass
+            lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+            self.note('识别异常（完整堆栈见 vision/runtime/vision_error.log）：'
+                      + (lines[-1] if lines else '未知错误'))
+            return False
 
     def recognize(self):
         if self.tf is None:

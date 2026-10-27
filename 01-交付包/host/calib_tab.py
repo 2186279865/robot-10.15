@@ -261,7 +261,14 @@ class CalibTab(ttk.Frame):
             self.say('先做一次视觉识别（约 5~9 秒，界面会卡一下）…')
             try:
                 self.update_idletasks()
-                vision.recognize()
+                ok = True
+                if hasattr(vision, 'recognize_safe'):
+                    ok = bool(vision.recognize_safe())
+                else:
+                    vision.recognize()
+                if not ok:
+                    self.say('识别没成功（堆栈见 vision/runtime/vision_error.log）')
+                    return
             except Exception as exc:                  # noqa: BLE001
                 self.say('识别失败：%s: %s' % (type(exc).__name__, exc))
                 return
