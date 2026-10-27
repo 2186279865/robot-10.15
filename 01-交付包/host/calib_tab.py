@@ -432,6 +432,41 @@ class CalibTab(ttk.Frame):
         self.say('下一步：放一件货点「自动抓一件」验证落点')
 
     # ------------------------------------------------------------- 自动抓一件
+    def _has_fresh_counts(self, max_age_ms: int = 3000) -> bool:
+        """四轴里是否已有一路新鲜的编码器回读（自动抓靠它算绝对位置）。"""
+        client = getattr(self.app, 'client', None)
+        try:
+            now = client.now_ms() if client is not None else 0
+        except Exception:                              # noqa: BLE001
+            now = 0
+        for axis, panel in (getattr(self.app, 'axes', {}) or {}).items():
+            val = getattr(panel, 'last_counts', None)
+            age = now - int(getattr(panel, 'last_counts_ms', 0) or 0)
+            if val is not None and 0 <= age < max_age_ms:
+                return True
+        return False
+
+    def _ensure_pos(self) -> bool:
+        """自动动作前确保有位置来源：没开遥测就临时订阅一下，等 ~1.2 s。"""
+        import time as _time
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            return False
+        if self._has_fresh_counts():
+            return True
+        for axis in (1, 3, 4, 5):
+            try:
+                client.send('tele_on', int(axis), 200)
+            except Exception:                          # noqa: BLE001
+                pass
+        for _ in range(12):
+            self.update_idletasks()
+            _time.sleep(0.1)
+            if self._has_fresh_counts():
+                self.say('已自动订阅遥测，位置可读')
+                return True
+        return self._has_fresh_counts(5000)
+
     def _pos_source(self):
         """给 auto_grab/move_abs 用：回读 counts（3 s 内）+ 软位置 + 位置可信标志。"""
         client = getattr(self.app, 'client', None)
@@ -459,6 +494,9 @@ class CalibTab(ttk.Frame):
             self.say('还有动作在跑，等它跑完再点')
             return
 
+        if not self._ensure_pos():
+            self.say('读不到当前位置（没有编码器回读）：先在「四轴控制」页点「查位置」或勾「订阅遥测」再试')
+            return
         vision = (getattr(self.app, 'vision', None)
                   or getattr(self.app, 'vision_app', None))
         if vision is not None and hasattr(vision, 'recognize'):
@@ -564,6 +602,11 @@ class CalibTab(ttk.Frame):
         except Exception:                                  # noqa: BLE001
             count = 6
         count = max(1, min(20, count))
+        if not self._ensure_pos():
+            self.say('读不到当前位置（没有编码器回读）：先在「四轴控制」页点「查位置」或勾「订阅遥测」再试')
+            messagebox.showwarning('读不到位置', '没有编码器回读，无法安全自动移动。\n\n'
+                                   '先在「四轴控制」页点一次「查位置」，或勾上四轴的「订阅遥测」，再点「连续抓」。')
+            return
         drop = bool(self.drop_var.get())
         extra = '（含转盘 60° + 松爪）' if drop else '（不落货，只抓到 P0）'
         if not messagebox.askyesno(
