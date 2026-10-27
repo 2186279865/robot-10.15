@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
 
+import box_map as BM
 import prep_pose
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +45,18 @@ SETTLE_OPEN_MS = 700       # 松爪后等货物落盒
 SETTLE_READY_MS = 400      # 回预备位
 
 RPM = {AXIS_Z: 1500, AXIS_X: 120, AXIS_Y: 300, AXIS_TRAY: 300}
+
+
+#: 每个盒位之间的角度（6 个盒子均分一圈）
+BOX_STEP_DEG = 60.0
+BOX_COUNT = 6
+
+
+def class_key(target: Dict) -> str:
+    """物块的类别键：'形状|颜色'（与视觉 class_key 的写法一致）。"""
+    shape = str(target.get('shape') or target.get('class_name') or '未知').strip()
+    color = str(target.get('color') or '').strip()
+    return '%s|%s' % (shape, color) if color else shape
 
 
 class GrabError(RuntimeError):
@@ -114,7 +127,7 @@ def describe(target: dict) -> str:
 
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
-             drop: bool = True) -> Dict[str, object]:
+             drop: bool = True, tray_deg: float = TRAY_DEG) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
     drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
@@ -173,8 +186,10 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         elapsed = time.perf_counter() - t0
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
                 'target': describe(target), 'dropped': False}
-    say('转盘 %.0f°' % TRAY_DEG)
-    client.angle(AXIS_TRAY, TRAY_DEG)                   # 10 空盒到落料位
+    if abs(tray_deg) >= 1.0:
+        say('转盘 %+.0f°' % tray_deg)
+        client.angle(AXIS_TRAY, tray_deg)               # 10 空盒转到落料位
+    time.sleep(0.3)
     time.sleep(0.5)
     say('松爪 180° → 等待落盒 → 回预备 158°')
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
@@ -190,7 +205,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
-             stop_flag: Optional[Callable[[], bool]] = None) -> Dict[str, object]:
+             stop_flag: Optional[Callable[[], bool]] = None,
+             current_box: int = 1) -> Dict[str, object]:
     """连续抓 N 件：每件都"重新识别 → 挑目标 → 走一遍 run_once"。
 
     recognize() 由 GUI 传入（阻塞式单次识别，返回值得能从中读 latest_targets.json），
@@ -204,6 +220,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     failed = 0
     started = time.perf_counter()
     results: List[Dict[str, object]] = []
+    box_now = int(current_box) if 1 <= int(current_box) <= BOX_COUNT else 1
+    log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 6 盒，每盒 60°）' % box_now)
     for i in range(max(0, int(count))):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
@@ -224,9 +242,21 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         except GrabError as exc:
             log('[连续抓] 挑目标失败：%s' % exc)
             break
+        key = class_key(target)
+        try:
+            box = BM.assign(key) if drop else 0
+        except ValueError as exc:
+            failed += 1
+            log('[连续抓] 分盒失败：%s（可在「连续抓」旁点「分盒清零」重来）' % exc)
+            break
+        deg = 0.0
+        if drop:
+            deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
+            log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°）'
+                % (i + 1, key, box, deg))
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
-                           drop=drop)
+                           drop=drop, tray_deg=deg)
         except GrabError as exc:
             failed += 1
             log('[连续抓] 第 %d 件失败：%s' % (i + 1, exc))
@@ -236,9 +266,12 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             log('[连续抓] 第 %d 件异常：%s: %s' % (i + 1, type(exc).__name__, exc))
             break
         done += 1
+        if drop:
+            box_now = int(box)
         results.append(one)
         log('[连续抓] 第 %d 件完成（累计 %d 件）' % (i + 1, done))
     elapsed = time.perf_counter() - started
-    log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s' % (done, failed, elapsed))
+    log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
+        % (done, failed, elapsed, BM.describe()))
     return {'ok': failed == 0, 'done': done, 'failed': failed,
             'elapsed': elapsed, 'items': results}

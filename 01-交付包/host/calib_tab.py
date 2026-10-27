@@ -86,6 +86,8 @@ class CalibTab(ttk.Frame):
                    ).pack(side='left', padx=(0, 6))
         ttk.Button(bar, text='连续抓', command=self.on_auto_many
                    ).pack(side='left', padx=(0, 3))
+        ttk.Button(bar, text='分盒清零', command=self.on_box_reset
+                   ).pack(side='left', padx=(0, 6))
         self.many_var = tk.IntVar(value=6)
         ttk.Spinbox(bar, from_=1, to=20, width=3, textvariable=self.many_var
                     ).pack(side='left', padx=(0, 2))
@@ -628,6 +630,16 @@ class CalibTab(ttk.Frame):
         self.say('开始连续抓 %d 件…' % count)
         threading.Thread(target=self._many_worker, args=(client, vision, count, drop),
                          daemon=True).start()
+
+    def on_box_reset(self):
+        """把"类别→盒号"的登记清空（每次比赛/换一批货前用）。"""
+        import box_map as BM
+        if not messagebox.askyesno('分盒清零', '清空「类别→盒号」的登记？\n\n'
+                                   '（只清登记，不动转盘、不动机械臂）\n当前：%s'
+                                   % BM.describe()):
+            return
+        BM.reset()
+        self.say('分盒登记已清空，现在：%s' % BM.describe())
 
     def _many_worker(self, client, vision, count, drop):
         try:
