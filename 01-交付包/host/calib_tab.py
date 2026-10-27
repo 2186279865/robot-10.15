@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import threading
 import time
+
+import cv2
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
+
+from PIL import Image, ImageTk
 
 import auto_grab as AG
 import calib_wizard as W
@@ -40,6 +44,9 @@ def _travel_limits():
         return out or None
     except Exception:
         return None
+
+
+PREVIEW_W, PREVIEW_H = 336, 189     # 顶视预览尺寸（16:9）
 
 
 class CalibTab(ttk.Frame):
@@ -70,7 +77,7 @@ class CalibTab(ttk.Frame):
         )).pack(anchor='w')
 
         bar = ttk.Frame(self)
-        bar.pack(fill='x', pady=6)
+        bar.pack(fill='x', pady=(6, 2))
         ttk.Button(bar, text='一键走出固定路线', command=self.on_prep_route
                    ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='自动抓一件', command=self.on_auto_grab
@@ -82,16 +89,23 @@ class CalibTab(ttk.Frame):
                    ).pack(side='left', padx=(0, 4))
         ttk.Button(bar, text='抓取点求解', command=self.on_solve_grasp
                    ).pack(side='left', padx=(0, 12))
+
+        bar2 = ttk.Frame(self)
+        bar2.pack(fill='x', pady=(0, 6))
         for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
                           ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
-            ttk.Button(bar, text=text, width=10,
+            ttk.Button(bar2, text=text, width=10,
                        command=lambda k=key: self.on_preset(k)
                        ).pack(side='left', padx=(0, 4))
-        ttk.Button(bar, text='刷新标注点', command=self.on_marks_refresh).pack(side='left', padx=(0, 6))
-        ttk.Button(bar, text='记录爪位', command=self.on_marks_record).pack(side='left', padx=(0, 6))
-        ttk.Button(bar, text='清除这个爪位', command=self.on_marks_clearrow).pack(side='left', padx=(0, 6))
-        ttk.Button(bar, text='求解并保存', command=self.on_marks_solve).pack(side='left', padx=(0, 6))
-        ttk.Checkbutton(bar, text='写 new_eye/tray_calib.json',
+        ttk.Button(bar2, text='刷新标注点', command=self.on_marks_refresh
+                   ).pack(side='left', padx=(6, 6))
+        ttk.Button(bar2, text='记录爪位', command=self.on_marks_record
+                   ).pack(side='left', padx=(0, 6))
+        ttk.Button(bar2, text='清除这个爪位', command=self.on_marks_clearrow
+                   ).pack(side='left', padx=(0, 6))
+        ttk.Button(bar2, text='求解并保存', command=self.on_marks_solve
+                   ).pack(side='left', padx=(0, 6))
+        ttk.Checkbutton(bar2, text='写 tray_calib.json',
                         variable=self.var_write).pack(side='left', padx=8)
 
         self.marks_label = ttk.Label(self, text='标注点：—', foreground='#0a3d91')
@@ -101,14 +115,30 @@ class CalibTab(ttk.Frame):
 
         ttk.Label(self, text='标注点（P 编号 = new_eye 里点的顺序；X/Y 是记录的爪位脉冲）'
                   ).pack(anchor='w', pady=(8, 0))
+        # 顶视小预览：放在列表上方，点动 X/Y 时不用来回切页
+        pv = ttk.LabelFrame(self, text='顶视预览（0.25 s 刷新）', padding=(6, 4))
+        pv.pack(fill='x', pady=(6, 4))
+        blank = Image.new('RGB', (PREVIEW_W, PREVIEW_H), (32, 33, 36))
+        self._pv_photo = ImageTk.PhotoImage(blank)      # 占位图，同时定住控件尺寸
+        self._pv_label = tk.Label(pv, image=self._pv_photo, relief='solid', bd=1)
+        self._pv_label.pack(side='left')
+        self._pv_note = ttk.Label(pv, text='（点动 X/Y 时这里看顶视图）', foreground='#666')
+        self._pv_note.pack(side='left', padx=(10, 0), anchor='n')
+
         box = ttk.Frame(self)
         box.pack(fill='both', expand=True)
-        self.listbox = tk.Listbox(box, height=8, font=('Consolas', 10),
+
+        # 用 grid 固定三列：标注点列表 | 滚动条 | 顶视小预览（pack 的 expand 会把预览挤没）
+        box.columnconfigure(0, weight=1)
+        box.rowconfigure(0, weight=1)
+        self.listbox = tk.Listbox(box, height=8, width=64, font=('Consolas', 10),
                                   bg='#f7f8fa', relief='solid', bd=1)
         sb = ttk.Scrollbar(box, orient='vertical', command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=sb.set)
-        self.listbox.pack(side='left', fill='both', expand=True)
-        sb.pack(side='right', fill='y')
+        self.listbox.grid(row=0, column=0, sticky='nsew')
+        sb.grid(row=0, column=1, sticky='ns')
+
+        self.after(400, self._preview_tick)
 
         jog = ttk.LabelFrame(self, text='XY 点动（脉冲为非负；方向用按钮/取反）', padding=8)
         jog.pack(fill='x', pady=(8, 0))
@@ -235,6 +265,39 @@ class CalibTab(ttk.Frame):
             self.after(0, self.say, '%s：不需要动（已在目标位）' % title)
         else:
             self.after(0, self.say, '%s：没走完，看上面的失败原因' % title)
+
+    # ----------------------------------------------------------- 视觉预览
+    def _preview_stream(self):
+        app = self.app
+        vision = getattr(app, 'vision', None) or getattr(app, 'vision_app', None)
+        if vision is None:
+            return None
+        return getattr(vision, 'a', None)          # 顶视 Stream
+
+    def _preview_update(self):
+        stream = self._preview_stream()
+        get = getattr(stream, 'get', None)
+        frame = get() if callable(get) else None
+        if frame is None:
+            self._pv_note.configure(text='视觉还没开（先在「视觉」页开双画面）')
+            return
+        h, w = frame.shape[:2]
+        scale = min(PREVIEW_W / float(w), PREVIEW_H / float(h))
+        nw = max(1, int(w * scale))
+        nh = max(1, int(h * scale))
+        small = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+        photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+        self._pv_photo = photo                     # 必须保住引用，否则图会变白
+        self._pv_label.configure(image=photo, text='')
+        self._pv_note.configure(text='%dx%d' % (w, h))
+
+    def _preview_tick(self):
+        try:
+            self._preview_update()
+        except Exception as exc:                   # noqa: BLE001
+            self._pv_note.configure(text='预览出错：%s' % exc)
+        self.after(250, self._preview_tick)
 
     # ------------------------------------------------------- 抓取点标定
     def _current_xy_pulses(self):
