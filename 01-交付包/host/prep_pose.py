@@ -39,6 +39,7 @@ DEFAULTS: Dict[str, object] = {
     'y_rpm': 300,
     'z_pulses': -152000,    # 抬起（负数=向上；-165762 是全行程顶，这里离顶留约 8 mm）
     'z_rpm': 1500,
+    'acc': 0,               # 加速度档：0 = 直接到速度（最快）；数值越大越慢（100 ≈ 爬行）
 }
 
 #: 每步顺序固定：先 Y 让开，再抬 Z（反了就撞上方障碍）
@@ -137,7 +138,7 @@ def describe(cfg: Dict[str, object]) -> str:
 AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
 
-def move_abs(client, targets, order=None, rpm=50, log=None, wait=None,
+def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
              soft=None, known=None, counts=None) -> List[Dict[str, object]]:
     """按 `{轴号: 目标脉冲}` 依次闭环走到目标（增量由回读 counts / 软位置算出）。
 
@@ -158,6 +159,10 @@ def move_abs(client, targets, order=None, rpm=50, log=None, wait=None,
         pass
     try:
         client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
+        client.send('param_set', 'acc', max(0, min(255, int(acc))), timeout_ms=1500)
     except Exception:                                 # noqa: BLE001
         pass
 
@@ -270,6 +275,11 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
     # 长行程要放宽固件的 goto 超时（默认按 rpm 估，而实际速度被限在 ~50 圈/分）
     try:
         client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+    except Exception:                                 # noqa: BLE001
+        pass
+    # 加速度档：0 = 直接到速度（最快）。默认档位（1）下 Z 只有 ~32 圈/分，抬一次要十几秒。
+    try:
+        client.send('param_set', 'acc', max(0, min(255, int(conf.get('acc', 0)))), timeout_ms=1500)
     except Exception:                                 # noqa: BLE001
         pass
 

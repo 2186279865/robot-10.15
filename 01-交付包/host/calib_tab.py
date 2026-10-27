@@ -197,6 +197,7 @@ class CalibTab(ttk.Frame):
                 counts[axis] = int(val)
         try:
             results = PP.move_abs(client, targets, order=order, rpm=rpm,
+                                  acc=int(PP.load().get('acc', 0)),
                                   log=lambda t: self.after(0, self.say, t), wait=waiter,
                                   soft=soft, known=known, counts=counts)
         except Exception as exc:                      # noqa: BLE001

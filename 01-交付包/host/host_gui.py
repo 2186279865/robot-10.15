@@ -24,6 +24,10 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from pathlib import Path  # noqa: E402
+
+PKG_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import protocol as P  # noqa: E402
 import approach_route as AR
 import journey as J  # noqa: E402
@@ -97,7 +101,7 @@ class AxisPanel:
 
         self.direction = tk.IntVar(value=0)
         self.rpm = tk.IntVar(value=60)
-        self.acc = tk.IntVar(value=1)
+        self.acc = tk.IntVar(value=0)
         # 位置手动输入 = 圈数 + 度数（两者相加），脉冲数由它们算出来
         self.turns = tk.DoubleVar(value=1.0)
         self.degrees = tk.DoubleVar(value=0.0)
@@ -114,7 +118,7 @@ class AxisPanel:
         ttk.Radiobutton(row, text="负", value=1, variable=self.direction).pack(side="left")
         ttk.Label(row, text="转速").pack(side="left", padx=(6, 0))
         ttk.Spinbox(row, from_=1, to=300, width=5, textvariable=self.rpm).pack(side="left")
-        ttk.Label(row, text="加速度").pack(side="left", padx=(6, 0))
+        ttk.Label(row, text="加速度(0=最快)").pack(side="left", padx=(6, 0))
         ttk.Spinbox(row, from_=0, to=255, width=4, textvariable=self.acc).pack(side="left")
 
         # 位置模式：手动输入"转几圈"和"转几度"，两者相加，脉冲自动算
@@ -1588,6 +1592,17 @@ class App:
             self._log_lines -= 200
         if self.auto_scroll.get():
             self.log_text.see("end")
+        # 同时落盘：出问题后能回看（界面日志重启就没了）
+        try:
+            log_dir = PKG_ROOT / "runtime"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            path = log_dir / ("host-%s.log" % time.strftime("%Y%m%d"))
+            if path.exists() and path.stat().st_size > 4 * 1024 * 1024:
+                path.replace(path.with_suffix(".log.1"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
 
     def note(self, text: str) -> None:
         self._log(text, "note")
