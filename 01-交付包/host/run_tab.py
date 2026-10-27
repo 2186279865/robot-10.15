@@ -145,33 +145,29 @@ class RunTab:
         self.frame.after(200, self._tick)
 
     def _draw(self):
+        """画主摄：优先用视觉页那套「校正图 + 四点框 + 标注点 + 目标框」。"""
         vision = self.vision
+        if vision is None:
+            return
         frame = None
-        if vision is not None and getattr(vision, 'a', None) is not None:
+        if hasattr(vision, 'render_overview'):
             try:
-                frame = vision.a.get()
+                frame = vision.render_overview(700)
             except Exception:                    # noqa: BLE001
                 frame = None
         if frame is None:
-            return
+            # 兜底：没有四点定位时直接显示原始顶视
+            try:
+                raw = vision.a.get() if getattr(vision, 'a', None) is not None else None
+            except Exception:                    # noqa: BLE001
+                raw = None
+            if raw is None:
+                return
+            frame = cv2.resize(raw, (700, 700))
         fh, fw = frame.shape[:2]
         scale = min(RUN_W / float(fw), RUN_H / float(fh))
         nw, nh = int(fw * scale), int(fh * scale)
         small = cv2.resize(frame, (nw, nh))
-        # 叠加目标框（用视觉已有的融合结果）
-        try:
-            fused = list(getattr(vision, 'fused', None) or [])
-        except Exception:                        # noqa: BLE001
-            fused = []
-        for i, item in enumerate(fused, start=1):
-            t = item.get('top') or item.get('side') or {}
-            bbox = t.get('bbox')
-            if bbox:
-                x, y, w, h = bbox
-                x, y, w, h = (int(v * scale) for v in (x, y, w, h))
-                cv2.rectangle(small, (x, y), (x + w, y + h), (0, 255, 120), 2)
-                cv2.putText(small, '#%d' % i, (x + 2, max(14, y - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 120), 2)
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(rgb)
         self._photo = ImageTk.PhotoImage(img)

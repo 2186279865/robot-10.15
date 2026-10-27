@@ -1261,6 +1261,91 @@ class App:
         else:
             self.note('实时分割已停止')
 
+    # ------------------------------------------------- 运行台用的合成画面
+    def render_overview(self, size: int = 700):
+        """给「运行台」用：顶视校正图 + 四点框 + 标注点 + 目标框（BGR，失败返回 None）。
+
+        文字用 PIL 画（cv2.putText 不支持中文），所以画面里能直接看到「#1 正方体/绿」。
+        """
+        try:
+            if self.a is None:
+                return None
+            fr = self.a.get()
+            if fr is None:
+                return None
+            W = 700
+            if len(self.points) == 4:
+                dst = np.float32([[0, 0], [W, 0], [W, W], [0, W]])
+                H = cv2.getPerspectiveTransform(np.float32(self.points), dst)
+                img = cv2.warpPerspective(fr, H, (W, W))
+            else:
+                img = cv2.resize(fr, (W, W))
+
+            labels = []                      # (x, y, 文本, 颜色)
+            # 四点框 = 校正图的四条边
+            cv2.polylines(img, [np.int32([[1, 1], [W - 2, 1], [W - 2, W - 2], [1, W - 2]])],
+                          True, (120, 255, 120), 2)
+            for idx, (x, y) in enumerate([(14, 22), (W - 30, 22),
+                                          (W - 30, W - 20), (14, W - 20)], 1):
+                cv2.circle(img, (x, y), 6, (0, 200, 0), -1)
+                labels.append((x + 9, y - 9, str(idx), (0, 160, 0)))
+
+            # 标注点（青色十字 + P 编号）
+            for idx, m in enumerate(getattr(self, 'marks', []) or [], 1):
+                try:
+                    mx, my = int(float(m['x'])), int(float(m['y']))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                cv2.drawMarker(img, (mx, my), (255, 229, 0),
+                               markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+                labels.append((mx + 10, my - 22, 'P%d' % idx, (200, 170, 0)))
+
+            # 目标框 + 编号/类别
+            for idx, f in enumerate(getattr(self, 'fused', []) or [], 1):
+                tp = f.get('top')
+                if not tp:
+                    continue
+                base = (0, 255, 120) if f.get('views') == 'top+side' else (0, 170, 255)
+                cls = tp.get('class_name') or tp.get('shape') or '待登记'
+                color_txt = tp.get('color') or ''
+                text = '#%d %s%s' % (idx, str(cls)[:14],
+                                     ('/' + color_txt) if color_txt else '')
+                b = tp.get('bbox')
+                if b:
+                    try:
+                        x, y, w, h = [int(v) for v in b]
+                    except (TypeError, ValueError):
+                        x = y = w = h = 0
+                    if w > 0 and h > 0:
+                        cv2.rectangle(img, (x, y), (x + w, y + h), base, 2)
+                        labels.append((x, max(16, y - 24), text, base))
+                        continue
+                labels.append((6, 24 * idx, text, base))
+
+            # 中文标签：PIL 画
+            if labels:
+                from PIL import Image as _Img, ImageDraw as _Draw, ImageFont as _Font
+                pil = _Img.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                drw = _Draw.Draw(pil)
+                font = None
+                for cand in (r'C:\Windows\Fonts\msyh.ttc', r'C:\Windows\Fonts\simhei.ttf'):
+                    try:
+                        font = _Font.truetype(cand, 18)
+                        break
+                    except Exception:            # noqa: BLE001
+                        continue
+                for (x, y, text, bgr) in labels:
+                    rgb = (int(bgr[2]), int(bgr[1]), int(bgr[0]))
+                    drw.text((max(0, x + 1), max(0, y + 1)), text, font=font, fill=(0, 0, 0))
+                    drw.text((max(0, x), max(0, y)), text, font=font, fill=rgb)
+                img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+
+            if size and int(size) != W:
+                img = cv2.resize(img, (int(size), int(size)))
+            return img
+        except Exception:                       # noqa: BLE001
+            return None
+
     def sync_live(self):
         if not hasattr(self, 'live_btn'):
             return
