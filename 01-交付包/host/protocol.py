@@ -78,6 +78,10 @@ EVENT_TYPES = ("task", "latch", "link", "reset")
 #: 固件参数 gripper_ready_deg 出厂默认仍是 150，上位机连上时会 param_set 成这个值。
 GRIPPER_READY_DEG = 158
 
+#: 闭环 goto 的默认转速（圈/分，按轴分）。实测 rpm 就是速度，
+#: 驱动器自己封顶约 274 圈/分。Z 要快（满行程 3 s），X/Y 慢一点不得不快不震。
+GOTO_RPM_BY_AXIS = {1: 1500, 3: 300, 4: 120, 5: 300}
+
 PARAM_DEFAULTS: Dict[str, object] = {
     "speed_rpm": 60,
     "acc": 1,

@@ -285,7 +285,11 @@ class HostClient:
         """
         # 速度：实测 rpm 直接决定速度（驱动器自己封顶约 274 圈/分）。
         # 不传 rpm 时以前走固件默认 60，Z 满行程要 72 s；这里统一给 GOTO_DEFAULT_RPM。
-        speed = int(GOTO_DEFAULT_RPM if rpm is None else rpm) or 1
+        if rpm is None:
+            speed = int(P.GOTO_RPM_BY_AXIS.get(int(axis), GOTO_DEFAULT_RPM))
+        else:
+            speed = int(rpm)
+        speed = speed or 1
         args: List[object] = [
             int(axis),
             int(pulses),

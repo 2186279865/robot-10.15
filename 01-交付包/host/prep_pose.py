@@ -98,7 +98,9 @@ def save(cfg: Dict[str, object], path: Optional[Path] = None) -> Path:
 
 
 #: 实测转速上限（EMM 驱动器侧限速，rpm 写多大都差不多）：约 50 圈/分。
-MAX_STEP_PULSES = {AXIS_Z: 200000, AXIS_Y: 20000, 4: 20000, 3: 6000}   # 单步位移硬上限（脉冲）
+#: 单步位移硬上限（脉冲）：只用来拦"位置基准错了还闷头走"的撞机，不是行程。
+#: 实测 Y 从抓取位回 P0 要 ~5.6 万脉冲，所以 Y 上限按 12 万给（真正的行程由 limits.json 拦）。
+MAX_STEP_PULSES = {AXIS_Z: 200000, AXIS_Y: 120000, 4: 30000, 3: 6000}
 EFFECTIVE_RPM_CAP = 50
 
 
@@ -166,12 +168,17 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
     except Exception:                                 # noqa: BLE001
         pass
 
+    def rpm_for(a: int) -> int:
+        if isinstance(rpm, dict):
+            return int(rpm.get(int(a), 50))
+        return int(rpm)
+
     axes = [int(a) for a in (order or list(targets.keys()))]
     for axis in axes:
         if axis not in targets:
             continue
         target = int(targets[axis])
-        rpm_i = int(rpm)
+        rpm_i = rpm_for(axis)
         label = '%s 目标 %+d 脉冲' % (AXIS_LABEL.get(axis, axis), target)
         pulses = target
         cur_counts = None if counts is None else counts.get(axis)
