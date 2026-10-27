@@ -635,7 +635,7 @@ class CalibTab(ttk.Frame):
                 client, count,
                 recognize=vision.recognize_safe,
                 log=self.say,
-                pos_source=self._pos_source(),
+                pos_source=self._pos_source,
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
             )
