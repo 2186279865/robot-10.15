@@ -30,6 +30,11 @@ def _mask_of(kind, size=240):
     elif kind == 'penta':
         cv2.fillPoly(img, [cv2.convexHull(np.array(
             [[120, 40], [200, 110], [175, 200], [65, 200], [40, 110]]))], 255)
+    elif kind == 'rhombus':
+        cv2.fillPoly(img, [np.array([[130, 60], [215, 130], [130, 200], [45, 130]])], 255)
+    elif kind == 'square45':
+        cv2.fillPoly(img, [cv2.convexHull(np.array(
+            [[130, 40], [220, 130], [130, 220], [40, 130]]))], 255)
     elif kind == 'hexa':
         cv2.fillPoly(img, [cv2.convexHull(np.array(
             [[70, 60], [170, 60], [210, 120], [170, 180], [70, 180], [30, 120]]))], 255)
@@ -79,6 +84,18 @@ class ShapeChainTest(unittest.TestCase):
         name, conf, feats, _ = self._classify('hexa')
         self.assertEqual(name, SF.SHAPE_PRISM, msg='feats=%s' % SF.describe(feats))
         self.assertLess(feats['circ'], 0.85)
+
+    def test_rhombus(self):
+        """菱形顶面：bbox 填充率≈0.5、rect_fit≈0.8，必须判菱体而不是六棱/其他。"""
+        name, conf, feats, _ = self._classify('rhombus')
+        self.assertEqual(name, SF.SHAPE_RHOMBUS, msg=SF.describe(feats))
+        self.assertLessEqual(feats['extent'], 0.66)
+
+    def test_rotated_square_is_still_cube(self):
+        """正方形转 45° 看起来像菱形，但 rect_fit≈1.0，必须仍判正方体。"""
+        name, _, feats, _ = self._classify('square45')
+        self.assertEqual(name, SF.SHAPE_CUBE, msg=SF.describe(feats))
+        self.assertGreater(feats['rect_fit'], 0.95)
 
     def test_tiny_mask_is_other(self):
         mask = np.zeros((60, 60), np.uint8)

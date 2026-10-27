@@ -27,6 +27,11 @@ DEFAULTS = {
     'solidity_rect': 0.97,
     'cube_tol': 0.12,        # 边长差 ≤ 12% → 正方体
     'ratio_long': 1.30,      # 毫米长宽比 ≥ → 长方体
+    'rhombus_rect_min': 0.55,  # 菱形的最小外接矩形填充率下限
+    'rhombus_rect_max': 0.92,
+    'rhombus_extent_max': 0.68,  # 菱形 bbox 填充上限（五棱≈0.69、圆/六棱≈0.77 不会被吃到）  # 上限（方形/长方形 rect_fit≈1.0，不会被误判）
+    'prism_rect_min': 0.72,      # 多棱柱的最小外接矩形填充率下限
+    'prism_extent_min': 0.66,    # 多棱柱的 bbox 填充率下限（排除菱形/三角形）
     'sphere_curv': 0.80,     # 副摄顶部收窄率 < → 球
     'tray_mm': 200.0,        # 托盘内框边长（mm），用于 px→mm；700px 对应该值
 }
@@ -39,6 +44,7 @@ SHAPE_ROUND = '圆柱/圆形'
 SHAPE_SPHERE = '球'
 SHAPE_CUBE = '正方体/正方形'
 SHAPE_BOX = '长方体/长方形'
+SHAPE_RHOMBUS = '菱体/菱形'
 SHAPE_OTHER = '其他几何体'
 
 
@@ -147,6 +153,19 @@ def classify_shape(feats, side_curv=None, cfg=None):
         why.append('顶点=5')
         return SHAPE_PENTA, 0.82, why
 
+    # 菱形顶面：bbox 填充率只有约 0.5（方形=1.0、圆=0.79、五棱≈0.69、六棱≈0.75），
+    # 且最小外接矩形填充率也低。SAM 边缘毛刺常把顶点数算成 6~8，所以这里**不依赖 nv**
+    # （只要 nv>=4，排除三角形）。
+    extent = float(f.get('extent') or 0.0)
+    # SAM 边缘毛刺会把菱形顶点算成 5~6 个，所以放宽到 nv>=4；
+    # 真正的区分靠两条：bbox 填充率低（菱形≈0.5）+ 最小外接矩形也填不满（<0.92）。
+    # 旋转 45° 的正方形 rect_fit≈1.0、extent≈0.5，靠 rect_fit 上限排除。
+    if (nv >= 4 and solid >= 0.90
+            and 0.40 <= rect_fit <= float(c['rhombus_rect_max'])
+            and extent <= float(c['rhombus_extent_max'])):
+        why.append('bbox 填充 %.2f、最小外接矩形填充 %.2f（菱形/风筝形）' % (extent, rect_fit))
+        return SHAPE_RHOMBUS, 0.80, why
+
     # 先判圆：圆度够高就是圆（球/圆柱），不要被"顶点数=8"骗成多棱柱
     if circ >= float(c['circ_round']) and solid >= float(c['solidity_round']):
         why.append('圆度 %.2f' % circ)
@@ -155,9 +174,12 @@ def classify_shape(feats, side_curv=None, cfg=None):
             return SHAPE_SPHERE, 0.88, why
         return SHAPE_ROUND, min(0.95, 0.60 + 0.35 * min(1.0, circ)), why
 
-    # 圆度不够但顶点多、实心度高 → 六棱/多棱柱
-    if nv >= 6 and solid >= 0.90:
-        why.append('顶点=%d 圆度 %.2f（不足圆）' % (nv, circ))
+    # 圆度不够但顶点多、实心度高、bbox 填充率也高 → 六棱/多棱柱
+    # （多棱柱 extent≈0.75、rect_fit≈0.87；菱形 extent≈0.5 已在上面被拿走）
+    if (5 <= nv <= 8 and solid >= 0.93
+            and rect_fit >= float(c['prism_rect_min'])
+            and extent >= float(c['prism_extent_min'])):
+        why.append('顶点=%d 圆度 %.2f bbox 填充 %.2f' % (nv, circ, extent))
         return SHAPE_PRISM, 0.78, why
 
     if rect_fit >= float(c['rect_fit']) and solid >= float(c['solidity_rect']):
