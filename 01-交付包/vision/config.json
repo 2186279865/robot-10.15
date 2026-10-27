@@ -8,8 +8,8 @@
     "host": "",
     "img_port": 5057,
     "cam_map": {
-      "1": 0,
-      "2": 1
+      "1": 1,
+      "2": 0
     }
   },
   "frames_for_vote": 5,
