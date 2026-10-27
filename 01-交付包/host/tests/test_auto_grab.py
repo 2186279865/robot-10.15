@@ -115,11 +115,12 @@ class SequenceTest(unittest.TestCase):
         self.assertAlmostEqual(result['elapsed'] >= 0, True)
 
         axes = [c[1][0] for c in client.gotos()]
-        # 顺序：Z 抬顶 → X/Y 对准 → Z 降底 → Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0
-        self.assertEqual(axes, [1, 4, 5, 1, 1, 4, 5, 1, 5])
+        # 顺序（固定路线硬规矩：穿通道时 Z 必须在底部）：
+        # Y 进通道 → Z 抬顶 → X/Y 对准 → Z 降底 → Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0
+        self.assertEqual(axes, [5, 1, 4, 5, 1, 1, 4, 5, 1, 5])
 
         z_gotos = [c[1][1] for c in client.gotos() if c[1][0] == 1]
-        self.assertEqual(z_gotos[0], AG.Z_UP)      # 先抬到顶
+        self.assertEqual(z_gotos[0], AG.Z_UP)      # 到通道末端后抬到顶
         self.assertEqual(z_gotos[1], AG.Z_DOWN - AG.Z_UP)   # 降到抓取位（增量）
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])

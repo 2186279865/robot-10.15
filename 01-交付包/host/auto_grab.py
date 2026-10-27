@@ -151,21 +151,25 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                                first.get('code') or '', first.get('text') or ''))
 
     t0 = time.perf_counter()
-    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 1 Z 抬顶
-    move({AXIS_X: x_pulse, AXIS_Y: y_pulse}, [AXIS_X, AXIS_Y])   # 2 到物块上方
-    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 3 Z 降底
+    # 固定路线的硬规矩：**穿通道时 Z 必须在底部**（通道净高不够），
+    # 所以出去是"先 Y 后 Z"、回来是"先 Z 后 Y"。这里第一下必须是 Y，
+    # 不能在初始位先把 Z 抬起来（会顶到托盘/横梁）。
+    move({AXIS_Y: P1_Y}, [AXIS_Y])                      # 1 Y 进通道（Z 仍在底）
+    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 2 在通道末端抬到顶
+    move({AXIS_X: x_pulse, AXIS_Y: y_pulse}, [AXIS_X, AXIS_Y])   # 3 到物块上方
+    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 4 Z 降底 = 抓取位
     say('夹紧 135°')
-    client.send('gripper', 'grab', timeout_ms=2000)     # 4 夹紧
+    client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
     time.sleep(SETTLE_GRAB_MS / 1000.0)
-    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 5 抬起
-    move({AXIS_X: 0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y])   # 6 只动 X/Y 回 P1
-    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 7 在 P1 降到底
-    move({AXIS_Y: P0_Y}, [AXIS_Y])                      # 8 退回 P0
+    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
+    move({AXIS_X: 0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y])   # 7 只动 X/Y 回 P1（高位）
+    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
+    move({AXIS_Y: P0_Y}, [AXIS_Y])                      # 9 再退 Y 回 P0
     say('转盘 %.0f°' % TRAY_DEG)
-    client.angle(AXIS_TRAY, TRAY_DEG)                   # 9 空盒到落料位
+    client.angle(AXIS_TRAY, TRAY_DEG)                   # 10 空盒到落料位
     time.sleep(0.5)
     say('松爪 180° → 等待落盒 → 回预备 158°')
-    client.send('gripper', 'open', timeout_ms=2000)     # 10 松爪
+    client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)
     client.send('gripper', 'ready', timeout_ms=2000)
     time.sleep(SETTLE_READY_MS / 1000.0)
