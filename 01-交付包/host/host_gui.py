@@ -177,22 +177,24 @@ class AxisPanel:
             ("速度模式", self.send_speed),
             ("停止", self.send_stop),
             ("使能", lambda: self.send_enable(1)),
-            ("取消使能", lambda: self.send_enable(0)),
-            ("解堵转", self.send_stall_clear),
-            ("位置清零", self.send_zero),
         ):
-            ttk.Button(buttons, text=text, width=8, command=command).pack(side="left", padx=1)
+            ttk.Button(buttons, text=text, width=9, command=command).pack(side="left", padx=1)
+        # 其余（查速度/查位置/查状态/解堵转/取消使能/位置清零）收进「⋯ 高级」菜单
+        self.adv_menu = tk.Menu(buttons, tearoff=0)
+        self.adv_menu.add_command(label="查速度", command=lambda: self.query("vel"))
+        self.adv_menu.add_command(label="查位置", command=lambda: self.query("pos"))
+        self.adv_menu.add_command(label="查状态", command=lambda: self.query("flag"))
+        self.adv_menu.add_separator()
+        self.adv_menu.add_command(label="解堵转", command=self.send_stall_clear)
+        self.adv_menu.add_command(label="取消使能", command=lambda: self.send_enable(0))
+        self.adv_menu.add_separator()
+        self.adv_menu.add_command(label="位置清零（危险：只在 P0）", command=self.send_zero)
+        ttk.Button(buttons, text="⋯ 高级", width=9,
+                   command=lambda: self.adv_menu.post(
+                       buttons.winfo_pointerx(), buttons.winfo_pointery())
+                   ).pack(side="left", padx=1)
 
-        buttons2 = ttk.Frame(frame)
-        buttons2.pack(fill="x", padx=4, pady=2)
-        for text, command in (
-            ("查速度", lambda: self.query("vel")),
-            ("查位置", lambda: self.query("pos")),
-            ("查状态", lambda: self.query("flag")),
-        ):
-            ttk.Button(buttons2, text=text, width=8, command=command).pack(side="left", padx=1)
-
-        self.target_label = ttk.Label(frame, text="目标位置：—", foreground="#444444")
+        self.target_label = ttk.Label(frame, text="目标：—", foreground="#444444")
         self.target_label.pack(fill="x", padx=4, pady=(2, 0))
         self.ref_label = ttk.Label(frame, text="位置基准：未建立", foreground="#8a5a00")
         self.ref_label.pack(fill="x", padx=4)
@@ -514,9 +516,12 @@ class App:
         self.notebook.pack(fill="both", expand=True, padx=6, pady=4)
 
         axes_tab = ttk.Frame(self.notebook)
-        self.notebook.add(axes_tab, text="四轴控制")
+        self.notebook.add(axes_tab, text="运动控制")
         for column in range(2):
             axes_tab.columnconfigure(column, weight=1)
+        # 四轴卡片按内容自高，不抢行高（否则第二排 X/Y 会被挤出窗口）
+        for _row in (1, 2):
+            axes_tab.rowconfigure(_row, weight=0)
         self._build_axes_toolbar(axes_tab)
         for index, addr in enumerate(AXIS_LABELS):
             panel = AxisPanel(axes_tab, self, addr)
@@ -524,11 +529,13 @@ class App:
                              padx=4, pady=4)
             self.axes[addr] = panel
         base_row = (len(AXIS_LABELS) + 1) // 2 + 1
+        # 夹爪面板合并进本页右栏（原来独立的「舵机夹爪」页取消）
+        grip_frame = ttk.Frame(axes_tab)
+        grip_frame.grid(row=1, column=2, rowspan=base_row - 1, sticky="nsew",
+                        padx=(10, 6), pady=6)
+        self._build_gripper(grip_frame)
         self._build_approach(axes_tab, row=base_row)
         self._build_journey(axes_tab, row=base_row + 1)
-        gripper_tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(gripper_tab, text="舵机夹爪")
-        self._build_gripper(gripper_tab)
 
         param_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(param_tab, text="参数")
@@ -551,7 +558,7 @@ class App:
     # -- 四轴页顶部：状态总览 + 固定位置按钮 --------------------------------
     def _build_axes_toolbar(self, parent: ttk.Frame) -> None:
         box = ttk.Frame(parent)
-        box.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=(4, 2))
+        box.grid(row=0, column=0, columnspan=3, sticky="ew", padx=4, pady=(4, 2))
 
         ov = ttk.Frame(box)
         ov.pack(fill="x")
@@ -609,7 +616,7 @@ class App:
     def _build_approach(self, parent: ttk.Frame, row: int) -> None:
         frame = ttk.LabelFrame(
             parent, text="接近段示教（X/Y/Z：整机上电起点 → 抓取位，托盘不参与）")
-        frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 8))
+        frame.grid(row=row, column=0, columnspan=3, sticky="ew", padx=4, pady=(6, 8))
         self._approach_frame = frame
         line1 = ttk.Frame(frame)
         line1.pack(fill="x", padx=6, pady=4)
@@ -808,46 +815,50 @@ class App:
         grab_default = int(P.PARAM_DEFAULTS["gripper_grab_deg"])
         open_default = int(P.PARAM_DEFAULTS["gripper_open_deg"])
         ready_default = int(P.GRIPPER_READY_DEG)
+        ttk.Label(parent, text="夹爪（舵机）", font=("Microsoft YaHei", 10, "bold")
+                  ).pack(anchor="w")
         ttk.Label(
             parent,
-            text=(
-                "夹爪三档：%d°=夹紧、%d°=预备位（连上后自动打到这里）、%d°=完全张开（上电/松开）"
-                "；每次单步 %d°（以固件 GRIPPER_* / 参数表为准，方向不要反转）"
-                % (
-                    grab_default,
-                    ready_default,
-                    open_default,
-                    int(P.PARAM_DEFAULTS["gripper_step_deg"]),
-                )
-            ),
+            text="%d° 夹紧 ｜ %d° 预备（连上自动打到这里）｜ %d° 松开"
+                 % (grab_default, ready_default, open_default),
             foreground="#444444",
         ).pack(anchor="w")
         buttons = ttk.Frame(parent)
-        buttons.pack(anchor="w", pady=6)
+        buttons.pack(anchor="w", pady=(6, 2))
         self.gripper_buttons = {}
-        for text, action in (
-            ("夹紧", "grab"),
-            ("预备(%d)" % ready_default, "ready"),
-            ("松开", "open"),
-            ("收紧一步", "step_grab"),
-            ("松开一步", "step_release"),
+        for text, action, width in (
+            ("夹紧", "grab", 8),
+            ("预备(%d)" % ready_default, "ready", 9),
+            ("松开", "open", 8),
         ):
             button = ttk.Button(
-                buttons, text=text, width=10, command=lambda a=action: self.send_gripper(a)
+                buttons, text=text, width=width, command=lambda a=action: self.send_gripper(a)
             )
             button.pack(side="left", padx=2)
             self.gripper_buttons[action] = button
+        # 单步微调收进小菜单，避免占宽
+        self.grip_menu = tk.Menu(buttons, tearoff=0)
+        self.grip_menu.add_command(label="收紧一步（%d°）"
+                                   % int(P.PARAM_DEFAULTS["gripper_step_deg"]),
+                                   command=lambda: self.send_gripper("step_grab"))
+        self.grip_menu.add_command(label="松开一步（%d°）"
+                                   % int(P.PARAM_DEFAULTS["gripper_step_deg"]),
+                                   command=lambda: self.send_gripper("step_release"))
+        ttk.Button(buttons, text="⋯", width=3,
+                   command=lambda: self.grip_menu.post(
+                       buttons.winfo_pointerx(), buttons.winfo_pointery())
+                   ).pack(side="left", padx=(2, 0))
 
         angle_row = ttk.Frame(parent)
         angle_row.pack(anchor="w", pady=6)
-        ttk.Label(angle_row, text="指定角度 %d~%d：" % (grab_default, open_default)).pack(side="left")
+        ttk.Label(angle_row, text="角度 %d~%d：" % (grab_default, open_default)).pack(side="left")
         self.servo_angle = tk.IntVar(value=open_default)
         ttk.Spinbox(
             angle_row, from_=grab_default, to=open_default, width=6, textvariable=self.servo_angle
         ).pack(side="left")
         ttk.Button(angle_row, text="下发角度", command=self.send_servo_angle).pack(side="left", padx=6)
         ttk.Label(
-            angle_row, text="（直接下发角度会绕过夹爪内部角度，仅调试用）", foreground="#888888"
+            angle_row, text="（调试用）", foreground="#888888"
         ).pack(side="left")
 
         self.gripper_status = ttk.Label(parent, text="状态：未知（软件目标值，无到位传感器）")
@@ -1398,7 +1409,7 @@ class App:
     def _build_journey(self, parent: ttk.Frame, row: int) -> None:
         box = ttk.LabelFrame(
             parent, text="回上电初始位（自动记录本次上电后的全部移动，四轴都记）")
-        box.grid(row=row, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
+        box.grid(row=row, column=0, columnspan=3, sticky="we", padx=6, pady=(0, 6))
         self._journey_frame = box
         line = ttk.Frame(box)
         line.pack(fill="x", padx=6, pady=(4, 2))

@@ -102,13 +102,8 @@ class CalibTab(ttk.Frame):
 
         bar2 = ttk.Frame(self)
         bar2.pack(fill='x', pady=(0, 6))
-        for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
-                          ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
-            ttk.Button(bar2, text=text, width=10,
-                       command=lambda k=key: self.on_preset(k)
-                       ).pack(side='left', padx=(0, 4))
         ttk.Button(bar2, text='刷新标注点', command=self.on_marks_refresh
-                   ).pack(side='left', padx=(6, 6))
+                   ).pack(side='left', padx=(0, 6))
         ttk.Button(bar2, text='记录爪位', command=self.on_marks_record
                    ).pack(side='left', padx=(0, 6))
         ttk.Button(bar2, text='清除这个爪位', command=self.on_marks_clearrow
@@ -122,6 +117,9 @@ class CalibTab(ttk.Frame):
         self.marks_label.pack(anchor='w')
         self.pos_label = ttk.Label(self, text='软位置：X=+0 Y=+0 脉冲', foreground='#0a3d91')
         self.pos_label.pack(anchor='w', pady=(2, 0))
+        self.calib_status = ttk.Label(self, text='标定状态：—', foreground='#4a4a4a')
+        self.calib_status.pack(anchor='w', pady=(2, 0))
+        self.refresh_calib_status()
 
         ttk.Label(self, text='标注点（P 编号 = new_eye 里点的顺序；X/Y 是记录的爪位脉冲）'
                   ).pack(anchor='w', pady=(8, 0))
@@ -184,6 +182,51 @@ class CalibTab(ttk.Frame):
         self.log.configure(yscrollcommand=sb2.set)
         self.log.pack(side='left', fill='both', expand=True)
         sb2.pack(side='right', fill='y')
+
+    # ------------------------------------------------ 标定状态（读文件算残差）
+    def refresh_calib_status(self):
+        """一行摘要：抓取点组数 / 覆盖范围 / 残差 / 更新时间。"""
+        try:
+            import json
+            from pathlib import Path as _P
+            root = _P(__file__).resolve().parent.parent
+            pairs_path = root / 'vision' / 'runtime' / 'grasp_pairs.json'
+            calib_path = root / 'vision' / 'tray_calib.json'
+            n = 0
+            us = []
+            vs = []
+            if pairs_path.exists():
+                data = json.loads(pairs_path.read_text(encoding='utf-8'))
+                pairs = data if isinstance(data, list) else data.get('pairs', [])
+                n = len(pairs)
+                for item in pairs:
+                    try:
+                        us.append(float(item.get('u')))
+                        vs.append(float(item.get('v')))
+                    except (TypeError, ValueError):
+                        continue
+            updated = ''
+            if calib_path.exists():
+                import datetime
+                ts = calib_path.stat().st_mtime
+                updated = datetime.datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')
+            parts = ['标定状态：抓取点 %d 组' % n]
+            if us and vs:
+                parts.append('u %.2f–%.2f / v %.2f–%.2f'
+                             % (min(us), max(us), min(vs), max(vs)))
+            if n < 3:
+                parts.append('⚠ 少于 3 组，无法求解')
+            if updated:
+                parts.append('tray_calib 更新 ' + updated)
+            self.calib_status.configure(
+                text='｜'.join(parts),
+                foreground='#b26a00' if n < 3 else '#0a6b0a')
+        except Exception as exc:                # noqa: BLE001
+            try:
+                self.calib_status.configure(text='标定状态：读取失败 %s' % exc,
+                                            foreground='#b00020')
+            except Exception:                   # noqa: BLE001
+                pass
 
     # ------------------------------------------------- 固定位置按钮（回 P1 等）
     PRESETS = {
