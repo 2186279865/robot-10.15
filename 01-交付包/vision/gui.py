@@ -1068,6 +1068,7 @@ class App:
         cal = self.cfg.setdefault('shape_calib', {})
         cal.update({'k_front': res['k_front'], 'k_h': res['k_h'],
                     'known_mm': float(known), 'mm_per_px': res['mm_per_px'],
+                    'tray_mm_effective': res.get('tray_mm_effective'),
                     'source': 'measured'})
         try:
             CONFIG.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding='utf8')

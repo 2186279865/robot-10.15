@@ -37,11 +37,13 @@ class CalibMeasureTest(unittest.TestCase):
         self.assertFalse(res['ok'])
 
     def test_wrong_tray_mm_warns(self):
-        # tray_mm 填成 200（外框其实是 160）→ 量出的宽度明显偏大，应给警告
+        # tray_mm 填错（200）已经不影响结果：mm/px 由已知方块宽度反推
         res = SC.measure((0, 0, 109.4, 109.4), (0, 0, 109.4, 109.4),
                          tray_mm=200.0, known_mm=25.0)
-        self.assertFalse(res['ok'])
-        self.assertTrue(any('tray_mm' in w for w in res['warn']))
+        self.assertTrue(res['ok'])
+        self.assertAlmostEqual(res['mm_per_px'], 25.0 / 109.4, places=4)
+        self.assertAlmostEqual(res['tray_mm_effective'], 700 * 25.0 / 109.4, places=1)
+        self.assertEqual(res['scale_source'], 'known_width')
 
     def test_fmt_has_all_fields(self):
         res = SC.measure((0, 0, 110, 130), (0, 0, 110, 115), tray_mm=160.0, known_mm=25.0)

@@ -147,9 +147,12 @@ def _shape_of(mask, contour, cfg=None):
 
 def _shape_of_v2(mask, contour, cfg=None):
     """几何基元版形状判定（毫米尺寸 + 容错链），细节见 vision/shape_features.py。"""
-    tray_mm = float((cfg or {}).get('tray_mm') or 200.0)
-    mm_per_px = tray_mm / 700.0
     cal = (cfg or {}).get('shape_calib') or {}
+    if cal.get('mm_per_px'):
+        mm_per_px = float(cal['mm_per_px'])          # 形状标定实测值优先
+    else:
+        tray_mm = float((cfg or {}).get('tray_mm') or 200.0)
+        mm_per_px = tray_mm / 700.0
     k_front = float(cal.get('k_front') or 1.0)
     feats = _SF.features(mask, contour, mm_per_px=mm_per_px, cfg=cfg, depth_scale=k_front)
     name, conf, why = _SF.classify_shape(feats, cfg=cfg)
