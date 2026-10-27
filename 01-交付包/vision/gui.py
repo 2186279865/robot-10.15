@@ -1010,16 +1010,38 @@ class App:
                                       minvalue=5.0, maxvalue=200.0)
         if not known:
             return
-        try:
-            top, _tw = self.detect_targets(tf, 'top')
-            side, _sw = self.detect_targets(sf, 'side')
-        except Exception as exc:                       # noqa: BLE001
-            messagebox.showerror('形状标定', '分割失败：%s' % exc)
-            return
+        # 实时分割会一直占着 SAM，标定时先停掉，避免两边抢（会出现 0 个目标）
+        if getattr(self, 'live', False):
+            try:
+                self.toggle_live()
+                self.note('[形状标定] 已暂停实时分割')
+            except Exception:                          # noqa: BLE001
+                pass
+        top, side, tw_n, sw_n = [], [], 0, 0
+        for attempt in range(3):
+            try:
+                tf = self.a.get()
+                sf = self.bstream.get()
+                top, _tw = self.detect_targets(tf, 'top')
+                side, _sw = self.detect_targets(sf, 'side')
+            except Exception as exc:                   # noqa: BLE001
+                messagebox.showerror('形状标定', '分割失败：%s' % exc)
+                return
+            tw_n, sw_n = len(top), len(side)
+            self.note('[形状标定] 第 %d 次：顶视 %d 个目标，副摄 %d 个目标' % (attempt + 1, tw_n, sw_n))
+            if top and side:
+                break
+            time.sleep(0.35)
         if not top or not side:
-            messagebox.showwarning('形状标定',
-                                   '顶视/副摄至少一路没找到目标。\n'
-                                   '把方块单独放在托盘中间、确认两路都看得到再试。')
+            messagebox.showwarning(
+                '形状标定：没分割到目标',
+                '本次：顶视 %d 个目标，副摄 %d 个目标。\n\n'
+                '请依次确认：\n'
+                '1) 方块是否放在托盘四点框**里面**（框外会被透视校正裁掉）\n'
+                '2) 两路画面是否都有图（先点「打开双画面」等 2 秒）\n'
+                '3) 方块是否单独摆放、不要和其它物块叠在一起\n'
+                '4) 实时分割是否已停（本按钮会自动暂停它）\n'
+                '确认后不用重启，直接再点一次「形状标定」。' % (tw_n, sw_n))
             return
         t_item = max(top, key=lambda z: z.get('area_px') or 0)
         s_item = max(side, key=lambda z: z.get('area_px') or 0)
