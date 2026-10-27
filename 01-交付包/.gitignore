@@ -28,3 +28,8 @@ vision/tray_calib.*.bak.json
 
 # 抓取点单测产生的临时目录
 *host/grasp_io_*/
+
+# 标定/限位自动备份
+*host/limits.*.bak.json
+*vision/tray_calib.*.bak.json
+*vision/tray_calib.tmp.json
