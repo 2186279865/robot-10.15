@@ -1020,6 +1020,8 @@ class App:
             hints.append("② 电脑和派是否同一 WiFi；`ping <派IP>`、"
                          f"`Test-NetConnection <派IP> -Port 5058`")
             hints.append("③ 端口被防火墙挡：管理员跑 `10.21\\net\\firewall-allow.ps1`")
+            hints.append("④ 5058 是独占控制口：另一台上位机还在占用时会被拒绝；"
+                         "关掉那台或等 10 秒自动释放，只看回包可连只读观察口 5054")
         else:
             hints.append("① 串口是否被别的程序占用（MobaXterm / Keil / 串口助手）")
             hints.append("② 设备是否插好、下拉框里的 COM 号是否选对")

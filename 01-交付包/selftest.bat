@@ -53,7 +53,7 @@ rem  Spawn detached through PowerShell: a plain "start" would let the agent
 rem  inherit this console, so a caller piping this script's output would never
 rem  see EOF. Detached + redirected also keeps the log for debugging.
 if not exist "runtime" mkdir "runtime"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath '%PY%' -ArgumentList 'orangepi\pi\pi_agent.py','--fake-camera','--fake-serial','--img-port','15057','--ser-port','15058','--no-discovery' -PassThru -WindowStyle Hidden -RedirectStandardOutput 'runtime\pi_agent.selftest.log' -RedirectStandardError 'runtime\pi_agent.selftest.err'; $p.Id | Out-File -FilePath 'runtime\pi_agent.pid' -Encoding ascii"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath '%PY%' -ArgumentList 'orangepi\pi\pi_agent.py','--fake-camera','--fake-serial','--img-port','15057','--ser-port','15058','--observer-port','15054','--no-bridge-exclusive','--no-discovery' -PassThru -WindowStyle Hidden -RedirectStandardOutput 'runtime\pi_agent.selftest.log' -RedirectStandardError 'runtime\pi_agent.selftest.err'; $p.Id | Out-File -FilePath 'runtime\pi_agent.pid' -Encoding ascii"
 "%PY%" tests\wait_ports.py 15057 15058
 set "RC=%errorlevel%"
 set "NAME=fake Pi agent up"

@@ -20,3 +20,8 @@ host/gui_smoke_*/
 vision/runtime/calib_marks.json
 vision/runtime/latest_targets.json
 vision/calib_marks.json
+host/units_*/
+host/tray_state.json
+host/_tmp/
+tools/__pycache__/
+vision/tray_calib.*.bak.json

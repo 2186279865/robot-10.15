@@ -94,6 +94,8 @@ DEFAULTS = {
     'host': '0.0.0.0',
     'img_port': wire.IMG_PORT,
     'ser_port': wire.SER_PORT,
+    'observer_port': wire.OBSERVER_PORT,
+    'bridge_exclusive': True,
     'discovery_port': wire.DISCOVERY_PORT,
     'serial': '/dev/ttyACM0',
     'baud': 115200,
@@ -1327,72 +1329,116 @@ class RealSerialTransport:
 class SerialBridge:
     """串口桥：TCP 字节流 ↔ 串口字节流，双向透明。
 
-    多客户端策略：允许并发。笔记本→串口方向加锁串行；串口→笔记本方向广播。
+    端口策略（防止两台上位机互相抢控制权）：
+      * 控制口 `--ser-port`（默认 5058）：同一时刻只允许 **一个** 控制方；
+        独占模式（默认）下第二个控制连接会被立即关闭，并在日志里写清原因；
+        只有控制方能往串口写字节。
+      * 观察口 `--observer-port`（默认 5054，0=关闭）：只读旁观——
+        能收到串口回包的广播，但发来的任何字节都被丢弃（不进串口）。
+    串口 → 笔记本方向对两类连接都广播。
     """
 
-    def __init__(self, bind_host, port, transport, log, stop_event):
+    def __init__(self, bind_host, port, transport, log, stop_event,
+                 exclusive=True, observer_port=0):
         self.bind_host = bind_host
         self.port = int(port)
+        self.observer_port = int(observer_port or 0)
+        self.exclusive = bool(exclusive)
         self.transport = transport
         self.log = log
         self.stop_event = stop_event
         self.sock = None
+        self.obs_sock = None
         self._accept_thread = None
+        self._obs_accept_thread = None
         self._pump_thread = None
         self._wd_thread = None
-        self._clients = []
+        self._clients = []          # [(conn, addr, readonly)]
         self._clients_lock = threading.Lock()
+        self._owner = None          # 当前控制方 conn
+        self._owner_last_rx = time.monotonic()
         self.last_laptop_rx = time.monotonic()
         self.guarded = False
         self._guard_lock = threading.Lock()
         self.tx_bytes = 0
         self.rx_bytes = 0
+        self.obs_bytes_dropped = 0
+        self.rejected_controls = 0
         self.stop_frames_sent = 0
         self.lockdown_count = 0
 
     # -- 生命周期 ---------------------------------------------------------
-    def start(self):
+    def _listen(self, port, tag):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((self.bind_host, self.port))
-        s.listen(8)
+        try:
+            s.bind((self.bind_host, int(port)))
+            s.listen(8)
+        except OSError as exc:
+            self.log('ser', '%s 端口 %d 绑定失败（%s），该端口关闭' % (tag, port, exc))
+            try:
+                s.close()
+            except OSError:
+                pass
+            return None
         s.settimeout(0.5)
-        self.sock = s
+        return s
+
+    def start(self):
+        self.sock = self._listen(self.port, '串口桥控制口')
+        if self.sock is None:
+            return
         self._accept_thread = threading.Thread(target=self._accept_loop,
+                                               args=(self.sock, False),
                                                name='ser-accept', daemon=True)
         self._accept_thread.start()
+        if self.observer_port:
+            self.obs_sock = self._listen(self.observer_port, '串口观察口')
+            if self.obs_sock is not None:
+                self._obs_accept_thread = threading.Thread(
+                    target=self._accept_loop, args=(self.obs_sock, True),
+                    name='ser-accept-obs', daemon=True)
+                self._obs_accept_thread.start()
+                self.log('ser', '观察口已监听 %s:%d（只读：能看回包，不能发命令）'
+                         % (self.bind_host, self.observer_port))
         self._pump_thread = threading.Thread(target=self._pump_loop,
                                              name='ser-pump', daemon=True)
         self._pump_thread.start()
         self._wd_thread = threading.Thread(target=self._watchdog_loop,
                                            name='ser-watchdog', daemon=True)
         self._wd_thread.start()
-        self.log('ser', '串口桥已监听 %s:%d（多客户端允许并发，串口回包广播）'
-                 % (self.bind_host, self.port))
+        self.log('ser', '串口桥已监听 %s:%d（%s）'
+                 % (self.bind_host, self.port,
+                    '同一时刻只允许一个控制方，第二个连接会被拒绝'
+                    if self.exclusive else '允许多个控制方并发'))
 
     def stop(self):
-        sock, self.sock = self.sock, None
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+        for attr in ('sock', 'obs_sock'):
+            sock = getattr(self, attr)
+            setattr(self, attr, None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         with self._clients_lock:
             clients, self._clients = self._clients, []
-        for conn, _addr in clients:
+            self._owner = None
+        for conn, _addr, _ro in clients:
             try:
                 conn.close()
             except OSError:
                 pass
-        for thread in (self._accept_thread, self._pump_thread, self._wd_thread):
+        for thread in (self._accept_thread, self._obs_accept_thread,
+                       self._pump_thread, self._wd_thread):
             if thread is not None:
                 thread.join(timeout=2.0)
-        self._accept_thread = self._pump_thread = self._wd_thread = None
+        self._accept_thread = self._obs_accept_thread = None
+        self._pump_thread = self._wd_thread = None
 
     # -- 接入 -------------------------------------------------------------
-    def _accept_loop(self):
+    def _accept_loop(self, sock, readonly):
         while not self.stop_event.is_set():
-            sock = self.sock
             if sock is None:
                 return
             try:
@@ -1402,19 +1448,49 @@ class SerialBridge:
             except OSError:
                 return
             conn.settimeout(0.5)
+            self._admit(conn, addr, readonly)
+
+    def _admit(self, conn, addr, readonly):
+        if readonly:
             with self._clients_lock:
-                self._clients.append((conn, addr))
-            self.log('ser', '笔记本已连接串口桥 %s:%d（当前 %d 个客户端）'
-                     % (addr[0], addr[1], self._client_count()))
-            threading.Thread(target=self._client_loop, args=(conn, addr),
-                             name='ser-client', daemon=True).start()
+                self._clients.append((conn, addr, True))
+                count = len(self._clients)
+            self.log('ser', '观察者已连接 %s:%d（只读，当前 %d 个连接）'
+                     % (addr[0], addr[1], count))
+            threading.Thread(target=self._client_loop, args=(conn, addr, True),
+                             name='ser-obs', daemon=True).start()
+            return
+        busy = False
+        with self._clients_lock:
+            if self.exclusive and self._owner is not None:
+                busy = True
+            else:
+                self._owner = conn
+                self._owner_last_rx = time.monotonic()   # 新控制方接管时重置静默计时
+                self._clients.append((conn, addr, False))
+                count = len(self._clients)
+        if busy:
+            self.rejected_controls += 1
+            self.log('ser', '拒绝控制连接 %s:%d：桥正被另一台上位机占用'
+                            '（要旁观请连观察口 %d）'
+                     % (addr[0], addr[1], self.observer_port))
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        self.log('ser', '控制方已连接 %s:%d（当前 %d 个连接）'
+                 % (addr[0], addr[1], count))
+        threading.Thread(target=self._client_loop, args=(conn, addr, False),
+                         name='ser-client', daemon=True).start()
 
     def _client_count(self):
         with self._clients_lock:
             return len(self._clients)
 
-    def _client_loop(self, conn, addr):
+    def _client_loop(self, conn, addr, readonly):
         peer = '%s:%d' % (addr[0], addr[1])
+        warned = False
         try:
             while not self.stop_event.is_set():
                 try:
@@ -1425,7 +1501,17 @@ class SerialBridge:
                     break
                 if not data:
                     break
+                if readonly:
+                    self.obs_bytes_dropped += len(data)
+                    if not warned:
+                        warned = True
+                        self.log('ser', '%s 观察口发来 %d 字节，已丢弃（只读，不会进串口）'
+                                 % (peer, len(data)))
+                    continue
                 self.last_laptop_rx = time.monotonic()
+                with self._clients_lock:
+                    if self._owner is conn:
+                        self._owner_last_rx = self.last_laptop_rx
                 self._reset_guard()
                 if not self.transport.write(data):
                     self.log('ser', '串口不可用，丢弃笔记本 %d 字节' % len(data))
@@ -1436,12 +1522,18 @@ class SerialBridge:
             self.log('ser', '%s 桥接异常：%r' % (peer, exc))
         finally:
             self._drop_client(conn)
-            self.log('ser', '%s 已断开（剩余 %d 个客户端）'
-                     % (peer, self._client_count()))
+            self.log('ser', '%s 已断开（剩余 %d 个连接）' % (peer, self._client_count()))
 
     def _drop_client(self, conn):
+        released = False
         with self._clients_lock:
-            self._clients = [(c, a) for (c, a) in self._clients if c is not conn]
+            self._clients = [(c, a, ro) for (c, a, ro) in self._clients
+                             if c is not conn]
+            if self._owner is conn:
+                self._owner = None
+                released = True
+        if released:
+            self.log('ser', '控制方已释放，下一台上位机可以接管')
         try:
             conn.close()
         except OSError:
@@ -1467,7 +1559,7 @@ class SerialBridge:
         if not clients:
             return
         dead = []
-        for conn, _addr in clients:
+        for conn, _addr, _ro in clients:
             try:
                 conn.sendall(data)
             except OSError:
@@ -1483,10 +1575,24 @@ class SerialBridge:
                 self.guarded = False
                 self.log('ser', '看门狗：收到笔记本新字节，解除护栏')
 
+    OWNER_IDLE_RELEASE_S = 10.0   # 控制方 10 秒一个字节都不发 → 认为它掉了
+
+    def _reap_idle_owner(self):
+        with self._clients_lock:
+            owner = self._owner
+            idle = time.monotonic() - self._owner_last_rx
+        if owner is not None and idle > self.OWNER_IDLE_RELEASE_S:
+            self.log('ser', '控制方 %.0fs 没有任何字节，按掉线处理并释放控制权' % idle)
+            self._drop_client(owner)
+
     def _watchdog_loop(self):
         window = wire.SERIAL_WATCHDOG_MS / 1000.0
         while not self.stop_event.is_set():
             time.sleep(0.05)
+            try:
+                self._reap_idle_owner()
+            except Exception as exc:  # 不让清理逻辑拖垮看门狗
+                self.log('ser', '清理空闲控制方失败：%r' % exc)
             if not self.transport.connected:
                 self.last_laptop_rx = time.monotonic()
                 continue
@@ -1625,7 +1731,12 @@ def build_arg_parser():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument('--host', default=None, help='监听地址（0.0.0.0 = 所有网卡）')
     ap.add_argument('--img-port', type=int, default=None, help='图传 TCP 端口')
-    ap.add_argument('--ser-port', type=int, default=None, help='串口桥 TCP 端口')
+    ap.add_argument('--ser-port', type=int, default=None,
+                    help='串口桥控制口 TCP 端口（同一时刻只允许一个控制方）')
+    ap.add_argument('--observer-port', type=int, default=None,
+                    help='串口观察口 TCP 端口（只读：能看回包、发出的字节被丢弃；0=关闭）')
+    ap.add_argument('--no-bridge-exclusive', action='store_true',
+                    help='允许多个控制方并发（默认独占）')
     ap.add_argument('--discovery-port', type=int, default=None, help='UDP 发现端口')
     ap.add_argument('--serial', default=None,
                     help='STM32 串口路径（Linux /dev/ttyACM0；Windows 必须 COMx）')
@@ -1658,6 +1769,8 @@ class Settings:
         self.host = pick(args.host, 'host', DEFAULTS['host'])
         self.img_port = int(pick(args.img_port, 'img_port', DEFAULTS['img_port']))
         self.ser_port = int(pick(args.ser_port, 'ser_port', DEFAULTS['ser_port']))
+        self.observer_port = int(pick(args.observer_port, 'observer_port',
+                                      DEFAULTS['observer_port']))
         self.discovery_port = int(pick(args.discovery_port, 'discovery_port',
                                        DEFAULTS['discovery_port']))
         self.baud = int(pick(args.baud, 'baud', DEFAULTS['baud']))
@@ -1675,6 +1788,7 @@ class Settings:
         self.run_camera = not args.no_camera
         self.run_serial = not args.no_serial
         self.run_discovery = not args.no_discovery
+        self.bridge_exclusive = not bool(getattr(args, 'no_bridge_exclusive', False))
         self.exit_after = float(getattr(args, 'exit_after', 0.0) or 0.0)
 
     def resolve_serial(self):
@@ -1695,11 +1809,13 @@ class Settings:
         return path, ''
 
     def describe(self):
-        return ('host=%s img=%d ser=%d disc=%d cameras=%s %dx%d@%d q=%d '
-                'fake_camera=%s fake_serial=%s' % (
-                    self.host, self.img_port, self.ser_port, self.discovery_port,
+        return ('host=%s img=%d ser=%d obs=%d disc=%d cameras=%s %dx%d@%d q=%d '
+                'exclusive=%s fake_camera=%s fake_serial=%s' % (
+                    self.host, self.img_port, self.ser_port, self.observer_port,
+                    self.discovery_port,
                     [c['index'] for c in self.cameras], self.width, self.height,
-                    self.fps, self.quality, self.fake_camera, self.fake_serial))
+                    self.fps, self.quality, self.bridge_exclusive,
+                    self.fake_camera, self.fake_serial))
 
 
 # =========================================================================
@@ -1763,7 +1879,9 @@ class App:
                 self.image_server.start()
         if st.run_serial and self.transport is not None:
             self.serial_bridge = SerialBridge(st.host, st.ser_port, self.transport,
-                                             self.log, self.stop_event)
+                                             self.log, self.stop_event,
+                                             exclusive=st.bridge_exclusive,
+                                             observer_port=st.observer_port)
             self.serial_bridge.start()
         if st.run_discovery:
             self.discovery = DiscoveryServer(st.discovery_port, st.img_port,

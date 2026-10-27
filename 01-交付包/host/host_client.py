@@ -294,8 +294,8 @@ class HostClient:
         if timeout_ms is None:
             speed = int(rpm if rpm is not None else P.PARAM_DEFAULTS["goto_rpm"]) or 1
             # 闭环要先走一段、等稳、再补差（最多 goto_max_passes 次），所以客户端超时
-        # 要按 3 倍行程时间 + 8 s 余量算，否则会把“固件还在跑”误判成请求超时。
-        timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000 * 3) + 8000
+            # 要按 3 倍行程时间 + 8 s 余量算，否则会把“固件还在跑”误判成请求超时。
+            timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000 * 3) + 8000
         return self.send("motor_goto", *args, timeout_ms=timeout_ms)
 
     def angle_zero(self, axis: int, timeout_ms: int = 3000) -> int:
