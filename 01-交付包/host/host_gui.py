@@ -1140,15 +1140,16 @@ class App:
     _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", 158))
 
     def initialize_all(self) -> None:
-        """上电初始化：清锁存 → 订阅四轴遥测 → 兜底参数 → 报告四轴位置。
+        """上电初始化：清锁存 → 订阅四轴遥测 → 建立四轴位置闭环 → 兜底参数 → 报告。
 
-        只读，不发任何运动命令，也不清零。
+        只读：不发运动命令、不清零。位置闭环 = 用编码器回读对齐软位置 + 勾上该轴「闭环」，
+        之后「相对走」走 motor_goto（固件自己补差）。
         """
         client = getattr(self, "client", None)
         if client is None or not getattr(client, "online", False):
             messagebox.showwarning("初始化", "还没连上控制器：先选端口并点「连接」")
             return
-        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 兜底参数（acc=0, goto_max_ms=120000, ready=158）")
+        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 建立四轴位置闭环 / 兜底参数（acc=0, goto_max_ms=120000, ready=158）")
         try:
             client.send("stop_clear", timeout_ms=800)
         except Exception as exc:                    # noqa: BLE001
@@ -1173,26 +1174,72 @@ class App:
         self.root.after(1200, self._init_report)
 
     def _init_report(self) -> None:
+        """遥测到手后：建立四轴位置基准 + 打开闭环，然后报告。"""
+        from datetime import datetime
         parts = []
         missing = 0
+        ready = []
         for addr in (4, 5, 1, 3):
             panel = self.axes.get(addr)
             counts = getattr(panel, "last_counts", None) if panel is not None else None
             if counts is None:
                 missing += 1
-                parts.append("%s —" % AXIS_LABELS[addr])
-            else:
-                parts.append("%s %+.0f" % (AXIS_LABELS[addr],
-                                           units.counts_to_pulses(counts)))
-        self._log("初始化完成：%s（未清零）" % "  ".join(parts))
-        if missing:
-            self._log("有 %d 个轴还没有回读：查一下该轴驱动器是否上电/接线" % missing, "warn")
-        else:
+                parts.append("%s 无回读" % AXIS_LABELS[addr])
+                continue
+            pulses = units.counts_to_pulses(counts)
+            parts.append("%s %+.0f" % (AXIS_LABELS[addr], pulses))
+            # —— 位置闭环：软位置与编码器对齐 + 打开该轴「闭环」勾选 ——
             try:
-                self.pos_hint.configure(text="（位置来自四轴遥测，0.2 s 刷新）",
-                                        foreground="#0a6b0a")
-            except tk.TclError:
+                self.soft_pos[addr] = int(round(pulses))
+                self.pos_known[addr] = True
+            except Exception:                      # noqa: BLE001
                 pass
+            if panel is not None:
+                try:
+                    panel.loop.set(True)           # 「相对走」从此走 motor_goto 闭环
+                    panel.refresh() if hasattr(panel, "refresh") else None
+                except tk.TclError:
+                    pass
+            ready.append(addr)
+
+        self._log("初始化：四轴位置基准已建立（来自编码器回读），并已勾上「闭环」")
+        for addr in ready:
+            panel = self.axes.get(addr)
+            stamp = getattr(panel, "last_counts_ms", None)
+            age = ""
+            try:
+                if stamp is not None and hasattr(self, "client") and self.client is not None:
+                    now = self.client.now_ms() if hasattr(self.client, "now_ms") else None
+                    if now is not None:
+                        age = "，%.1f s 前" % max(0.0, (now - stamp) / 1000.0)
+            except Exception:                      # noqa: BLE001
+                age = ""
+            self._log("  %s 闭环就绪：位置 %+.0f 脉冲（%s）%s"
+                      % (AXIS_LABELS[addr], self.soft_pos.get(addr, 0),
+                         getattr(panel, "last_counts", "—"), age))
+
+        # 闭环参数确认（只读，发一次就够）
+        try:
+            client = getattr(self, "client", None)
+            if client is not None:
+                for name in ("counts_per_rev", "goto_tol_counts", "goto_rpm"):
+                    try:
+                        client.send("param_get", name)
+                    except Exception:              # noqa: BLE001
+                        pass
+        except Exception:                          # noqa: BLE001
+            pass
+
+        self._log("初始化完成：%s（未清零，未动作）" % "  ".join(parts))
+        if missing:
+            self._log("有 %d 个轴没有回读：查该轴驱动器是否上电/接线（这些轴的闭环不可用）"
+                      % missing, "warn")
+        try:
+            self.pos_hint.configure(
+                text="（位置来自四轴遥测，0.2 s 刷新；已建立 %d/4 轴闭环）" % len(ready),
+                foreground="#0a6b0a" if not missing else "#b26a00")
+        except tk.TclError:
+            pass
 
     def _update_pos_label(self, addr: int) -> None:
         panel = self.axes.get(addr)
