@@ -132,3 +132,9 @@ new_eye/runtime/latest_targets.json
 
 # 3D 打印件模型（用户本地文件，不入库）
 3d/
+
+# --- ultralytics 运行期配置（会自己生成，不进库） ---
+Ultralytics/
+.yolo_config/
+# --- 队友包离线输出 ---
+04-队友视觉调试包/out/
