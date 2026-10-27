@@ -283,16 +283,17 @@ class HostClient:
         `motor_goto` 的应答里带 `err`（剩余 counts）、`passes`（补了几轮）、
         `elapsed_ms`，失败回 `E14`。通道段这类“必须走到位”的路径用它。
         """
-        args: List[object] = [int(axis), int(pulses)]
-        if tol is not None:
-            args.append(int(tol))
-            if rpm is not None:
-                args.append(int(rpm))
-        elif rpm is not None:
-            args.append(int(P.PARAM_DEFAULTS["goto_tol_counts"]))
-            args.append(int(rpm))
+        # 速度：实测 rpm 直接决定速度（驱动器自己封顶约 274 圈/分）。
+        # 不传 rpm 时以前走固件默认 60，Z 满行程要 72 s；这里统一给 GOTO_DEFAULT_RPM。
+        speed = int(GOTO_DEFAULT_RPM if rpm is None else rpm) or 1
+        args: List[object] = [
+            int(axis),
+            int(pulses),
+            int(P.PARAM_DEFAULTS["goto_tol_counts"] if tol is None else tol),
+            speed,
+        ]
         if timeout_ms is None:
-            speed = int(rpm if rpm is not None else P.PARAM_DEFAULTS["goto_rpm"]) or 1
+            speed = min(speed, 274)  # 驱动器实际上限，超了也快不了，避免超时估太短
             # 闭环要先走一段、等稳、再补差（最多 goto_max_passes 次），所以客户端超时
             # 要按 3 倍行程时间 + 8 s 余量算，否则会把“固件还在跑”误判成请求超时。
             timeout_ms = int(abs(int(pulses)) / 3200.0 / speed * 60000 * 3) + 8000
@@ -316,8 +317,7 @@ class HostClient:
         """
         deg100 = int(round(float(deg) * 100.0)) % 36000
         args: List[object] = [int(axis), deg100]
-        if rpm is not None:
-            args.append(int(rpm))
+        args.append(int(GOTO_DEFAULT_RPM if rpm is None else rpm))
         if timeout_ms is None:
             timeout_ms = 8000
         return self.send("motor_angle", *args, timeout_ms=timeout_ms)
