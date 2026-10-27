@@ -608,6 +608,14 @@ class CalibTab(ttk.Frame):
                                    '先在「四轴控制」页点一次「查位置」，或勾上四轴的「订阅遥测」，再点「连续抓」。')
             return
         drop = bool(self.drop_var.get())
+        if not drop:
+            # 连续抓不落货 = 第一件抓完还夹在爪里，第二件会带着货去下压 → 危险
+            self.say('连续抓必须勾「抓完落货」：否则第一件抓完还夹在爪里，下一件会撞')
+            messagebox.showwarning('连续抓要先勾落货',
+                                   '连续抓是"抓一件→落一件"的循环。\n\n'
+                                   '请先勾上「抓完落货（转盘60°+松爪）」再点。\n'
+                                   '只想抓一件不落货，请用左边的「自动抓一件」。')
+            return
         extra = '（含转盘 60° + 松爪）' if drop else '（不落货，只抓到 P0）'
         if not messagebox.askyesno(
                 '连续抓 %d 件' % count,
