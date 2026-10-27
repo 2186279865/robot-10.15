@@ -51,6 +51,7 @@ class CalibTab(ttk.Frame):
         self._last_uv = None
         self._jog_token = 0
         self._prep_running = False
+        self._prep_started = 0.0
         self._build()
         self._refresh_pos()
         self.on_marks_refresh()
@@ -149,8 +150,13 @@ class CalibTab(ttk.Frame):
             self.say('还没连接：先在顶部下拉框选「派 robot-pi …」并点「连接」')
             return
         if self._prep_running:
-            self.say('还有动作在跑，等它跑完再点')
-            return
+            # 兜底：万一 worker 因为异常没复位标志，超过 10 分钟自动放行
+            if time.monotonic() - getattr(self, '_prep_started', 0.0) > 600.0:
+                self._prep_running = False
+                self.say('上一轮动作状态卡住了（超过 10 分钟），已自动复位，请重试')
+            else:
+                self.say('还有动作在跑，等它跑完再点')
+                return
         title, targets, order, rpm = self.PRESETS[key]
         lines = []
         for axis in order:
@@ -164,10 +170,16 @@ class CalibTab(ttk.Frame):
                                              ' → '.join(PP.AXIS_LABEL.get(a, str(a)) for a in order))):
             return
         self._prep_running = True
+        self._prep_started = time.monotonic()
         self.say('开始：%s' % title)
-        threading.Thread(target=self._preset_worker,
-                         args=(client, title, dict(targets), tuple(order), int(rpm)),
-                         daemon=True).start()
+        try:
+            # 注意：rpm 可能是 {轴: 转速} 的字典，不能再 int() 一次
+            threading.Thread(target=self._preset_worker,
+                             args=(client, title, dict(targets), tuple(order), rpm),
+                             daemon=True).start()
+        except Exception as exc:                 # noqa: BLE001
+            self._prep_running = False
+            self.say('%s 启动失败：%s: %s' % (title, type(exc).__name__, exc))
 
     def _preset_worker(self, client, title, targets, order, rpm):
         def waiter(req_id, timeout_ms):
