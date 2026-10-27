@@ -13,11 +13,13 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 import auto_grab as AG
 import calib_wizard as W
+import grasp_calib as GC
 import prep_pose as PP
+import units
 import vision_grasp as VG
 
 AXIS_X, AXIS_Y = VG.AXIS_X, VG.AXIS_Y
@@ -76,6 +78,10 @@ class CalibTab(ttk.Frame):
         self.drop_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text='抓完落货（转盘60°+松爪）', variable=self.drop_var
                         ).pack(side='left', padx=(0, 12))
+        ttk.Button(bar, text='记录抓取点', command=self.on_record_grasp
+                   ).pack(side='left', padx=(0, 4))
+        ttk.Button(bar, text='抓取点求解', command=self.on_solve_grasp
+                   ).pack(side='left', padx=(0, 12))
         for key, text in (('p1', '回 P1'), ('z_up', 'Z 抬顶'), ('z_down', 'Z 降底'),
                           ('to_p1', '走通道(P1)'), ('to_p0', '退通道(P0)')):
             ttk.Button(bar, text=text, width=10,
@@ -229,6 +235,81 @@ class CalibTab(ttk.Frame):
             self.after(0, self.say, '%s：不需要动（已在目标位）' % title)
         else:
             self.after(0, self.say, '%s：没走完，看上面的失败原因' % title)
+
+    # ------------------------------------------------------- 抓取点标定
+    def _current_xy_pulses(self):
+        """当前 X/Y 位置（脉冲）：优先 3 s 内回读 counts，其次已知软位置。"""
+        soft, known, counts = self._pos_source()
+        if 4 in counts and 5 in counts:
+            return (units.counts_to_pulses(counts[4]),
+                    units.counts_to_pulses(counts[5]), '回读 counts')
+        if known.get(4) and known.get(5) and 4 in soft and 5 in soft:
+            return float(soft[4]), float(soft[5]), '软位置'
+        return None, None, ''
+
+    def on_record_grasp(self):
+        """把"当前爪子位置"和"画面里物块的 u,v"配成一对抓取点。"""
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('还没连接：先选「派 robot-pi …」点「连接」')
+            return
+        x, y, src = self._current_xy_pulses()
+        if x is None:
+            self.say('拿不到当前位置：先在四轴页点「查位置/查状态」刷新回读')
+            return
+        targets = AG.load_targets()
+        if not targets:
+            self.say('没有视觉目标：先到「视觉」页做一次「单次识别」')
+            return
+        target = targets[0]
+        if len(targets) > 1:
+            lines = ['%d) %s  u=%.2f v=%.2f' % (i + 1, AG.describe(t),
+                                                t['center_tray'][0], t['center_tray'][1])
+                     for i, t in enumerate(targets[:9])]
+            pick = simpledialog.askinteger(
+                '选择物块', '这次对准的是哪个物块？\n\n' + '\n'.join(lines),
+                parent=self, minvalue=1, maxvalue=min(9, len(targets)))
+            if not pick:
+                return
+            target = targets[pick - 1]
+        u, v = (float(target['center_tray'][0]), float(target['center_tray'][1]))
+        try:
+            pairs = GC.add_pair(u, v, x, y,
+                                note='%s %s' % (target.get('class_name') or '', src))
+        except ValueError as exc:
+            self.say('记录失败：%s' % exc)
+            return
+        self.say('已记录第 %d 个抓取点：u=%.3f v=%.3f → X%+.0f / Y%+.0f 脉冲（%s）'
+                 % (len(pairs), u, v, x, y, src))
+        self.say(GC.describe(pairs))
+        if len(pairs) < GC.MIN_PAIRS:
+            self.say('再摆 %d 个位置的物块记录，凑够 %d 个点才能求解'
+                     % (GC.MIN_PAIRS - len(pairs), GC.MIN_PAIRS))
+
+    def on_solve_grasp(self):
+        """用记录的抓取点拟合 (u,v)→(X,Y)，写进 tray_calib.json。"""
+        pairs = GC.load_pairs()
+        if not pairs:
+            self.say('还没有抓取点：先摆物块、对准、点「记录抓取点」')
+            return
+        try:
+            result = GC.solve(pairs, write=True)
+        except ValueError as exc:
+            self.say('求解失败：%s' % exc)
+            return
+        aff = result.get('affine') or {}
+        self.say('抓取点标定成功（%d 个点）：X = %.1f·u %+.1f·v %+.1f，'
+                 'Y = %.1f·u %+.1f·v %+.1f'
+                 % (len(pairs), aff.get('a', 0), aff.get('b', 0), aff.get('tx', 0),
+                    aff.get('c', 0), aff.get('d', 0), aff.get('ty', 0)))
+        mx = result.get('max_abs') or {}
+        self.say('残差最大：dx %.0f / dy %.0f 脉冲（越小越好）'
+                 % (mx.get('dx', 0), mx.get('dy', 0)))
+        if result.get('warning'):
+            self.say(result['warning'])
+        if result.get('path'):
+            self.say('已写入 %s（旧文件已备份）' % result['path'])
+        self.say('下一步：放一件货点「自动抓一件」验证落点')
 
     # ------------------------------------------------------------- 自动抓一件
     def _pos_source(self):
