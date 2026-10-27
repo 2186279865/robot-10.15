@@ -536,16 +536,28 @@ class CalibTab(ttk.Frame):
     # ------------------------------------------------------- 一键走出固定路线
     def on_auto_many(self):
         """连续抓 N 件：每件都重新识别，按 drop 勾选决定是否落货。"""
+        try:
+            self._on_auto_many()
+        except Exception as exc:                       # noqa: BLE001
+            # 点按钮时绝不能"静默无反应"：任何异常都要看得见
+            self.say('连续抓按钮出错：%s: %s' % (type(exc).__name__, exc))
+            try:
+                messagebox.showerror('连续抓出错', '%s: %s' % (type(exc).__name__, exc))
+            except Exception:                          # noqa: BLE001
+                pass
+
+    def _on_auto_many(self):
         if self._prep_running:
-            self._log('还有动作在跑，等它跑完再点')
+            self.say('还有动作在跑，等它跑完再点')
             return
-        client = self._client()
-        if client is None or not client.online:
-            messagebox.showwarning('还没连接', '先连上控制板（右上角显示「在线」）')
+        client = getattr(self.app, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.say('还没连接：先在顶部下拉框选「派 robot-pi …」并点「连接」')
             return
-        vision = getattr(self.app, 'vision', None)
-        if vision is None or not getattr(vision, 'running', False):
-            messagebox.showwarning('视觉没开', '先到「视觉」页点「打开双画面」')
+        vision = (getattr(self.app, 'vision', None)
+                  or getattr(self.app, 'vision_app', None))
+        if vision is None or not hasattr(vision, 'recognize_safe'):
+            self.say('视觉没开：先到「视觉」页点「打开双画面」')
             return
         try:
             count = int(self.many_var.get())
@@ -562,7 +574,7 @@ class CalibTab(ttk.Frame):
             return
         self._prep_running = True
         self._many_stop = False
-        self._log('开始连续抓 %d 件…' % count)
+        self.say('开始连续抓 %d 件…' % count)
         threading.Thread(target=self._many_worker, args=(client, vision, count, drop),
                          daemon=True).start()
 
@@ -571,19 +583,22 @@ class CalibTab(ttk.Frame):
             res = AG.run_many(
                 client, count,
                 recognize=vision.recognize_safe,
-                log=self._log,
+                log=self.say,
                 pos_source=self._pos_source(),
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
             )
-            self._log('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
-                      % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
+            self.say('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
+                     % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
         except Exception as exc:                            # noqa: BLE001
-            self._log('连续抓失败：%s: %s' % (type(exc).__name__, exc))
+            self.say('连续抓失败：%s: %s' % (type(exc).__name__, exc))
         finally:
             self._prep_running = False
             self._many_stop = False
-            self._refresh_pos()
+            try:
+                self._refresh_pos()
+            except Exception:                          # noqa: BLE001
+                pass
 
     def on_prep_route(self):
         """从初始位走固定通道（Y 让开 → Z 抬起），走完停在工作位，等你标定。"""
