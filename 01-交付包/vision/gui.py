@@ -580,11 +580,18 @@ class App:
             self.bstream.start()
             self.running = True
             self.note('双画面运行中')
-            self.refresh()
+            self._loop_armed = False
+            self._schedule_loop()
         except Exception as e:
             messagebox.showerror('打开失败', str(e))
 
     def refresh(self):
+        """画一帧。注意：这里**不再**用 after 续期。
+
+        以前每调用一次 refresh() 就多挂一条 80ms 定时器，而切页时
+        main._on_tab 也会调 refresh() → 定时器越滚越多，界面就卡死了。
+        续期统一交给 _loop / _schedule_loop。
+        """
         if not self.running:
             return
         self.tf = self.a.get()
@@ -601,7 +608,21 @@ class App:
         self.draw_targets()
         self.sync_live()
         self.update_text()
-        self.r.after(80, self.refresh)
+
+    def _loop(self):
+        self._loop_armed = False
+        if not self.running:
+            return
+        try:
+            self.refresh()
+        finally:
+            self._schedule_loop()
+
+    def _schedule_loop(self):
+        if getattr(self, '_loop_armed', False) or not self.running:
+            return
+        self._loop_armed = True
+        self.r.after(80, self._loop)
 
     def stop(self):
         if getattr(self, 'live', False):

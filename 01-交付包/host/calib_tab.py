@@ -338,11 +338,16 @@ class CalibTab(ttk.Frame):
                         0.45, (0, 229, 255), 1, cv2.LINE_AA)
 
     def _preview_tick(self):
-        try:
-            self._preview_update()
-        except Exception as exc:                   # noqa: BLE001
-            self._pv_note.configure(text='预览出错：%s' % exc)
-        self.after(250, self._preview_tick)
+        # 本页没显示时不做任何绘制（省 CPU，也避免切页时和视觉页抢主线程）
+        if self.winfo_ismapped() and self.app.notebook.tab('current', 'text').strip() == 'X/Y 标定':
+            try:
+                self._preview_update()
+            except Exception as exc:               # noqa: BLE001
+                try:
+                    self._pv_note.configure(text='预览出错：%s' % exc)
+                except Exception:                  # noqa: BLE001
+                    pass
+        self.after(400, self._preview_tick)
 
     # ------------------------------------------------------- 抓取点标定
     def _current_xy_pulses(self):
