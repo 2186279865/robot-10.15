@@ -1017,6 +1017,15 @@ class App:
                 self.note('[形状标定] 已暂停实时分割')
             except Exception:                          # noqa: BLE001
                 pass
+        # 分割器是懒加载的（单次识别时才建），标定前先确保它存在，否则会报
+        # "'NoneType' object has no attribute 'segment'"
+        try:
+            if not self.ensure_segmenter():
+                messagebox.showerror('形状标定', 'SAM 模型没加载成功（看下方日志里的红色提示）。')
+                return
+        except Exception as exc:                       # noqa: BLE001
+            messagebox.showerror('形状标定', '加载分割模型失败：%s' % exc)
+            return
         top, side, tw_n, sw_n = [], [], 0, 0
         for attempt in range(3):
             try:
