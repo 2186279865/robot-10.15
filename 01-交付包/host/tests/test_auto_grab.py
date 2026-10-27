@@ -143,5 +143,36 @@ class SequenceTest(unittest.TestCase):
                         calib=calib, pos_source=lambda: ({}, {}, {}))
 
 
+class RunManyEventTest(unittest.TestCase):
+    """run_many 必须走同一套 run_once，并把事件回调给界面用。"""
+
+    def test_events_and_single_item(self):
+        client = FakeClient()
+        pos_source = lambda: ({}, {}, dict(client.counts))   # noqa: E731
+        events = []
+        orig_load = AG.load_targets
+        orig_pick = AG.pick_target
+        AG.load_targets = lambda *a, **k: [{'center_tray': [0.5, 0.5],
+                                            'confidence': 1.0,
+                                            'shape': '正方体/正方形',
+                                            'color': '绿'}]
+        AG.pick_target = lambda targets, **k: targets[0]
+        try:
+            res = AG.run_many(client, 1, lambda: None, log=lambda _t: None,
+                              wait=lambda rid, ms: client.done_of(rid),
+                              pos_source=pos_source, drop=False,
+                              on_event=events.append)
+        finally:
+            AG.load_targets = orig_load
+            AG.pick_target = orig_pick
+        self.assertEqual(res['done'], 1)
+        kinds = [e['kind'] for e in events]
+        self.assertIn('item_start', kinds)
+        self.assertIn('target', kinds)
+        self.assertIn('item_ok', kinds)
+        self.assertEqual(kinds[-1], 'finished')
+        self.assertEqual(events[0]['n'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

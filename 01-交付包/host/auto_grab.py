@@ -206,7 +206,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
              stop_flag: Optional[Callable[[], bool]] = None,
-             current_box: int = 1) -> Dict[str, object]:
+             current_box: int = 1,
+             on_event: Optional[Callable[[dict], None]] = None) -> Dict[str, object]:
     """连续抓 N 件：每件都"重新识别 → 挑目标 → 走一遍 run_once"。
 
     recognize() 由 GUI 传入（阻塞式单次识别，返回值得能从中读 latest_targets.json），
@@ -216,6 +217,17 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     drop=True 时每件都会执行"转盘 60° + 松爪"，物块按 6 个盒位轮流落；
     stop_flag() 返回 True 时在当前件结束后停下（界面的「停止全部」也能中断）。
     """
+    def emit(kind, **kw):
+        """给界面/日志用的事件回调（异常一律吞掉，绝不影响抓取）。"""
+        if on_event is None:
+            return
+        try:
+            ev = {'kind': kind}
+            ev.update(kw)
+            on_event(ev)
+        except Exception:                          # noqa: BLE001
+            pass
+
     done = 0
     failed = 0
     started = time.perf_counter()
@@ -225,22 +237,27 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     for i in range(max(0, int(count))):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
+            emit('stopped', i=i + 1)
             break
         log('=== 第 %d/%d 件：单次识别 ===' % (i + 1, count))
+        emit('item_start', i=i + 1, n=count)
         try:
             recognize()
         except Exception as exc:                       # noqa: BLE001
             failed += 1
             log('[连续抓] 第 %d 件识别失败：%s' % (i + 1, exc))
+            emit('item_fail', i=i + 1, reason='识别失败：%s' % exc)
             break
         targets = load_targets()
         if not targets:
             log('[连续抓] 画面里没有可抓的物块了，结束（已抓 %d 件）' % done)
+            emit('item_fail', i=i + 1, reason='没有可抓的物块')
             break
         try:
             target = pick_target(targets)
         except GrabError as exc:
             log('[连续抓] 挑目标失败：%s' % exc)
+            emit('item_fail', i=i + 1, reason='挑目标失败：%s' % exc)
             break
         key = class_key(target)
         try:
@@ -254,24 +271,29 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
             log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°）'
                 % (i + 1, key, box, deg))
+        emit('target', i=i + 1, target=describe(target), key=key, box=box, deg=deg)
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
                            drop=drop, tray_deg=deg)
         except GrabError as exc:
             failed += 1
             log('[连续抓] 第 %d 件失败：%s' % (i + 1, exc))
+            emit('item_fail', i=i + 1, reason=str(exc))
             break
         except Exception as exc:                       # noqa: BLE001
             failed += 1
             log('[连续抓] 第 %d 件异常：%s: %s' % (i + 1, type(exc).__name__, exc))
+            emit('item_fail', i=i + 1, reason='%s: %s' % (type(exc).__name__, exc))
             break
         done += 1
         if drop:
             box_now = int(box)
         results.append(one)
         log('[连续抓] 第 %d 件完成（累计 %d 件）' % (i + 1, done))
+        emit('item_ok', i=i + 1, res=one, box=box)
     elapsed = time.perf_counter() - started
     log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
         % (done, failed, elapsed, BM.describe()))
+    emit('finished', done=done, failed=failed, elapsed=elapsed)
     return {'ok': failed == 0, 'done': done, 'failed': failed,
             'elapsed': elapsed, 'items': results}

@@ -244,37 +244,24 @@ class RunTab:
         return (None, None, None)
 
     def _worker(self, client):
+        """整段交给 auto_grab.run_many（与「连续抓」按钮同一套逻辑）。"""
         vision = self.vision
         recognize = (vision.recognize_blocking if hasattr(vision, 'recognize_blocking')
                      else vision.recognize_safe)
-        count = self._total
         drop = bool(self.var_drop.get())
-        for i in range(1, count + 1):
-            if self._stop:
-                self._events.put(('stop', i))
-                break
-            self._t_item = time.monotonic()
-            self._events.put(('item_start', i))
-            try:
-                info = recognize()
-                targets = AG.load_targets()
-                if not targets:
-                    self._events.put(('item_fail', i, '没有识别到目标'))
-                    continue
-                target = AG.pick_target(targets)
-                self._events.put(('target', i, target))
-                pos = self._pos_source()
 
-                def _log(msg, level='info'):
-                    self._events.put(('log', i, msg))
+        def _log(msg, level='info'):
+            self._events.put(('log', 0, msg))
 
-                res = AG.run_once(client, target, log=_log, pos_source=lambda: pos,
-                                  drop=drop)
-                self._events.put(('item_ok', i, target, res))
-            except Exception as exc:             # noqa: BLE001
-                self._events.put(('item_fail', i, '%s: %s' % (type(exc).__name__, exc)))
-                if not self.var_skip.get():
-                    break
+        def _on_ev(ev):
+            self._events.put(('many', ev))
+
+        try:
+            AG.run_many(client, self._total, recognize, log=_log,
+                        pos_source=self._pos_source, drop=drop,
+                        stop_flag=lambda: self._stop, on_event=_on_ev)
+        except Exception as exc:                 # noqa: BLE001
+            self._events.put(('item_fail', 0, '%s: %s' % (type(exc).__name__, exc)))
         self._events.put(('finished',))
 
     def on_pause(self):
@@ -324,8 +311,46 @@ class RunTab:
             self.lbl_hint.configure(text=str(msg)[:140], foreground='#123a8a')
         elif kind == 'stop':
             self.lbl_hint.configure(text='已停止（第 %s 件前）' % ev[1], foreground='#b26a00')
+        elif kind == 'many':
+            self._handle_many(ev[1])
         elif kind == 'finished':
             self._finish()
+
+    def _handle_many(self, ev):
+        """把 auto_grab.run_many 的事件翻成界面动作。"""
+        kind = ev.get('kind')
+        if kind == 'item_start':
+            i = int(ev.get('i') or 0)
+            self._t_item = time.monotonic()
+            self.lbl_hint.configure(text='第 %d / %d 件：识别中…' % (i, self._total),
+                                    foreground='#123a8a')
+        elif kind == 'target':
+            i = int(ev.get('i') or 0)
+            key = ev.get('key') or '目标'
+            box = ev.get('box') or 0
+            deg = float(ev.get('deg') or 0.0)
+            if box:
+                txt = '第 %d / %d 件：%s → %d 号盒（转盘 %+.0f°）' % (i, self._total, key, box, deg)
+            else:
+                txt = '第 %d / %d 件：%s → 前往抓取' % (i, self._total, key)
+            self.lbl_hint.configure(text=txt, foreground='#123a8a')
+        elif kind == 'item_ok':
+            i = int(ev.get('i') or 0)
+            key = (ev.get('key') or '')
+            box = ev.get('box') or 0
+            self._ok += 1
+            self._add_row(i, key or '—', ('%d 号' % box) if box else '—',
+                          (time.monotonic() - self._t_item) * 1000.0, '✅')
+        elif kind == 'item_fail':
+            i = int(ev.get('i') or 0)
+            reason = str(ev.get('reason') or '失败')
+            self._fail += 1
+            self._add_row(i, '—', '—', (time.monotonic() - self._t_item) * 1000.0,
+                          '❌ ' + reason[:16])
+            self.lbl_hint.configure(text='第 %d 件失败：%s' % (i, reason), foreground='#b00020')
+        elif kind == 'stopped':
+            self.lbl_hint.configure(text='已停止（第 %s 件前）' % ev.get('i'),
+                                    foreground='#b26a00')
 
     def _add_row(self, i, cls, box, ms, result):
         self._done += 1
