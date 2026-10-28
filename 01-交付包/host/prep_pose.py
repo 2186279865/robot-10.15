@@ -319,7 +319,7 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
 
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
-                 counts_fn=None, tol_pulses=8, timeout_s=3.5, acc=1) -> List[Dict[str, object]]:
+                 counts_fn=None, tol_pulses=8, timeout_s=3.5, acc=0) -> List[Dict[str, object]]:
     """X/Y **同时**走：用 `motor_pos`（固件里是“发一帧就走”，不等结果）。
 
     固件的 host_goto 只有一个执行槽（并行下发第二条会回 E09），

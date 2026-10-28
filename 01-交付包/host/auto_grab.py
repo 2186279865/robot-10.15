@@ -54,7 +54,7 @@ except Exception:                                  # noqa: BLE001
 
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
-_ACC_DEFAULT = 1            # 加速度档：0 最猛（冲击大/看着僵硬），1 温和；2 更柔但更慢
+_ACC_DEFAULT = 0            # 加速度档：0 = 最快（现场实测 acc=1 约慢 10 倍，不能用！）
 TRAY_RPM = 6              # 转盘转速（5 很稳、6 略快且顺；10 会甩货）
 BOX_STEP_DEG = 60.0
 BOX_COUNT = 6
