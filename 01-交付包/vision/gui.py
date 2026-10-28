@@ -1271,18 +1271,17 @@ class App:
                 self._vlm_ms = (r or {}).get('ms')
         except Exception:                                  # noqa: BLE001
             objs = []
-        # DeepSeek 主分类模式：目标直接来自 VLM（含形状/颜色/中心），不再依赖 SAM 掩膜
+        # DeepSeek 主分类模式：SAM 负责分割/定位/面积，DeepSeek 负责类别与颜色
         if objs and str((self.cfg.get('cloud_vlm') or {}).get('mode')) == 'primary':
             try:
-                vt = classify.vlm_targets(objs)
-                if vt:
-                    _sam = [f.get('top') for f in fused if f.get('top') is not None]
-                    classify.refine_vlm_targets(tw, vt, _sam)
-                    fused[:] = vt
-                    self.note('DeepSeek 主分类：%d 个目标（无需 SAM 掩膜）' % len(vt))
+                labeled = classify.attach_vlm_to_fused(fused, objs, tw)
+                if labeled:
+                    fused[:] = labeled
+                    self.note('DeepSeek 分类 + SAM 定位：%d 个目标' % len(labeled))
                     return
+                self.note('DeepSeek 分类未与任何分割目标匹配，回退几何判据')
             except Exception as exc:                       # noqa: BLE001
-                self.note('DeepSeek 目标合成失败：%s' % exc)
+                self.note('DeepSeek 贴标签失败：%s' % exc)
         # 目标中心（归一化）
         tops = [f.get('top') for f in fused if f.get('top') is not None]
         used = set()

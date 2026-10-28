@@ -685,3 +685,120 @@ def class_summary(fused):
         name = it.get('class_name') or '未知'
         out[name] = out.get(name, 0) + 1
     return out
+
+
+# --------------------------------------------------------------------------
+# 把 DeepSeek 的分类结果贴到 SAM 分割目标上（SAM 定位置，VLM 定类别）
+# --------------------------------------------------------------------------
+def _merge_tops(entries, warp):
+    """把同一物体被切成的多块 SAM 目标合并成一个（并集掩膜，重算 bbox/质心/面积）。"""
+    import math as _math
+    first = entries[0]
+    if len(entries) == 1:
+        return first
+    t0 = first.get('top') or {}
+    m0 = t0.get('mask')
+    if m0 is None:
+        return first
+    union = m0.copy()
+    for e in entries[1:]:
+        t = e.get('top') or {}
+        m = t.get('mask')
+        if m is not None and m.shape == union.shape:
+            union = cv2.bitwise_or(union, m)
+    cnts, _ = cv2.findContours(union, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return first
+    c = max(cnts, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(c)
+    mm = cv2.moments(c)
+    cx = mm['m10'] / max(1e-6, mm['m00'])
+    cy = mm['m01'] / max(1e-6, mm['m00'])
+    H, W = union.shape[:2]
+    area = float((union > 0).sum())
+    item = dict(t0)
+    item.update({
+        'mask': union, 'contour': c, 'bbox': [x, y, w, h],
+        'center_px': [round(cx, 2), round(cy, 2)],
+        'center_tray': [round(cx / W, 4), round(cy / H, 4)],
+        'area_px': round(area, 1),
+    })
+    out = dict(first)
+    out['top'] = item
+    out['side'] = None
+    out['views'] = 'top'
+    out['_merged_from'] = len(entries)
+    return out
+
+
+def attach_vlm_to_fused(fused, objs, warp=None, max_dist=0.07,
+                        color_from_mask=True, min_color_conf=0.30):
+    """按“最近的 VLM 目标”给每个 SAM 目标贴标签；同一 VLM 目标命中多块时合并。"""
+    import math as _math
+    cand = []
+    for o in (objs or []):
+        c = o.get('center') or []
+        if len(c) >= 2 and o.get('shape'):
+            cand.append((float(c[0]), float(c[1]), o))
+    if not cand:
+        return []
+
+    groups, best_d = {}, {}
+    for f in fused:
+        t = f.get('top')
+        if t is None:
+            continue
+        uv = t.get('center_tray') or []
+        if len(uv) < 2:
+            continue
+        u, v = float(uv[0]), float(uv[1])
+        k_best, d_best = None, 1e9
+        for k, (cu, cv, _o) in enumerate(cand):
+            d = _math.hypot(u - cu, v - cv)
+            if d < d_best:
+                d_best, k_best = d, k
+        if k_best is None or d_best > max_dist:
+            continue
+        groups.setdefault(k_best, []).append((d_best, f))
+        best_d[k_best] = min(best_d.get(k_best, 9.9), d_best)
+
+    out = []
+    for k, lst in groups.items():
+        lst.sort(key=lambda x: x[0])
+        merged = _merge_tops([f for _d, f in lst], warp)
+        t = merged.get('top')
+        o = cand[k][2]
+        conf = float(o.get('conf') or o.get('confidence') or 0.6)
+        t['shape'] = o['shape']
+        t['shape_conf'] = min(1.0, max(0.5, conf))
+        t['class_name'] = o['shape']
+        t['class_source'] = 'deepseek'
+        t['vlm_used'] = True
+        t['vlm_conf'] = conf
+        t['vlm_dist'] = round(best_d.get(k, 0.0), 4)
+        t['vlm_reason'] = o.get('reason') or ''
+        col = None
+        try:
+            if _CVLM is not None:
+                col = _CVLM.normalize_color(o.get('color'))
+        except Exception:                                  # noqa: BLE001
+            col = o.get('color')
+        if col:
+            t['color'] = col
+            t['color_conf'] = min(1.0, max(0.5, conf))
+            t['color_source'] = 'vlm'
+        if color_from_mask and warp is not None and t.get('mask') is not None:
+            try:
+                cn, cc, _h = _color_stats(warp, t['mask'])
+                if cc >= min_color_conf:
+                    t['color'] = cn
+                    t['color_conf'] = float(cc)
+                    t['color_source'] = 'mask'
+            except Exception:                              # noqa: BLE001
+                pass
+        t['class_key'] = '%s|%s' % (t.get('shape'), t.get('color') or '未知')
+        merged['confidence'] = conf
+        merged['vlm_assigned'] = True
+        merged['views'] = merged.get('views') or 'top'
+        out.append(merged)
+    return out
