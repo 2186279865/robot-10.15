@@ -4,6 +4,7 @@ runtime/*.jpg
 runtime/*.json
 runtime/*.jsonl
 runtime/*.log
+runtime/*.log.*
 runtime/*.pid
 runtime/*.err
 runtime/ultralytics/
