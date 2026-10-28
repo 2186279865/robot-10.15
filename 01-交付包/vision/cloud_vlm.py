@@ -115,6 +115,29 @@ def _fingerprint(img) -> str:
     return hashlib.md5(small.tobytes()).hexdigest()
 
 
+COLORS = ('红', '黄', '蓝', '绿', '黑', '浅蓝')
+
+
+def normalize_color(raw):
+    """把模型给的颜色词归一到项目 6 色；无法判断返回 None。"""
+    if not raw:
+        return None
+    t = str(raw).strip()
+    if any(k in t for k in ('浅蓝', '淡蓝', '天蓝')):
+        return '浅蓝'
+    if any(k in t for k in ('红', '橙', '粉')):
+        return '红'
+    if any(k in t for k in ('黄', '金')):
+        return '黄'
+    if any(k in t for k in ('蓝', '青')):
+        return '蓝'
+    if any(k in t for k in ('绿',)):
+        return '绿'
+    if any(k in t for k in ('黑', '灰')):
+        return '黑'
+    return None
+
+
 def normalize_shape(raw: str) -> str:
     """把模型给的形状名归一到主流程的类别名；认不出就返回 '其他几何体'。"""
     s = (raw or '').strip()
@@ -163,14 +186,13 @@ def _prompt_objects(candidates: List[str]) -> str:
     cand = '/'.join(candidates or SHAPES)
     return (
         '这是一个从上方约 60 度俯视拍摄的灰色托盘。请逐个识别托盘里的每个物块，'
-        '判断几何形状与颜色。\n'
-        f'形状只能从这些里选：{cand}。\n'
-        '注意：俯视会让纵深压缩，正方体可能看起来略扁，不要因此判成长方体；'
-        '顶面是圆但中心收尖的是圆锥；方底/多边形底、顶部收拢成尖点的是棱锥；'
-        '看不清就给低置信度。\n'
-        '只输出 JSON：{"objects":[{"shape":"...","color":"...","confidence":0.0,'
-        '"reason":"...","center":[x,y]}]}；center 用归一化坐标 0~1（左上角为原点，'
-        'x 向右、y 向下）。'
+        '判断它的几何形状与颜色。\n'
+        f'形状只能从这个列表里选：{cand}。\n'
+        '注意：60 度俯视会让纵深压缩，正方体可能看起来像略扁的长方形，不要因此判成长方体；'
+        '顶面是圆但有中心尖点的通常是圆锥；方底尖顶的是棱锥。\n'
+        '只输出 JSON，不要多余文字，格式：'
+        '{"objects":[{"shape":"...","color":"...","confidence":0.0,"reason":"...",'
+        '"center":[x,y]}]}；center 是物块中心的归一化坐标 0~1（左上为原点，x 右 y 下）。'
     )
 
 
@@ -194,6 +216,7 @@ def ask_objects(img, candidates: Optional[List[str]] = None, timeout: float = DE
             }],
             'max_tokens': 900,
             'thinking': {'type': 'disabled'},
+            'temperature': 0,
             'response_format': {'type': 'json_object'},
         }
         payload = _post(body, key, timeout)
@@ -248,12 +271,204 @@ def ask_objects_cached(img, candidates: Optional[List[str]] = None,
     return r
 
 
-def match(warp, mask, min_dist: float = 0.18, candidates: Optional[List[str]] = None,
-          timeout: float = DEFAULT_TIMEOUT, model: Optional[str] = None
-          ) -> Optional[Dict[str, Any]]:
-    """把整幅图批量结果里的某个物块，按归一化中心距离匹配到当前掩膜。
+def _prompt_numbered(n: int, candidates) -> str:
+    names = '、'.join(candidates)
+    return (
+        f'图中有 {n} 个物体，已用彩色轮廓和数字 1..{n} 标出编号。\n'
+        f'请对每个编号判断“形状”和“颜色”。形状只能从：{names}。\n'
+        '注意：这是 60° 左右俯视拍摄，纵深会被压缩（正方体可能看起来略扁，不要因此判成长方体）；'
+        '顶面是圆且中心收成一个尖 = 圆锥；底面是方/多边形而顶部收成尖 = 棱锥；'
+        '看不到关键面时给低置信。\n'
+        '只输出 JSON：{"objects":[{"id":1,"shape":"...","color":"...","confidence":0.0,"reason":"..."}]}'
+    )
 
-    返回 {'shape','raw_shape','conf','color','reason','ms','dist'}；匹配不上返回 None。
+
+def _prompt_crops(n: int, candidates) -> str:
+    names = '、'.join(candidates)
+    return (
+        f'这是一张拼图，共 {n} 个编号格子（左上角有数字 1..{n}），每个格子是一个物块的放大裁剪。\n'
+        f'请对每个编号判断“形状”和“颜色”。形状只能从：{names}。\n'
+        '注意：拍摄角约 60° 俯视（能看到顶面 + 一小部分侧面），纵深被压缩；'
+        '顶面是圆、往上收成一个尖 = 圆锥；底面是多边形、往上收成尖 = 棱锥；'
+        '圆面但侧壁竖直 = 圆柱；看不到关键面时给低置信。颜色写主色（红/黄/蓝/绿/浅蓝/黑/白）。\n'
+        '只输出 JSON：{"objects":[{"id":1,"shape":"...","color":"...","confidence":0.0,"reason":"..."}]}'
+    )
+
+
+_CROP_CACHE = {}
+
+
+def ask_crops(warp, items, candidates=None, timeout=DEFAULT_TIMEOUT, model=None,
+              detail='high', cell=300, pad=0.18):
+    """把每个物块的 bbox 裁剪放大，拼成一张带编号的图，一次请求返回 {id: {...}}。"""
+    import cv2
+    import numpy as np
+
+    key = api_key()
+    if not key or not items:
+        return None
+
+    crops = []
+    for it in items:
+        m = it.get('mask')
+        if m is None:
+            return None
+        ys, xs = np.nonzero(m)
+        if ys.size == 0:
+            return None
+        y0, y1 = int(ys.min()), int(ys.max())
+        x0, x1 = int(xs.min()), int(xs.max())
+        pw = int((x1 - x0) * pad) + 4
+        ph = int((y1 - y0) * pad) + 4
+        x0, x1 = max(0, x0 - pw), min(warp.shape[1], x1 + pw)
+        y0, y1 = max(0, y0 - ph), min(warp.shape[0], y1 + ph)
+        c = warp[y0:y1, x0:x1]
+        if c.size == 0:
+            return None
+        c = cv2.resize(c, (cell - 24, cell - 24), interpolation=cv2.INTER_LINEAR)
+        crops.append(c)
+
+    n = len(crops)
+    cols = min(3, n)
+    rows = (n + cols - 1) // cols
+    sheet = np.full((rows * cell, cols * cell, 3), 245, np.uint8)
+    for i, c in enumerate(crops):
+        r, q = divmod(i, cols)
+        y, x = r * cell + 12, q * cell + 12
+        sheet[y:y + c.shape[0], x:x + c.shape[1]] = c
+        cv2.putText(sheet, str(i + 1), (q * cell + 6, r * cell + 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 5)
+        cv2.putText(sheet, str(i + 1), (q * cell + 6, r * cell + 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+
+    fp = _fingerprint(sheet) + '|c%d' % n
+    now = time.time()
+    if _CROP_CACHE.get(fp) and now - _CROP_CACHE[fp][0] < CACHE_TTL:
+        return _CROP_CACHE[fp][1]
+
+    t0 = time.time()
+    try:
+        body = {
+            'model': model or DEFAULT_MODEL,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': _prompt_crops(n, candidates or SHAPES)},
+                    {'type': 'image_url', 'image_url': {
+                        'url': 'data:image/jpeg;base64,' + _encode(sheet, max_side=1024),
+                        'detail': detail}},
+                ],
+            }],
+            'max_tokens': 900,
+            'temperature': 0,
+            'thinking': {'type': 'disabled'},
+            'response_format': {'type': 'json_object'},
+        }
+        payload = _post(body, key, timeout)
+        text = (payload.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+        obj = json.loads(text) if text.strip() else {}
+        by_id = {}
+        for it in (obj.get('objects') or []):
+            try:
+                i = int(it.get('id'))
+            except (TypeError, ValueError):
+                continue
+            raw = str(it.get('shape') or '')
+            by_id[i] = {
+                'shape': normalize_shape(raw), 'raw_shape': raw,
+                'color': normalize_color(it.get('color')),
+                'conf': float(it.get('confidence') or 0.0),
+                'reason': str(it.get('reason') or '')[:120],
+            }
+        res = {'by_id': by_id, 'ms': int((time.time() - t0) * 1000)}
+        _CROP_CACHE[fp] = (now, res)
+        return res
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def ask_numbered(warp, items, candidates=None, timeout=DEFAULT_TIMEOUT, model=None,
+                 detail='high'):
+    """对整幅图做一次请求，按叠加的编号返回 {id: {...}}（id 从 1 开始）。
+
+    items 为包含 'mask' 的物块列表；编号顺序与 items 顺序一致。
+    返回 {'by_id': {...}, 'ms': int} 或 None。
+    """
+    import base64
+    import cv2
+    import numpy as np
+
+    key = api_key()
+    if not key or not items:
+        return None
+    fp = _fingerprint(warp) + '|n%d' % len(items)
+    now = time.time()
+    if _CACHE.get(fp) and now - _CACHE[fp][0] < CACHE_TTL:
+        return _CACHE[fp][1]
+
+    vis = warp.copy()
+    for i, it in enumerate(items, 1):
+        m = it.get('mask')
+        if m is None:
+            continue
+        cnts = cv2.findContours((m > 0).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE)[0]
+        if not cnts:
+            continue
+        c = max(cnts, key=cv2.contourArea)
+        cv2.drawContours(vis, [c], -1, (0, 255, 255), 3)
+        x, y, w, h = cv2.boundingRect(c)
+        cv2.putText(vis, str(i), (x + 4, max(18, y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, (0, 0, 0), 5)
+        cv2.putText(vis, str(i), (x + 4, max(18, y - 6)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, (0, 255, 255), 2)
+
+    t0 = time.time()
+    try:
+        body = {
+            'model': model or DEFAULT_MODEL,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': _prompt_numbered(len(items), candidates or SHAPES)},
+                    {'type': 'image_url', 'image_url': {
+                        'url': 'data:image/jpeg;base64,' + _encode(vis), 'detail': detail}},
+                ],
+            }],
+            'max_tokens': 900,
+            'temperature': 0,
+            'thinking': {'type': 'disabled'},
+            'response_format': {'type': 'json_object'},
+        }
+        payload = _post(body, key, timeout)
+        text = (payload.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+        obj = json.loads(text) if text.strip() else {}
+        by_id = {}
+        for it in (obj.get('objects') or []):
+            try:
+                i = int(it.get('id'))
+            except (TypeError, ValueError):
+                continue
+            raw = str(it.get('shape') or '')
+            by_id[i] = {
+                'shape': normalize_shape(raw), 'raw_shape': raw,
+                'color': normalize_color(it.get('color')),
+                'conf': float(it.get('confidence') or 0.0),
+                'reason': str(it.get('reason') or '')[:120],
+            }
+        res = {'by_id': by_id, 'ms': int((time.time() - t0) * 1000)}
+        _CACHE[fp] = (now, res)
+        return res
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def match(warp, mask, min_dist: float = 0.18, color=None, candidates=None,
+          timeout: float = DEFAULT_TIMEOUT, model=None):
+    """把整幅图批量结果里的某个物块匹配到当前掩膜。
+
+    匹配优先级：①颜色相同（LLM 的中心坐标不稳，颜色更可靠）→ ②中心最近（距离 <= min_dist）。
+    返回 {'shape','raw_shape','conf','color','reason','ms','dist','by'}；匹配不上返回 None。
     """
     import numpy as np  # 局部导入，避免模块级强依赖
 
@@ -265,31 +480,46 @@ def match(warp, mask, min_dist: float = 0.18, candidates: Optional[List[str]] = 
         return None
     h, w = mask.shape[:2]
     cu, cv_ = float(xs.mean()) / w, float(ys.mean()) / h
-    best, best_d = None, 1e9
-    for o in r['objects']:
+
+    def _center(o):
         c = o.get('center') or None
         if not c or len(c) < 2:
-            continue
+            return None
         try:
             ox, oy = float(c[0]), float(c[1])
         except (TypeError, ValueError):
-            continue
-        # 模型可能给 0..1 归一化，也可能给像素（按 1000 归一或 0..w 像素）
+            return None
         if ox > 1.5 or oy > 1.5:
-            if ox > 1.5 and ox <= w and oy <= h and max(ox, oy) > 2:
+            if ox > 1.5 and ox <= w and oy <= h:
                 ox, oy = ox / w, oy / h
             else:
                 ox, oy = ox / 1000.0, oy / 1000.0
-        d = ((ox - cu) ** 2 + (oy - cv_) ** 2) ** 0.5
-        if d < best_d:
-            best, best_d = o, d
-    if best is None or best_d > min_dist:
+        return ox, oy
+
+    want = normalize_color(color) if color else None
+    best, best_key, best_d = None, None, 1e9
+    for o in r['objects']:
+        c = _center(o)
+        if c is None:
+            continue
+        d = ((c[0] - cu) ** 2 + (c[1] - cv_) ** 2) ** 0.5
+        same = bool(want) and normalize_color(o.get('color')) == want
+        # 颜色相同：即使距离远一点也优先；否则要求距离足够近
+        if same:
+            key = (0, d)
+        elif d <= min_dist:
+            key = (1, d)
+        else:
+            continue
+        if key < (best_key if best_key else (9, 9e9)):
+            best, best_key, best_d = o, key, d
+    if best is None:
         return None
     out = dict(best)
     out['dist'] = round(best_d, 3)
+    out['by'] = 'color' if best_key[0] == 0 else 'center'
     out['ms'] = r.get('ms', 0)
     return out
-
 
 
 def describe(res: Optional[Dict[str, Any]]) -> str:

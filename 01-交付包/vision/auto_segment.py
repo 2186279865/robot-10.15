@@ -207,9 +207,11 @@ class AutoSegmenter:
             M = cv2.moments(c)
             cx = M['m10'] / M['m00'] if M['m00'] else x + bw / 2
             cy = M['m01'] / M['m00'] if M['m00'] else y + bh / 2
+            _mean_bgr = cv2.mean(frame, mask=(m > 0).astype('uint8'))[:3]
             out.append({'mask': m, 'contour': c, 'bbox': [x, y, bw, bh],
                         'center_px': [round(cx, 2), round(cy, 2)],
                         'center_tray': [round(cx / w, 4), round(cy / h, 4)],
+                        'mean_bgr': [round(v, 1) for v in _mean_bgr],
                         'area_px': round(area, 1), 'confidence': round(float(score), 3)})
         # 去重：两路提示常常对同一个物体返回“顶面”和“整体”两张掩膜，它们可能只有
         # 部分重叠（IoU 不到 .45），所以除了 IoU/包含，还按中心距离合并同位置目标。
@@ -249,6 +251,12 @@ class AutoSegmenter:
         dy = max(0, max(ay, by) - min(ay + ah, by + bh))
         if dx > gap or dy > gap:
             return False
+        ca, cb = item.get('mean_bgr'), other.get('mean_bgr')
+        if ca and cb:
+            import math as _math
+            d = _math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(ca, cb)))
+            if d > 42.0:          # 颜色差太大 → 是两件不同色的物块，不合并
+                return False
         uw = max(ax + aw, bx + bw) - min(ax, bx)
         uh = max(ay + ah, by + bh) - min(ay, by)
         return uw <= 1.40 * max(aw, bw) and uh <= 1.75 * max(ah, bh)

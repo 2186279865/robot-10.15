@@ -162,7 +162,7 @@ class View:
 
 class App:
     def _vlm_crop_now(self):
-        """取当前目标区域（没有目标就取整幅校正图）给千问看。"""
+        """取当前目标区域（没有目标就取整幅校正图）给 DeepSeek 看。"""
         tf = self.tf
         if tf is None or len(getattr(self, 'points', [])) != 4:
             return None
@@ -223,45 +223,6 @@ class App:
         text = '用时 %d ms\n\n' % int(r.get('ms') or 0) + '\n'.join(lines)
         self.note('DeepSeek 复核：' + ' | '.join(lines)[:200])
         messagebox.showinfo('DeepSeek 复核', text, parent=self)
-
-    def on_vlm_check(self):
-        """手动让本地千问看一眼当前画面（用完即卸，避免和 SAM 抢显存）。"""
-        try:
-            import local_vlm as _vlm
-        except Exception as exc:              # noqa: BLE001
-            messagebox.showerror('千问不可用', str(exc))
-            return
-        if not _vlm.available():
-            messagebox.showerror('千问不可用', 'Ollama 没在跑（127.0.0.1:11434）')
-            return
-        crop = self._vlm_crop_now()
-        if crop is None:
-            messagebox.showinfo('千问复核', '先「打开双画面」，让画面里有物块')
-            return
-        self.note('千问复核中（首次加载约 1 分钟，之后 ~2–3 s）…')
-
-        def _work():
-            r = _vlm.ask_shape(crop, timeout=180.0)
-
-            def _done():
-                if not r or not r.get('shape'):
-                    self.note('千问复核失败（超时或解析失败）')
-                    return
-                msg = '千问：%s conf=%.2f %dms %s' % (
-                    r['shape'], r.get('conf', 0), r.get('ms', 0), (r.get('reason') or '')[:60])
-                self.note(msg)
-                try:
-                    messagebox.showinfo('千问复核', msg)
-                except Exception:             # noqa: BLE001
-                    pass
-
-            try:
-                self.r.after(0, _done)
-            except Exception:                 # noqa: BLE001
-                pass
-
-        import threading as _th
-        _th.Thread(target=_work, daemon=True).start()
 
     def __init__(self, r, embedded=False, ctrl=None, with_ctrl=True):
         self.r = r
@@ -398,7 +359,6 @@ class App:
                    command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
-        ttk.Button(bot, text='千问复核', command=self.on_vlm_check).pack(side='left', padx=3)
         ttk.Button(bot, text='DeepSeek复核', command=self.on_cloud_check).pack(side='left', padx=3)
         ttk.Button(bot, text='交换主副摄', command=self.swap_cams).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
@@ -1295,12 +1255,47 @@ class App:
             self.times[k] = float(v) if old is None else old * (1 - a) + float(v) * a
 
     def classify_fused(self, fused, tw, sw):
-        for f in fused:
-            t, s = f.get('top'), f.get('side')
+        """分类：DeepSeek 看整幅校正图（裸图）返回物体，再与分割目标按中心最近配对。"""
+        objs = []
+        try:
+            cc = (self.cfg or {}).get('cloud_vlm') or {}
+            tops = [f.get('top') for f in fused if f.get('top') is not None]
+            if (cc.get('enabled') and cc.get('mode') == 'primary'
+                    and tw is not None and tops
+                    and getattr(classify, '_CVLM', None) is not None):
+                r = classify._CVLM.ask_objects_cached(
+                    tw, candidates=cc.get('candidates'),
+                    timeout=float(cc.get('timeout_s') or 10.0),
+                    model=cc.get('model'))
+                objs = [o for o in (r or {}).get('objects', []) if o.get('shape')]
+                self._vlm_ms = (r or {}).get('ms')
+        except Exception:                                  # noqa: BLE001
+            objs = []
+        # 目标中心（归一化）
+        tops = [f.get('top') for f in fused if f.get('top') is not None]
+        used = set()
+        for i, f in enumerate(fused, 1):
+            t, s_ = f.get('top'), f.get('side')
             if t is not None and tw is not None:
-                classify.classify_item(tw, t, self.cfg, self.samples, side_warp=sw, side_item=s)
-            if s is not None and sw is not None and t is None:
-                classify.classify_item(sw, s, self.cfg, self.samples, side_only=True)
+                obj = None
+                if objs:
+                    cu, cv = t.get('center_tray') or [0.5, 0.5]
+                    best, bd = None, 1e9
+                    for k, o in enumerate(objs):
+                        if k in used:
+                            continue
+                        oc = o.get('center') or [0.5, 0.5]
+                        d = ((float(oc[0]) - float(cu)) ** 2 +
+                             (float(oc[1]) - float(cv)) ** 2) ** .5
+                        if d < bd:
+                            best, bd = k, d
+                    if best is not None and bd <= .22:
+                        used.add(best)
+                        obj = objs[best]
+                classify.classify_item(tw, t, self.cfg, self.samples,
+                                       side_warp=sw, side_item=s_, vlm_obj=obj)
+            if s_ is not None and sw is not None and t is None:
+                classify.classify_item(sw, s_, self.cfg, self.samples, side_only=True)
 
     def write_targets(self, fused):
         o = ROOT / 'runtime'
