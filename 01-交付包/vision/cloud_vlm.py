@@ -593,6 +593,16 @@ def ask_objects2(top_img, side_img=None, candidates: Optional[List[str]] = None,
         for it in (obj.get('objects') or []):
             raw = str(it.get('shape') or '')
             c = it.get('center') or it.get('centre') or []
+            # 模型有时给像素坐标（0..700），统一归一到 0..1
+            if len(c) >= 2:
+                try:
+                    cx, cy = float(c[0]), float(c[1])
+                    if cx > 1.5 or cy > 1.5:
+                        hh, ww = top_img.shape[:2]
+                        cx, cy = cx / max(1.0, float(ww)), cy / max(1.0, float(hh))
+                    c = [max(0.0, min(1.0, cx)), max(0.0, min(1.0, cy))]
+                except Exception:                      # noqa: BLE001
+                    c = []
             out.append({
                 'shape': normalize_shape(raw),
                 'raw_shape': raw,

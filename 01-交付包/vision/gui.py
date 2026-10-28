@@ -1284,6 +1284,19 @@ class App:
             try:
                 labeled = classify.attach_vlm_to_fused(fused, objs, tw,
                                                 color_from_mask=bool(_cc0.get('color_from_mask', False)))
+                if not labeled and _call is classify._CVLM.ask_objects2_cached and tw is not None:
+                    # 两图结果与分割目标对不上（常见于模型把图2坐标混进来）→ 用单图重试一次
+                    r2 = classify._CVLM.ask_objects_cached(
+                        tw, candidates=cc.get('candidates'),
+                        timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
+                    objs2 = [o for o in (r2 or {}).get('objects', []) if o.get('shape')]
+                    if objs2:
+                        objs = objs2
+                        self._vlm_ms = (r2 or {}).get('ms')
+                        self.note('双图结果未对齐，已用单图重试（%d 个目标）' % len(objs2))
+                        labeled = classify.attach_vlm_to_fused(
+                            fused, objs, tw,
+                            color_from_mask=bool(_cc0.get('color_from_mask', False)))
                 if labeled:
                     fused[:] = labeled
                     self.note('DeepSeek 分类 + SAM 定位：%d 个目标' % len(labeled))
