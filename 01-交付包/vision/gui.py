@@ -1213,6 +1213,10 @@ class App:
     def detect_and_fuse(self, tf, sf, side_every=1, stats_out=None):
         st = {}
         t0 = time.perf_counter()
+        try:
+            self._rec_q.put(('stage', '顶视：校正 + SAM 分割…'))
+        except Exception:                      # noqa: BLE001
+            pass
         top, tw = self.detect_targets(tf, 'top', st) if tf is not None else ([], None)
         side, sw, reused = [], None, False
         if sf is not None:
@@ -1222,6 +1226,10 @@ class App:
                 side, sw = self.side_cache
                 reused = True
             else:
+                try:
+                    self._rec_q.put(('stage', '副摄：校正 + SAM 分割…'))
+                except Exception:              # noqa: BLE001
+                    pass
                 side, sw = self.detect_targets(sf, 'side', st)
                 self.side_cache = (side, sw)
         elif self.side_cache is not None:
@@ -1263,15 +1271,21 @@ class App:
             if (cc.get('enabled') and cc.get('mode') == 'primary'
                     and tw is not None and tops
                     and getattr(classify, '_CVLM', None) is not None):
+                try:
+                    self._rec_q.put(('stage', 'DeepSeek 识别中…'))
+                except Exception:              # noqa: BLE001
+                    pass
                 _views = str(cc.get('views') or 'two')
                 _call = (classify._CVLM.ask_objects2_cached if (_views != 'top' and sw is not None)
                          else classify._CVLM.ask_objects_cached)
                 if _call is classify._CVLM.ask_objects2_cached:
+                    _tmo = min(float(cc.get('timeout_s') or 10.0), 8.0)
                     r = _call(tw, sw, candidates=cc.get('candidates'),
-                              timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
+                              timeout=_tmo, model=cc.get('model'))
                 else:
+                    _tmo = min(float(cc.get('timeout_s') or 10.0), 8.0)
                     r = _call(tw, candidates=cc.get('candidates'),
-                              timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
+                              timeout=_tmo, model=cc.get('model'))
                 objs = [o for o in (r or {}).get('objects', []) if o.get('shape')]
                 self._vlm_ms = (r or {}).get('ms')
         except Exception:                                  # noqa: BLE001
@@ -1888,6 +1902,18 @@ class App:
 
     def _rec_pump(self):
         """主线程轮询工作线程的进度/结果（100 ms）。"""
+        # 看门狗：识别超过 90 s 仍未结束 → 解除界面锁定并允许重试（线程可能仍卡在 SAM/网络里）
+        try:
+            if getattr(self, '_rec_busy', False):
+                t0 = getattr(self, '_rec_t0', None)
+                if t0 and (time.time() - t0) > 90.0:
+                    self._rec_abort = True
+                    self._rec_busy = False
+                    self._rec_set(0, '识别超时（>90 s）', busy=False)
+                    self.note('识别超时（>90 s）：已解除锁定，可点「单次识别」重试；'
+                              '若反复超时请把「原始日志」这段发我')
+        except Exception:                      # noqa: BLE001
+            pass
         try:
             while True:
                 kind, *rest = self._rec_q.get_nowait()
@@ -1925,7 +1951,7 @@ class App:
         if not self.ensure_segmenter():
             return 0, 'SAM 模型没加载成功'
         n = int(self.cfg.get('frames_for_vote', 3) or 3)
-        return max(2, min(5, n)), ''
+        return max(1, min(5, n)), ''
 
     def recognize(self, callback=None):
         """起线程做识别；callback(ok, info) 在识别结束后于主线程被调用。"""
@@ -1939,6 +1965,8 @@ class App:
                 callback(False, err)
             return False
         self._rec_busy = True
+        self._rec_abort = False
+        self._rec_t0 = time.time()
         self._rec_cb = callback
         self._rec_set(0, '识别中 0/%d 帧' % n, busy=True)
 
@@ -1977,6 +2005,8 @@ class App:
         stats_all = []
         t_start = time.perf_counter()
         for i in range(n):
+            if getattr(self, '_rec_abort', False):
+                raise RuntimeError('识别已被取消（超时）')
             tf = self.a.get() if self.a else self.tf
             sf = (self.bstream.get() if (self.bstream is not None
                                          and len(self.side_points) == 4) else None)
