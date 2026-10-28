@@ -896,9 +896,9 @@ static void host_query_sweep(uint32_t now)
 #define HOST_GOTO_GAP     7U   /* 发位移帧前先等总线安静 */
 
 #define HOST_GOTO_FRESH_MS      3000U   /* counts 超过这么久没更新就不敢用它算误差 */
-#define HOST_GOTO_STABLE_COUNTS 40      /* 两个新样本差多少算"没动" */
-#define HOST_GOTO_STABLE_NEED   2U      /* 连续几次"没动"算停稳 */
-#define HOST_GOTO_GAP_MS        20U     /* 离最后一份回读样本至少空这么久再发 */
+#define HOST_GOTO_STABLE_COUNTS 60      /* 两个新样本差多少算"没动"（放宽防误判）*/
+#define HOST_GOTO_STABLE_NEED   1U      /* 连续几次"没动"算停稳（1 次即可）*/
+#define HOST_GOTO_GAP_MS        10U     /* 离最后一份回读样本至少空这么久再发（20->10）*/
 
 typedef struct
 {
