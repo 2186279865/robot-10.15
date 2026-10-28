@@ -80,7 +80,7 @@
     "五棱体": "五棱体"
   },
   "vlm": {
-    "enabled": true,
+    "enabled": false,
     "model": "qwen3-vl:4b-instruct",
     "url": "http://127.0.0.1:11434",
     "min_conf": 0.88,
@@ -103,6 +103,14 @@
       "圆柱/圆形",
       "球",
       "其他几何体"
-    ]
-  }
+    ],
+    "mode": "manual"
+  },
+  "target_filter": {
+    "area_min": 2000,
+    "area_max": 48000,
+    "edge_px": 3,
+    "drop_edge": true
+  },
+  "device": "cuda"
 }

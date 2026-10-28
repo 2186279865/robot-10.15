@@ -11,6 +11,8 @@ Put sam_b.pt (or sam2_b.pt) in new_eye/models/.
 from pathlib import Path
 import os
 import cv2
+import os
+
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
@@ -156,7 +158,9 @@ class AutoSegmenter:
             return []
         # 注意：ultralytics 8.3 的 SAM.predict() 不接受 multimask_output（它只属于内部
         # prompt_inference），传入会被 get_cfg() 当成非法参数直接抛 SyntaxError。
-        result = self.model.predict(frame, points=pts, labels=[1] * len(pts), verbose=False)[0]
+        _dev = (cfg.get('device') if cfg else None) or os.environ.get('ROBOT_SAM_DEVICE') or 'cpu'
+        result = self.model.predict(frame, points=pts, labels=[1] * len(pts),
+                                   verbose=False, device=_dev)[0]
         if result.masks is None:
             return []
         masks = result.masks.data.cpu().numpy()
@@ -177,6 +181,15 @@ class AutoSegmenter:
             # 托盘/背景掩膜：贴边且面积大，直接丢弃（托盘本体就是最大的背景块）。
             if (x <= 3 or y <= 3 or x + bw >= w - 3 or y + bh >= h - 3) and area > h * w * .15:
                 continue
+            # 配置化的目标过滤：托盘外的杯子/夹爪常被当成“物块”。
+            _tf = cfg.get('target_filter') or {}
+            _amax = int(_tf.get('area_max') or 0)
+            if _amax and area > _amax:
+                continue
+            _edge = int(_tf.get('edge_px') or 0)
+            if _edge and _tf.get('drop_edge', True):
+                if x <= _edge or y <= _edge or x + bw >= w - _edge or y + bh >= h - _edge:
+                    continue
             # 掩膜必须确实落在候选前景上，否则就是空托盘/阴影被 SAM“补”出来的假目标。
             if fg[y:y + bh, x:x + bw].size == 0:
                 continue

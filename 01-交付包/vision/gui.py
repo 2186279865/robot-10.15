@@ -67,6 +67,7 @@ class Stream:
         except Exception:                    # noqa: BLE001
             pass
 
+
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -189,6 +190,69 @@ class View:
 
 
 class App:
+    def _vlm_crop_now(self):
+        """取当前目标区域（没有目标就取整幅校正图）给千问看。"""
+        tf = self.tf
+        if tf is None or len(getattr(self, 'points', [])) != 4:
+            return None
+        s = 700
+        src = np.array(self.points, dtype=np.float32)
+        dst = np.array([[0, 0], [s, 0], [s, s], [0, s]], dtype=np.float32)
+        H = cv2.getPerspectiveTransform(src, dst)
+        warp = cv2.warpPerspective(tf, H, (s, s))
+        crop = None
+        try:
+            items = getattr(self, 'last_items', None) or []
+            if items:
+                x, y, w, h = items[0].get('bbox_warped') or (0, 0, 0, 0)
+                if w > 10 and h > 10:
+                    pad = int(max(w, h) * 0.25)
+                    x0, y0 = max(0, x - pad), max(0, y - pad)
+                    x1, y1 = min(s, x + w + pad), min(s, y + h + pad)
+                    crop = warp[y0:y1, x0:x1]
+        except Exception:                     # noqa: BLE001
+            crop = None
+        return crop if crop is not None and crop.size else warp
+
+    def on_vlm_check(self):
+        """手动让本地千问看一眼当前画面（用完即卸，避免和 SAM 抢显存）。"""
+        try:
+            import local_vlm as _vlm
+        except Exception as exc:              # noqa: BLE001
+            messagebox.showerror('千问不可用', str(exc))
+            return
+        if not _vlm.available():
+            messagebox.showerror('千问不可用', 'Ollama 没在跑（127.0.0.1:11434）')
+            return
+        crop = self._vlm_crop_now()
+        if crop is None:
+            messagebox.showinfo('千问复核', '先「打开双画面」，让画面里有物块')
+            return
+        self.note('千问复核中（首次加载约 1 分钟，之后 ~2–3 s）…')
+
+        def _work():
+            r = _vlm.ask_shape(crop, timeout=180.0)
+
+            def _done():
+                if not r or not r.get('shape'):
+                    self.note('千问复核失败（超时或解析失败）')
+                    return
+                msg = '千问：%s conf=%.2f %dms %s' % (
+                    r['shape'], r.get('conf', 0), r.get('ms', 0), (r.get('reason') or '')[:60])
+                self.note(msg)
+                try:
+                    messagebox.showinfo('千问复核', msg)
+                except Exception:             # noqa: BLE001
+                    pass
+
+            try:
+                self.r.after(0, _done)
+            except Exception:                 # noqa: BLE001
+                pass
+
+        import threading as _th
+        _th.Thread(target=_work, daemon=True).start()
+
     def __init__(self, r, embedded=False, ctrl=None, with_ctrl=True):
         self.r = r
         self.embedded = bool(embedded)
@@ -324,6 +388,7 @@ class App:
                    command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
+        ttk.Button(bot, text='千问复核', command=self.on_vlm_check).pack(side='left', padx=3)
         ttk.Button(bot, text='交换主副摄', command=self.swap_cams).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bot, text='高级', variable=self.adv_var,
@@ -1126,8 +1191,24 @@ class App:
         masks = self.segmenter.segment(warp, bg, self.cfg)
         t2 = time.perf_counter()
         out = []
+        # 目标过滤：托盘外的杯子/夹爪常被 SAM 当成“物块”。
+        # 物块在同尺寸托盘里最大也就 ~4.8 万像素（40 mm 级长方体），杯子/夹爪更大或贴边。
+        tf = self.cfg.get('target_filter') or {}
+        a_min = int(tf.get('area_min', 2000))
+        a_max = int(tf.get('area_max', 48000))
+        edge = int(tf.get('edge_px', 3))
+        dropped = 0
         for m in masks:
             x, y, w, h = m['bbox']
+            area = int(m.get('area_px') or 0)
+            if area < a_min or area > a_max:
+                dropped += 1
+                continue
+            if x <= edge or y <= edge or x + w >= s - edge or y + h >= s - edge:
+                # 贴边目标：物块不会正好贴着托盘边框被切掉，多半是托盘外的物体
+                if tf.get('drop_edge', True):
+                    dropped += 1
+                    continue
             corners = np.float32([[[x, y], [x + w, y], [x + w, y + h], [x, y + h]]])
             back = cv2.perspectiveTransform(corners, inv)[0]
             bx, by, bw, bh = cv2.boundingRect(back.astype(np.float32))
@@ -1143,6 +1224,8 @@ class App:
                         'center_orig': (float(ctr[0]), float(ctr[1])),
                         'center_tray': m['center_tray'],
                         'area_px': m['area_px'], 'confidence': m['confidence']})
+        if dropped:
+            self.note('过滤掉 %d 个疑似托盘外目标（过大或贴边）' % dropped)
         # 先给每个目标量一次颜色（两路都量），融合时用它判断两路是否指向同一物体
         for it in out:
             try:
