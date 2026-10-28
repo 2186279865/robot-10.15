@@ -49,6 +49,7 @@ RPM = {AXIS_Z: 1500, AXIS_X: 120, AXIS_Y: 300, AXIS_TRAY: 300}
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
 _ACC_DEFAULT = 0            # 加速度档：0 最快（现场实测 acc 越大越慢）
+TRAY_RPM = 5              # 转盘转速（现场实测：5 刚好，太快会甩货）
 BOX_STEP_DEG = 60.0
 BOX_COUNT = 6
 
@@ -188,12 +189,15 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
                 'target': describe(target), 'dropped': False}
     if abs(tray_deg) >= 1.0:
-        # 10 空盒转到落料位：用相对脉冲（固件 motor_angle 需要角度基准，掉电会丢，这里不依赖它）
-        _n = int(round(abs(tray_deg) / 360.0 * 3200.0))
-        _d = 0 if tray_deg >= 0 else 1
-        say('转盘 %+.0f°（%d 脉冲）' % (tray_deg, _n))
-        client.send('motor_pos', AXIS_TRAY, _d, int(RPM.get(AXIS_TRAY, 300)),
-                    _ACC_DEFAULT, _n, 'rel')
+        # 10 空盒转到落料位：闭环 goto + 指定慢转速（现场实测 rpm≈5 合适；motor_angle 需要角度基准，不用）
+        _n = int(round(tray_deg / 360.0 * 3200.0))
+        say('转盘 %+.0f°（%d 脉冲，rpm %d）' % (tray_deg, _n, TRAY_RPM))
+        try:
+            client.goto(AXIS_TRAY, _n, rpm=TRAY_RPM)
+        except Exception as _exc:                       # noqa: BLE001
+            say('转盘闭环失败（%s），退回相对脉冲' % _exc)
+            _d = 0 if tray_deg >= 0 else 1
+            client.send('motor_pos', AXIS_TRAY, _d, TRAY_RPM, _ACC_DEFAULT, abs(_n), 'rel')
     time.sleep(0.3)
     time.sleep(0.5)
     say('松爪 180° → 等待落盒 → 回预备 158°')

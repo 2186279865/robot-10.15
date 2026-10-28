@@ -114,7 +114,7 @@ class SequenceTest(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertAlmostEqual(result['elapsed'] >= 0, True)
 
-        axes = [c[1][0] for c in client.gotos()]
+        axes = [c[1][0] for c in client.gotos() if c[1][0] != AG.AXIS_TRAY]  # 转盘单独校验
         # 顺序（固定路线硬规矩：穿通道时 Z 必须在底部）：
         # Y 进通道 → Z 抬顶 → X/Y 对准 → Z 降底 → Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0
         self.assertEqual(axes, [5, 1, 4, 5, 1, 1, 4, 5, 1, 5])
@@ -125,13 +125,11 @@ class SequenceTest(unittest.TestCase):
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0
-        tray_moves = [c for c in client.calls
-                      if c[0] == 'motor_pos' and c[1][0] == AG.AXIS_TRAY]
-        self.assertEqual(len(tray_moves), 1)
-        args = tray_moves[0][1]                            # (addr, dir, rpm, acc, pulses, mode)
-        self.assertEqual(args[1], 0)                       # dir 正向
-        self.assertEqual(args[4], int(round(AG.TRAY_DEG / 360.0 * 3200)))  # 533 脉冲
-        self.assertEqual(args[5], 'rel')
+        # 落货转盘：闭环慢速 goto（rpm=TRAY_RPM），60° = 533 脉冲
+        tray = [c for c in client.calls if c[0] == 'goto' and c[1][0] == AG.AXIS_TRAY]
+        self.assertEqual(len(tray), 1)
+        self.assertEqual(tray[0][1][1], int(round(AG.TRAY_DEG / 360.0 * 3200)))
+        self.assertEqual(tray[0][1][2], AG.TRAY_RPM)
 
     def test_run_once_refuses_when_offline(self):
         client = FakeClient()
