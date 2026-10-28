@@ -1288,7 +1288,17 @@ class App:
                     fused[:] = labeled
                     self.note('DeepSeek 分类 + SAM 定位：%d 个目标' % len(labeled))
                     return
-                self.note('DeepSeek 分类未与任何分割目标匹配，回退几何判据')
+                try:
+                    _dbg = {'ms': (self._vlm_ms or 0), 'views': (objs[0].get('views') if objs else None),
+                            'objs': objs[:8],
+                            'items': [{'uv': (f.get('top') or {}).get('center_tray'),
+                                       'shape': (f.get('top') or {}).get('shape')} for f in fused[:8]]}
+                    (Path(__file__).parent / 'runtime').mkdir(exist_ok=True)
+                    (Path(__file__).parent / 'runtime' / 'vlm_debug.json').write_text(
+                        json.dumps(_dbg, ensure_ascii=False, indent=2), encoding='utf-8')
+                except Exception:
+                    pass
+                self.note('DeepSeek 分类未与任何分割目标匹配，回退几何判据（详见 runtime/vlm_debug.json）')
             except Exception as exc:                       # noqa: BLE001
                 self.note('DeepSeek 贴标签失败：%s' % exc)
         # 目标中心（归一化）
