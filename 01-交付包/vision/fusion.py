@@ -20,7 +20,10 @@
 
 坐标系约定：center_tray = [u, v]，u 为 700 宽图的比例坐标 0~1。
 """
+import math
+
 MAX_DIST = .18     # 顶视与副摄同一目标允许的最大水平差（700px 图约 126px）
+DUP_SIDE_DIST = .10  # 副摄把同一物块拆成多块时，距已配对目标这么近的"多余块"丢弃
 AXIS_NAMES = {'u': '左右(u)', 'v': '前后(v)'}
 
 
@@ -75,7 +78,8 @@ def _match(top, side, flip, max_dist, axis='u'):
     return matches, used, cost, flip
 
 
-def fuse(top, side, max_dist=MAX_DIST, flip_mode=0, axis_mode=0, info=None):
+def fuse(top, side, max_dist=MAX_DIST, flip_mode=0, axis_mode=0, info=None,
+         dup_dist=DUP_SIDE_DIST):
     """合并两路检测，返回带 id 的融合目标列表。
 
     flip_mode：副摄画面左右方向。0=自动判断，1=同向（不翻转），2=镜像（翻转）。
@@ -118,10 +122,23 @@ def fuse(top, side, max_dist=MAX_DIST, flip_mode=0, axis_mode=0, info=None):
             item['color_mismatch'] = bool(tc and sc and tc != '未知' and sc != '未知' and tc != sc)
         fused.append(item)
     side_only = 0
+    dup_side = 0
+    used_sides = [side[j] for j in matches.values() if j is not None]
+
+    def _uv(it):
+        c = it.get('center_tray') or (0.0, 0.0)
+        return float(c[0]), float(c[1])
+
     for j, s in enumerate(side):
-        if j not in used:
-            fused.append({'top': None, 'side': s, 'views': 'side'})
-            side_only += 1
+        if j in used:
+            continue
+        su, sv = _uv(s)
+        near = any(math.hypot(su - mu, sv - mv) <= dup_dist for mu, mv in map(_uv, used_sides))
+        if near:
+            dup_side += 1          # 副摄把同一物块拆成多块：丢弃碎块
+            continue
+        fused.append({'top': None, 'side': s, 'views': 'side'})
+        side_only += 1
 
     def key(f):
         it = f['top'] or f['side']
@@ -137,6 +154,7 @@ def fuse(top, side, max_dist=MAX_DIST, flip_mode=0, axis_mode=0, info=None):
                     axis_mode=int(axis_mode or 0), n_top=len(top), n_side=len(side),
                     matched=len(matches),
                     mean_dist=(sum(dists) / len(dists)) if dists else None,
+                    duplicate_side=dup_side,
                     unmatched_top=len(top) - len(matches),
                     unmatched_side=side_only,
                     auto=(flip_mode in (0, None) and axis_mode in (0, None)))
