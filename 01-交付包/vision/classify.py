@@ -17,6 +17,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+try:
+    import local_vlm as _VLM
+except Exception:            # noqa: BLE001
+    _VLM = None
+
 ROOT = Path(__file__).resolve().parent
 SAMPLES = ROOT / 'samples.json'
 
@@ -385,6 +390,34 @@ def _result(cid, name, key, conf, source, cfg):
             'need_review': False}
 
 
+
+def _roi_crop(warp, mask, pad=0.28, max_side=520):
+    """按掩膜 bbox 外扩裁一块，给视觉大模型看细节。"""
+    try:
+        if warp is None or mask is None:
+            return None
+        ys, xs = np.nonzero(mask > 0)
+        if xs.size < 50:
+            return None
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+        w, h = x1 - x0, y1 - y0
+        dx, dy = int(w * pad), int(h * pad)
+        H, W = warp.shape[:2]
+        x0, x1 = max(0, x0 - dx), min(W, x1 + dx)
+        y0, y1 = max(0, y0 - dy), min(H, y1 + dy)
+        crop = warp[y0:y1, x0:x1]
+        if crop.size == 0:
+            return None
+        hh, ww = crop.shape[:2]
+        s = min(1.0, float(max_side) / max(hh, ww))
+        if s < 1.0:
+            crop = cv2.resize(crop, (int(ww * s), int(hh * s)), interpolation=cv2.INTER_AREA)
+        return crop
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
 def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=None, side_only=False):
     """给一个检测项补全颜色/形状/类别字段，返回原 item（原地更新）。"""
     cfg = cfg or {}
@@ -414,12 +447,41 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
                 shape, shape_conf = '球', max(.6, shape_conf)
             else:
                 shape_conf = max(shape_conf, .62)
+    # ---- 千问第二意见（只在低置信 / 易混类时出手，失败自动跳过）----
+    vlm_info = None
+    try:
+        vc = (cfg or {}).get('vlm') or {}
+        if vc.get('enabled') and _VLM is not None:
+            amb = tuple(vc.get('ambiguous') or ())
+            need = (shape_conf < float(vc.get('min_conf', 0.85))) or (shape in amb)
+            if need:
+                crop = _roi_crop(warp, mask)
+                if crop is not None:
+                    r = _VLM.ask_shape(
+                        crop,
+                        candidates=vc.get('candidates') or _VLM.SHAPES,
+                        timeout=float(vc.get('timeout_s', 8.0)),
+                        model=vc.get('model') or None)
+                    if r and r.get('shape'):
+                        vlm_info = r
+                        if r['shape'] == shape:
+                            shape_conf = max(shape_conf, .90)
+                        elif r['conf'] >= float(vc.get('accept_conf', 0.60)):
+                            shape = r['shape']
+                            shape_conf = max(.72, float(r['conf']))
+    except Exception:                                  # noqa: BLE001
+        vlm_info = None
+
     key = f'{shape}|{color}'
     feat = _feature(mask, hist, info, side_curv)
     cls = _lookup(key, shape, color, cfg, samples, feat)
     item.update({'color': color, 'color_conf': round(color_conf, 2),
                  'shape': shape, 'shape_conf': round(shape_conf, 2),
                  'side_curv': None if side_curv is None else round(side_curv, 2),
+                 'vlm_shape': (vlm_info or {}).get('shape'),
+                 'vlm_conf': None if not vlm_info else round(float(vlm_info.get('conf', 0)), 2),
+                 'vlm_ms': None if not vlm_info else int(vlm_info.get('ms', 0)),
+                 'vlm_reason': (vlm_info or {}).get('reason'),
                  'feature': feat, **cls})
     return item
 

@@ -78,5 +78,31 @@
   "empty_background": "runtime/empty_background.png",
   "class_names": {
     "五棱体": "五棱体"
+  },
+  "vlm": {
+    "enabled": true,
+    "model": "qwen3-vl:4b-instruct",
+    "url": "http://127.0.0.1:11434",
+    "min_conf": 0.88,
+    "accept_conf": 0.62,
+    "timeout_s": 8.0,
+    "ambiguous": [
+      "菱体/菱形",
+      "六棱体/多棱",
+      "圆柱/圆形",
+      "五棱体",
+      "其他几何体"
+    ],
+    "candidates": [
+      "正方体/正方形",
+      "长方体/长方形",
+      "菱体/菱形",
+      "三棱体/三角形",
+      "五棱体",
+      "六棱体/多棱",
+      "圆柱/圆形",
+      "球",
+      "其他几何体"
+    ]
   }
 }

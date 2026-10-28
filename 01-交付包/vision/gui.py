@@ -38,6 +38,35 @@ class Stream:
         self.frames = 0
         self.t0 = time.time()
 
+
+    def _warm_vlm_async(self):
+        """本地千问预热：第一次推理要加载模型（实测 ~85 s），放到后台线程做。"""
+        try:
+            if getattr(self, '_vlm_warm_armed', False):
+                return
+            vc = (self.cfg or {}).get('vlm') or {}
+            if not vc.get('enabled'):
+                return
+            import local_vlm as _vlm
+            if not _vlm.available():
+                self.note('本地千问没起来（Ollama 未运行），先只用几何判据')
+                return
+            self._vlm_warm_armed = True
+
+            def _warm():
+                t0 = time.time()
+                ok = _vlm.warmup(240.0)
+                msg = ('本地千问预热%s（%.0f s）' % ('完成' if ok else '失败', time.time() - t0))
+                try:
+                    self.r.after(0, lambda: self.note(msg))
+                except Exception:            # noqa: BLE001
+                    pass
+
+            threading.Thread(target=_warm, daemon=True).start()
+            self.note('本地千问预热中（首次约 1 分钟，不挡识别）')
+        except Exception:                    # noqa: BLE001
+            pass
+
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
 
@@ -811,6 +840,7 @@ class App:
             if not getattr(self, '_rec_pump_armed', False):
                 self._rec_pump_armed = True
                 self.r.after(120, self._rec_pump)
+            self._warm_vlm_async()
         except Exception as e:
             messagebox.showerror('打开失败', str(e))
 
