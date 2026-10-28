@@ -196,6 +196,122 @@ def _feature(mask, hist, shape_info, side_curv):
     return (vec / max(1e-9, n)).astype(np.float32)
 
 
+
+# ---------------------------------------------------------------- 顶面提取
+SAVE_SPLIT = True           # 调试期打开：每次判形状落一张 dbg_split_last.jpg（远程诊断用）
+_DBG_DIR = None
+
+
+def _dbg_dump(tag, warp, mask, extra=None):
+    """把当前 warp + mask（+ 顶面区域）拼一张图存盘，供远程诊断。"""
+    global _DBG_DIR
+    if not SAVE_SPLIT:
+        return
+    try:
+        import os
+        from pathlib import Path as _P
+        if _DBG_DIR is None:
+            _DBG_DIR = _P(__file__).resolve().parent / 'runtime'
+        _DBG_DIR.mkdir(parents=True, exist_ok=True)
+        vis = warp.copy() if warp is not None else np.zeros((700, 700, 3), np.uint8)
+        if mask is not None:
+            over = vis.copy()
+            over[mask > 0] = (0, 255, 0)
+            vis = cv2.addWeighted(vis, 0.65, over, 0.35, 0)
+        if extra is not None and extra[0] is not None:
+            tm = extra[0]
+            o2 = vis.copy()
+            o2[tm > 0] = (0, 200, 255)
+            vis = cv2.addWeighted(vis, 0.55, o2, 0.45, 0)
+        for i, line in enumerate((tag or '').split('|')):
+            if line:
+                cv2.putText(vis, line, (8, 24 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX,
+                            .6, (255, 255, 255), 2)
+        cv2.imwrite(str(_DBG_DIR / 'dbg_split_last.jpg'), vis)
+    except Exception:
+        pass
+
+
+def _split_top_face(warp, mask):
+    """把一块物体的掩膜按亮度/位置拆成"顶面"和"侧面"。
+
+    物理依据：相机是 60° 俯瞰，块状物体在画面里呈"顶面（上面）+ 侧面（下面）"
+    两块；顶面朝向光源通常更亮，而且一定在**上方**。整块轮廓是六边形，
+    直接判形状会把正方体判成六棱柱，所以先取顶面再判。
+
+    返回 (top_mask, top_contour) 或 None（拆不出来）。
+    """
+    try:
+        if warp is None or mask is None:
+            return None
+        sel = mask > 0
+        if sel.sum() < 300:
+            return None
+        gray = cv2.cvtColor(warp, cv2.COLOR_BGR2GRAY) if warp.ndim == 3 else warp
+        vals = gray[sel]
+        if vals.size < 300:
+            return None
+        # 用"掩膜内亮度中值"当分界（Otsu 在只有两级亮度时会退化成边界值，
+        # 导致一侧一个像素都没有）；顶面/侧面亮度差通常 > 10。
+        lo_v, hi_v = float(np.percentile(vals, 10)), float(np.percentile(vals, 90))
+        thr = 0.5 * (lo_v + hi_v)
+        if hi_v - lo_v < 8:                       # 亮度几乎均匀 → 看不清面
+            return None
+        hi = np.logical_and(sel, gray > thr)
+        lo = np.logical_and(sel, gray <= thr)
+        if hi.sum() < 200 or lo.sum() < 200:
+            return None
+        ys, _xs = np.nonzero(sel)
+        yy = np.arange(gray.shape[0])[:, None]
+        hi_y = float(np.average(np.broadcast_to(yy, gray.shape)[hi]))
+        lo_y = float(np.average(np.broadcast_to(yy, gray.shape)[lo]))
+        cand = hi if hi_y < lo_y else lo          # 顶面一定在上方
+        if cand.sum() < .28 * sel.sum():          # 太小 → 不是"面"，是反光
+            return None
+        m = (cand.astype(np.uint8)) * 255
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cs:
+            return None
+        c = max(cs, key=cv2.contourArea)
+        if cv2.contourArea(c) < 200:
+            return None
+        _dbg_dump('thr=%.0f hi_y=%.0f lo_y=%.0f use=%s hi_n=%d lo_n=%d'
+                  % (thr, hi_y, lo_y, 'hi' if cand is hi else 'lo',
+                     int(hi.sum()), int(lo.sum())), warp, mask, (m, c))
+        return m, c
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+# 60° 俯瞰下，顶面在图像里沿"纵深"方向被压缩约 sin60≈0.87，
+# 所以同一个正方体的顶面长宽比会量成 ~1.15；长方形会 >=1.4。用 1.30 分界。
+SQUARE_RATIO_MAX = 1.30
+
+
+def shape_of_item(warp, mask, contour):
+    """整块轮廓判一次；非"方正"时再取顶面重判，取置信度更高者。"""
+    shape, conf, info = _shape_of(mask, contour)
+    solid_ok = (info.get('rect_fill', 0) >= .88 and info.get('nv') == 4)
+    if solid_ok:
+        return shape, conf, info
+    tf = _split_top_face(warp, mask)
+    if tf is not None:
+        tmask, tcont = tf
+        _c0 = cv2.contourArea(tcont)
+        if _c0 >= .22 * max(1.0, cv2.contourArea(contour)):
+            s2, c2, i2 = _shape_of(tmask, tcont)
+            i2 = dict(i2)
+            i2['top_face'] = True
+            if i2.get('nv') == 4 and i2.get('rect_fill', 0) >= .85:
+                # 顶面是四边形 → 用长宽比判 正方/长方（阈值见上）
+                s2 = ('正方体/正方形' if i2['rect_ratio'] < SQUARE_RATIO_MAX
+                      else '长方体/长方形')
+                c2 = .84
+            if c2 >= conf:
+                return s2, c2, i2
+    return shape, conf, info
+
+
 # --------------------------------------------------------------------- 分类
 def _class_name(cid, cfg, samples):
     cls = ((samples or {}).get('classes') or {}).get(str(cid)) or {}
@@ -230,7 +346,7 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
                      'need_review': True, 'feature': None})
         return item
     color, color_conf, hist = _color_stats(warp, mask)
-    shape, shape_conf, info = _shape_of(mask, contour)
+    shape, shape_conf, info = shape_of_item(warp, mask, contour)
     side_curv = None
     if (side_item is not None and side_item.get('mask') is not None
             and cfg.get('side_shape_refine', True) and shape in ('圆柱/圆形', '其他几何体')):
