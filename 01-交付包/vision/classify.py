@@ -108,6 +108,34 @@ def _hist(hs, ss, vs):
 
 
 # --------------------------------------------------------------------- 形状
+
+def _sharp_corners(contour, peri):
+    """数"真正的角"：精细近似后，内角 < 130° 的顶点个数。
+    圆/椭圆/圆柱侧影的转折是钝的（≈180°），不会计数；多边形会。"""
+    try:
+        fine = cv2.approxPolyDP(contour, .02 * max(1.0, peri), True).reshape(-1, 2)
+        n = len(fine)
+        if n < 3:
+            return 0
+        cnt = 0
+        for i in range(n):
+            a = fine[i - 1].astype(np.float64)
+            b = fine[i].astype(np.float64)
+            c = fine[(i + 1) % n].astype(np.float64)
+            v1, v2 = b - a, c - b
+            n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+            if n1 < 1e-6 or n2 < 1e-6:
+                continue
+            cosv = float(np.dot(v1, v2) / (n1 * n2))
+            turn = float(np.degrees(np.arccos(max(-1.0, min(1.0, cosv)))))
+            # v1/v2 是相邻两条边的方向 → turn 是"转向角"：多边形大，圆弧小
+            if turn > 55.0:
+                cnt += 1
+        return cnt
+    except Exception:                              # noqa: BLE001
+        return 0
+
+
 def _shape_of(mask, contour):
     area = float(cv2.contourArea(contour))
     peri = float(cv2.arcLength(contour, True))
@@ -140,30 +168,34 @@ def _shape_of(mask, contour):
     # 顶点数用更紧的 epsilon（0.03 周长）重算：旋转不敏感，能分开 4/5/6/8+
     nv = len(cv2.approxPolyDP(contour, .03 * peri, True))
     info['nv'] = int(nv)
-    # 1) 方形族：轮廓几乎填满最小外接矩形（旋转 45° 也 >=.88）
-    if nv == 4 and rect_fill >= .88 and solidity >= .90:
+    # ---- 角点锐度：真正的多边形才有点数，圆/椭圆/圆柱侧影的"角"是钝的 ----
+    sharp = _sharp_corners(contour, peri)
+    info['sharp'] = int(sharp)
+
+    # ① 方形族：4 个锐角 + 几乎填满最小外接矩形（旋转 45° 也≈1.0）
+    if sharp == 4 and rect_fill >= .93 and solidity >= .90:
         return ('正方体/正方形' if rect_ratio < 1.16 else '长方体/长方形'), .84, info
-    # 2) 三角形
-    if nv == 3:
+    # ② 菱体：4 个锐角但没填满外接矩形（菱形 rect_fill≈.78~.85，旋转正方形≈1.0）
+    if sharp == 4 and .62 <= rect_fill < .93 and solidity >= .90:
+        return '菱体/菱形', .80, info
+    # ③ 三角形
+    if sharp == 3:
         return '三棱体/三角形', .82, info
-    # 3) 五棱
-    if nv == 5:
+    # ④ 五棱
+    if sharp == 5:
         return '五棱体', .78, info
-    # 4) 六棱
-    if nv == 6:
+    # ⑤ 圆/椭圆：几乎没有锐角（圆柱侧影=圆角矩形也走这里）
+    if sharp <= 2 and rect_fill <= .93 and circ >= .74:
+        return '圆柱/圆形', min(.95, .58 + .40 * min(1.0, max(0.0, circ - .74) / .20)), info
+    if sharp <= 2 and rect_fill <= .93:
+        return '圆柱/圆形', .62, info
+    # ⑥ 六边形：可能是六棱柱，也可能是"立方体整体侧影"（顶面+前面=6 角）
+    #    后者 rect_fill 更高；由 shape_of_item 用顶面复核
+    if sharp == 6 or nv == 6:
+        if rect_fill >= .85 and solidity >= .93:
+            return '六棱体/多棱', .55, info      # 低置信 → 走顶面复核
         return '六棱体/多棱', .78, info
-    # 5) 圆/椭圆（采样点足够多且圆度高）
-    if nv >= 7 and circ >= .86 and solidity >= .90:
-        return '圆柱/圆形', min(.95, .60 + .35 * min(1.0, (circ - .86) / .10)), info
-    if nv >= 7:
-        return '六棱体/多棱', .60, info
-    # 5) 兜底：沿用旧规则
-    if nv == 3:
-        return '三棱体/三角形', .70, info
-    if nv == 4:
-        return ('正方体/正方形' if rect_ratio < 1.25 else '长方体/长方形'), .70, info
-    if nv == 5:
-        return '五棱体', .68, info
+    # ⑦ 兜底
     return '其他几何体', .55, info
 
 
@@ -234,26 +266,21 @@ def _dbg_dump(tag, warp, mask, extra=None):
 
 
 def _clean_mask(mask):
-    """去毛刺：只保留最大连通域，开运算 3x3，填小孔。（形状判据前统一调用）"""
+    """去毛刺：只保留最大连通域，开运算 3x3 + 闭运算 5x5。（形状判据前统一调用）"""
     try:
         m = (mask > 0).astype(np.uint8)
-        if m.sum() < 100:
+        if int(m.sum()) < 100:
             return mask
         n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         if n <= 1:
             return mask
-        # 面积最大的连通域（跳过背景 0）
         idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        keep = (lab == idx).astype(np.uint8)
+        keep = (lab == idx).astype(np.uint8) * 255
         keep = cv2.morphologyEx(keep, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        # 填孔洞：对临时图做 floodfill
-        h, w = keep.shape[:2]
-        ff = keep.copy()
-        mask2 = np.zeros((h + 2, w + 2), np.uint8)
-        cv2.floodFill(ff, mask2, (0, 0), 1)
-        holes = cv2.bitwise_not(ff)
-        keep = cv2.bitwise_or(keep, holes)
-        return (keep * 255).astype(mask.dtype)
+        keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        if int((keep > 0).sum()) < 100:            # 清没了就退回原掩膜
+            return mask
+        return keep
     except Exception:                              # noqa: BLE001
         return mask
 
