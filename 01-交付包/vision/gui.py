@@ -222,11 +222,11 @@ class App:
         bar.pack(fill='x')
         ttk.Label(bar, text='顶视相机').pack(side='left')
         self.tv = tk.StringVar(value=str(self.cfg.get('top_camera_index', 3)))
-        self.tc = ttk.Combobox(bar, textvariable=self.tv, width=6, state='readonly')
+        self.tc = ttk.Combobox(bar, textvariable=self.tv, width=6, state='normal')
         self.tc.pack(side='left', padx=4)
         ttk.Label(bar, text='侧视相机').pack(side='left')
         self.sv = tk.StringVar(value=str(self.cfg.get('side_camera_index', 0)))
-        self.sc = ttk.Combobox(bar, textvariable=self.sv, width=6, state='readonly')
+        self.sc = ttk.Combobox(bar, textvariable=self.sv, width=6, state='normal')
         self.sc.pack(side='left', padx=4)
         ttk.Button(bar, text='扫描相机', command=self.scan).pack(side='left', padx=5)
         ttk.Button(bar, text='打开双画面', command=self.start).pack(side='left')
@@ -726,25 +726,81 @@ class App:
         t.see('end')
 
     # ------------------------------------------------------------------ 相机/视图
-    def scan(self):
-        f = []
+    def _probe_remote_cam(self, host, port, cam_id):
+        """问派端：这个槽位有没有相机。有 → True。"""
+        import socket
+        import wire
+        try:
+            s = socket.create_connection((host, int(port)), timeout=2.0)
+            try:
+                s.sendall(wire.pack_request(cam_id, 0, 0, 0))
+                head = wire.recv_exact(s, 2)
+                if head == wire.MAGIC_IMG:
+                    return True
+                return False
+            finally:
+                s.close()
+        except Exception:            # noqa: BLE001
+            return False
+
+    def _camera_choices(self):
+        """当前可用的相机编号：远程→派端槽位；本地→USB 相机索引。"""
+        try:
+            import camera_factory as CF
+            if CF.is_remote():
+                host = CF.remote_settings().get('host')
+                port = CF.remote_settings().get('img_port')
+                found = [str(i) for i in range(4)
+                         if self._probe_remote_cam(host, port, i)]
+                if found:
+                    return found, '派端槽位'
+                return [str(i) for i in range(4)], '派端槽位（未探测到，按 0~3 可选）'
+        except Exception:            # noqa: BLE001
+            pass
+        found = []
         for i in range(10):
             c = cv2.VideoCapture(i, cv2.CAP_DSHOW)
             if c.isOpened():
                 ok, fr = c.read()
                 if ok and fr is not None:
-                    f.append(str(i))
+                    found.append(str(i))
             c.release()
+        return found, '本机相机'
+
+    def scan(self):
+        try:
+            f, kind = self._camera_choices()
+        except Exception as exc:     # noqa: BLE001
+            self.note('扫描相机失败：%s' % exc)
+            return
         self.tc['values'] = f
         self.sc['values'] = f
-        self.note('发现相机：' + ','.join(f) if f else '没有发现相机')
+        # 当前值不在列表里就补进去，避免下拉看起来是空的
+        for var, cb in ((self.tv, self.tc), (self.sv, self.sc)):
+            cur = str(var.get()).strip()
+            if cur and cur not in f:
+                cb['values'] = list(f) + [cur]
+        if f:
+            self.note('发现%s：%s' % (kind, ','.join(f)))
+        else:
+            self.note('没有发现相机（%s）' % kind)
 
     def start(self):
         self.stop()
         try:
-            self.a = Stream(int(self.tv.get()), self.cfg.get('width', 1920),
+            def _idx(var, dflt):
+                try:
+                    return int(str(var.get()).strip())
+                except Exception:    # noqa: BLE001
+                    return int(dflt)
+
+            top_i = _idx(self.tv, self.cfg.get('top_camera_index', 0))
+            side_i = _idx(self.sv, self.cfg.get('side_camera_index', 1))
+            self.tv.set(str(top_i))
+            self.sv.set(str(side_i))
+            self.a = Stream(top_i, self.cfg.get('width', 1920),
                             self.cfg.get('height', 1080), self.cfg.get('fps', 15))
-            self.bstream = Stream(int(self.sv.get()), self.cfg.get('width', 1920),
+            self.bstream = Stream(side_i, self.cfg.get('width', 1920),
                                   self.cfg.get('height', 1080), self.cfg.get('fps', 15))
             self.a.start()
             self.bstream.start()
