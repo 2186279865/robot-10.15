@@ -40,16 +40,16 @@ P1_Y = -13144
 P0_Y = 0
 TRAY_DEG = 60.0
 
-SETTLE_GRAB_MS = 700       # 夹紧后等舵机走完
-SETTLE_OPEN_MS = 700       # 松爪后等货物落盒
-SETTLE_READY_MS = 400      # 回预备位
+SETTLE_GRAB_MS = 450       # 夹紧后等舵机走完
+SETTLE_OPEN_MS = 500       # 松爪后等货物落盒
+SETTLE_READY_MS = 250      # 回预备位
 
 RPM = {AXIS_Z: 1500, AXIS_X: 120, AXIS_Y: 300, AXIS_TRAY: 300}
 
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
 _ACC_DEFAULT = 0            # 加速度档：0 最快（现场实测 acc 越大越慢）
-TRAY_RPM = 5              # 转盘转速（现场实测：5 刚好，太快会甩货）
+TRAY_RPM = 8              # 转盘转速（5 稳、8 更快；太快会甩货，可现场回调）
 BOX_STEP_DEG = 60.0
 BOX_COUNT = 6
 
