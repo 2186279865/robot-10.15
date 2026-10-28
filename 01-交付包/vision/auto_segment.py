@@ -204,6 +204,12 @@ class AutoSegmenter:
         for item in sorted(out, key=lambda z: z['area_px'], reverse=True):
             dup = False
             for k in keep:
+                if self._faces_merge(item, k):
+                    # 同一物块的“顶面 + 侧面”两张掩膜：合并成一个整体，
+                    # 这样后面的形状/中心/面积才是整块物块的（避免被切成两半）。
+                    self._merge_into(k, item, w, h)
+                    dup = True
+                    break
                 if (self._iou(item['mask'], k['mask']) >= .45
                         or self._contain(item['mask'], k['mask']) >= .72
                         or self._near(item, k)):
@@ -213,6 +219,46 @@ class AutoSegmenter:
                 keep.append(item)
         keep.sort(key=lambda z: (z['center_tray'][1], z['center_tray'][0]))
         return keep
+
+    @staticmethod
+    def _faces_merge(item, other, gap=6):
+        """两个掩膜是否像块状物体的两个相邻面"顶面+前面"。
+
+        判据：bbox 贴得很近（缝隙 <= gap 像素），且并起来不至于变成两倍大
+        （并集宽 <= 1.4 倍较大宽、并集高 <= 1.75 倍较大高）。这样相邻摆放的
+        两个独立物块（并集宽/高约 2 倍）不会被误合并。
+        """
+        ax, ay, aw, ah = item['bbox']
+        bx, by, bw, bh = other['bbox']
+        if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+            return False
+        dx = max(0, max(ax, bx) - min(ax + aw, bx + bw))
+        dy = max(0, max(ay, by) - min(ay + ah, by + bh))
+        if dx > gap or dy > gap:
+            return False
+        uw = max(ax + aw, bx + bw) - min(ax, bx)
+        uh = max(ay + ah, by + bh) - min(ay, by)
+        return uw <= 1.40 * max(aw, bw) and uh <= 1.75 * max(ah, bh)
+
+    @staticmethod
+    def _merge_into(k, item, w, h):
+        """把 item 的掩膜并进 k（并重算轮廓/bbox/中心/面积/置信度）。"""
+        import numpy as _np
+        u = _np.logical_or(k['mask'] > 0, item['mask'] > 0).astype(_np.uint8) * 255
+        cs, _ = cv2.findContours(u, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cs:
+            return
+        c = max(cs, key=cv2.contourArea)
+        area = cv2.contourArea(c)
+        x, y, bw, bh = cv2.boundingRect(c)
+        M = cv2.moments(c)
+        cx = M['m10'] / M['m00'] if M['m00'] else x + bw / 2
+        cy = M['m01'] / M['m00'] if M['m00'] else y + bh / 2
+        k.update(mask=u, contour=c, bbox=[x, y, bw, bh],
+                 center_px=[round(cx, 2), round(cy, 2)],
+                 center_tray=[round(cx / w, 4), round(cy / h, 4)],
+                 area_px=round(area, 1),
+                 confidence=max(float(k['confidence']), float(item['confidence'])))
 
     @staticmethod
     def _bbox_iou(a, b):
