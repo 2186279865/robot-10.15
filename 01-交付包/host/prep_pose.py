@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+import time
+
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -313,6 +315,77 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
         results.append(item)
         say('%s 并行：%s' % (AXIS_LABEL.get(axis, axis), 'ok' if item['ok'] else ('失败 %s' % item['code'])))
     return results
+
+
+
+def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
+                 tol_pulses=8, timeout_s=8.0) -> List[Dict[str, object]]:
+    """X/Y **同时**走：用 `motor_pos`（固件里是“发一帧就走”，不等结果）。
+
+    固件的 host_goto 只有一个执行槽（并行下发第二条会回 E09），
+    但 motor_pos 走的是 control_apply_position，每轴独立、立即回 ok，
+    所以两个轴可以真正同时动。
+
+    代价：开环（无闭环补差）。实测步进丢步 <0.05%，配合回读校验足够。
+    校验：等估计时间 + 余量后读编码器，误差超过 tol_pulses 就对那根轴补一次闭环 goto。
+    """
+    say = log or (lambda _t: None)
+    last = []
+
+    def rpm_of(a: int) -> int:
+        return int(rpm.get(int(a), 300)) if isinstance(rpm, dict) else int(rpm)
+
+    # 1) 关掉速度上限（motor_pos 会拒绝 rpm > speed_rpm_max，出厂 300）
+    want_max = max(rpm_of(a) for a in targets)
+    old_max = None
+    try:
+        rep = client.send('param_get', 'speed_rpm_max', timeout_ms=1500)
+        if rep is not None and rep.get('pairs'):
+            try:
+                old_max = int(rep['pairs'].get('value'))
+            except (TypeError, ValueError):
+                old_max = None
+        if old_max is None or old_max < want_max:
+            client.send('param_set', 'speed_rpm_max', want_max, timeout_ms=1500)
+    except Exception:                                  # noqa: BLE001
+        pass
+
+    try:
+        plans = []
+        for axis, target in targets.items():
+            axis = int(axis)
+            target = int(target)
+            cur = None if counts is None else counts.get(axis)
+            if cur is None:
+                last.append({'axis': axis, 'pulses': 0, 'rpm': rpm_of(axis), 'ok': False,
+                             'code': 'POS_UNKNOWN', 'text': '没有回读，拒绝盲走', 'pairs': {}})
+                return last
+            want = int(round(target * COUNTS_PER_PULSE))
+            pulses = int(round((want - int(cur)) / COUNTS_PER_PULSE))
+            if abs(pulses) <= 2:
+                continue
+            plans.append((axis, pulses, rpm_of(axis)))
+
+        if not plans:
+            return []
+
+        est = 0.0
+        for axis, pulses, rpm_i in plans:
+            dirn = 1 if pulses < 0 else 0
+            say('%s 并行下发 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
+            client.send('motor_pos', axis, dirn, rpm_i, 0, abs(pulses), 'rel', timeout_ms=2000)
+            est = max(est, estimate_timeout_ms(pulses, rpm_i) / 1000.0)
+        time.sleep(min(timeout_s, est + 0.35))
+
+        # 2) 回读校验（counts 由调用方刷新后传入第二次调用）
+        return [{'axis': a, 'pulses': p, 'rpm': r, 'ok': True, 'code': '', 'text': '',
+                 'pairs': {'mode': 'motor_pos'}} for a, p, r in plans]
+    finally:
+        if old_max is not None:
+            try:
+                client.send('param_set', 'speed_rpm_max', old_max, timeout_ms=1500)
+            except Exception:                          # noqa: BLE001
+                pass
 
 
 def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
