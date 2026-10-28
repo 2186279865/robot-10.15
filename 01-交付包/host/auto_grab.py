@@ -242,17 +242,13 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
     def move(targets: Dict[int, float], order: List[int]) -> None:
         soft, known, counts = pos()
-        # X/Y 互相独立 → 同时走（省一个轴的时长）；其余情况按 order 顺序走
-        if set(int(a) for a in targets) <= {AXIS_X, AXIS_Y} and len(targets) > 1:
-            results = prep_pose.move_two(client, targets, rpm=RPM, acc=0,
-                                         log=say, wait=wait, soft=soft, known=known,
-                                         counts=counts)
-        else:
-            first = not _prep_done['v']
-            _prep_done['v'] = True
-            results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=0,
-                                         log=say, wait=wait, soft=soft, known=known,
-                                         counts=counts, prep=first)
+        # 注意：固件的 host_goto 只有一个执行槽，两条 motor_goto 同时下发时
+        # 第二条会返回 E09(goto_busy)，所以**不能并行**，必须按 order 顺序走。
+        first = not _prep_done['v']
+        _prep_done['v'] = True
+        results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=0,
+                                     log=say, wait=wait, soft=soft, known=known,
+                                     counts=counts, prep=first)
         bad = [r for r in results if not r.get('ok')]
         if bad:
             first = bad[0]
