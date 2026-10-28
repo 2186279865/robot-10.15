@@ -49,6 +49,31 @@ ACCENT = '#39d353'
 WARN = '#ff9f43'
 BAD = '#e5484d'
 
+# ---------------------------------------------------------------- 主题
+THEMES = {
+    'dark': {'BG': '#0a0c0f', 'PANEL': '#12161b', 'PANEL2': '#0f1318',
+             'FG': '#f3f6f9', 'DIM': '#7d8894', 'LINE': '#242b34',
+             'ACCENT': '#39d353', 'WARN': '#ff9f43', 'BAD': '#e5484d',
+             'TRACK': '#1d232b'},
+    'light': {'BG': '#eef1f5', 'PANEL': '#ffffff', 'PANEL2': '#f7f9fc',
+              'FG': '#1b2430', 'DIM': '#5f6b7a', 'LINE': '#d3dae3',
+              'ACCENT': '#12874a', 'WARN': '#c2761a', 'BAD': '#c62828',
+              'TRACK': '#e3e8ef'},
+    'blue': {'BG': '#0d1b2a', 'PANEL': '#132538', 'PANEL2': '#10202f',
+             'FG': '#eef4fa', 'DIM': '#8fa3b8', 'LINE': '#22394f',
+             'ACCENT': '#4ecb71', 'WARN': '#ffb347', 'BAD': '#ff6b6b',
+             'TRACK': '#1a3147'},
+}
+
+
+def set_theme(name):
+    """切换模块级配色（BG/PANEL/FG/...）。"""
+    pal = THEMES.get(str(name).lower(), THEMES['light'])
+    g = globals()
+    for k, v in pal.items():
+        g[k] = v
+    return pal
+
 UI_FONT = 'Microsoft YaHei UI'
 MONO = 'Consolas'
 
@@ -184,9 +209,12 @@ class Screen:
     def f(self, px):
         return max(8, int(round(px * min(self.sx, self.sy))))
 
-    def lab(self, parent, text='', fg=FG, bg=BG, size=20, bold=True, mono=False,
-            anchor='w'):
-        return tk.Label(parent, text=text, bg=bg, fg=fg,
+    def lab(self, parent, text='', fg=None, bg=None, size=20, bold=True,
+            mono=False, anchor='w'):
+        # 默认色在调用时取模块全局（否则会被定义时的旧主题色绑死）
+        return tk.Label(parent, text=text,
+                        bg=(BG if bg is None else bg),
+                        fg=(FG if fg is None else fg),
                         font=((MONO if mono else UI_FONT), -self.f(size),
                               'bold' if bold else 'normal'),
                         anchor=anchor)
@@ -369,7 +397,7 @@ class Screen:
                                  highlightthickness=1)
                 empty.place(x=self.x(10), y=self.y(10), width=cw - self.x(20),
                             height=self.y(96))
-                hint = self.lab(empty, '待放入', fg='#39414b', size=15, bold=False,
+                hint = self.lab(empty, '待放入', fg=DIM, size=15, bold=False,
                                 anchor='center', bg=PANEL2)
                 hint.place(x=0, y=self.y(36), width=cw - self.x(20))
                 self._cards.extend([empty])
@@ -439,7 +467,10 @@ def main():
     ap.add_argument('--screen', default='1024x600')
     ap.add_argument('--windowed', action='store_true')
     ap.add_argument('--fake', action='store_true', help='假数据演示')
+    ap.add_argument('--theme', default='light',
+                    choices=('dark', 'light', 'blue'), help='配色主题')
     args = ap.parse_args()
+    set_theme(args.theme)
     w, h = (int(v) for v in str(args.screen).lower().split('x'))
     try:                                              # Windows: 物理像素
         import ctypes
