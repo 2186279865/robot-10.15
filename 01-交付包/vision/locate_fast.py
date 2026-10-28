@@ -36,12 +36,16 @@ def _split_blob(mask: np.ndarray, expect: float) -> list[np.ndarray]:
     n_guess = int(round(float(mask.sum()) / max(1.0, expect)))
     if n_guess < 2:
         return [mask]
-    dist = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    # 先腐蚀切掉细小连接桥（相邻物块的窄缝），再在腐蚀图上找种子
+    er = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
+    base = er if int(er.sum()) > 4000 * 255 else mask
+    dist = cv2.distanceTransform(base, cv2.DIST_L2, 3)
     if dist.max() <= 0:
         return [mask]
-    # 局部极大值作为种子
-    kern = np.ones((9, 9), np.uint8)
-    peaks = (dist >= cv2.dilate(dist, kern) - 1e-3) & (dist > 0.35 * dist.max())
+    # 局部极大值作为种子（核随块尺寸放大）
+    ks = int(max(9, min(35, (mask.shape[0] * 0.02) + 9)))
+    kern = np.ones((ks, ks), np.uint8)
+    peaks = (dist >= cv2.dilate(dist, kern) - 1e-3) & (dist > 0.30 * dist.max())
     seeds = (peaks.astype(np.uint8)) * 255
     seeds = cv2.morphologyEx(seeds, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n_seed, markers = cv2.connectedComponents(seeds)
@@ -60,16 +64,75 @@ def _split_blob(mask: np.ndarray, expect: float) -> list[np.ndarray]:
     return outs if len(outs) >= 2 else [mask]
 
 
+
+
+def _split_by_erosion(mask: np.ndarray, k_er: int = 5, it: int = 2,
+                      min_area: int = 700) -> list:
+    """用腐蚀切桥再连通域拆分：物块之间有窄缝时最稳。失败返回 [mask]。"""
+    # 从小到大试腐蚀核，直到把一块切成多块（窄缝宽度未知，固定核不可靠）
+    for (k_er, it) in ((5, 1), (5, 2), (7, 2), (9, 2), (11, 2), (13, 2)):
+        ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_er, k_er))
+        er = cv2.erode(mask, ker, iterations=it)
+        if int((er > 0).sum()) < min_area * 2:
+            continue
+        n, lab, st, _ = cv2.connectedComponentsWithStats(er, 8)
+        comps = [i for i in range(1, n) if int(st[i, 4]) >= min_area]
+        if len(comps) < 2:
+            continue
+        outs = []
+        for i in comps:
+            part = ((lab == i).astype(np.uint8)) * 255
+            part = cv2.dilate(part, ker, iterations=it) & mask
+            if int((part > 0).sum()) >= min_area:
+                outs.append(part)
+        if len(outs) >= 2:
+            return outs
+    return [mask]
+
+
+def _split_by_hue(warp: np.ndarray, mask: np.ndarray, k: int = 2,
+                  min_area: int = 900) -> list:
+    """按色相把粘连的一团拆成 k 块（橙色圆柱 + 黄色圆锥这类）。失败返回 [mask]。"""
+    hsv = cv2.cvtColor(warp, cv2.COLOR_BGR2HSV)
+    idx = np.where(mask > 0)
+    if idx[0].size < min_area * k:
+        return [mask]
+    hue = hsv[..., 0][idx].astype(np.float32).reshape(-1, 1)
+    try:
+        crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)
+        _, labels, centers = cv2.kmeans(hue, k, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+    except Exception:                                   # noqa: BLE001
+        return [mask]
+    labels = labels.ravel()
+    # 只有两簇色相差异明显才拆（>12 个色相单位）
+    cs = sorted(float(c[0]) for c in centers)
+    if len(cs) < 2 or (cs[1] - cs[0]) < 12:
+        return [mask]
+    outs = []
+    for kk in range(k):
+        sel = labels == kk
+        if int(sel.sum()) < min_area:
+            continue
+        part = np.zeros(mask.shape, np.uint8)
+        part[idx[0][sel], idx[1][sel]] = 255
+        part = cv2.morphologyEx(part, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        part = cv2.morphologyEx(part, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8), iterations=1)
+        if int((part > 0).sum()) >= min_area:
+            outs.append(part)
+    return outs if len(outs) >= 2 else [mask]
+
+
 def locate(warp: np.ndarray,
            bg: np.ndarray | None = None,
            area_min: int = 1200,
            area_max: int = 60000,
-           sat_min: int = 45,
-           val_min: int = 30,
+           sat_min: int = 40,
+           val_min: int = 25,
            diff_min: int = 16,
            border: int = 14,
            edge_px: int = 4,
            max_targets: int = 16,
+           use_border_bg: bool = False,
            split: bool = True,
            debug: dict | None = None) -> list[dict]:
     """返回托盘内目标列表（按面积从大到小）。"""
@@ -91,8 +154,8 @@ def locate(warp: np.ndarray,
             fg = fg | (cv2.absdiff(g, b) >= diff_min)
         except Exception:                       # noqa: BLE001
             pass
-    else:
-        # 没有空托盘图时：与边框背景色做差分，抓白色/浅色物块
+    elif use_border_bg:
+        # 没有空托盘图时（可选）：与边框背景色做差分，抓白色/浅色物块
         bgc, _ = _bg_from_border(warp, border)
         _d = np.linalg.norm(warp.astype(np.int16) - bgc.astype(np.int16), axis=2)
         fg = fg | (_d >= 28)
@@ -113,7 +176,14 @@ def locate(warp: np.ndarray,
     items: list[dict] = []
     for a, i, x, y, w, h in blobs:
         blob = ((lab == i).astype(np.uint8)) * 255
-        parts = _split_blob(blob, expect=area_max * 0.55) if (split and a > area_max * 1.15) else [blob]
+        if split and a > area_max * 0.56:
+            parts = _split_by_erosion(blob, 5, 2, max(700, int(area_min * 0.4)))
+            if len(parts) < 2:
+                parts = _split_by_hue(warp, blob, 2, max(900, int(area_min * 0.5)))
+            if len(parts) < 2:
+                parts = _split_blob(blob, expect=area_max * 0.35)
+        else:
+            parts = [blob]
         for p in parts:
             cnts, _ = cv2.findContours(p, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not cnts:

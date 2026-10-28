@@ -33,7 +33,8 @@ def main() -> int:
     if not path.is_file():
         print(f'缺帧：{path}\n→ 先在 GUI 里点一次「单次识别」（新版会自动存 last_top_warp.jpg）')
         return 1
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    # cv2.imread 对中文路径会失败，用 fromfile + imdecode
+    img = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         print(f'读不出：{path}')
         return 1
@@ -51,11 +52,11 @@ def main() -> int:
 
     print(f'\n快速定位：{len(fast)} 个，{tf:.1f} ms')
     for d in fast:
-        print(f"   u={d['u']:.3f} v={d['v']:.3f} area={d['area_px']:6d}")
+        print(f"   u={d['u']:.3f} v={d['v']:.3f} area={float(d['area_px']):8.0f}")
     print(f'SAM     ：{len(sam)} 个，{ts:.0f} ms')
     for s in sam:
         u, v = s['center_tray']
-        print(f'   u={u:.3f} v={v:.3f} area={s["area_px"]:6d}')
+        print(f'   u={u:.3f} v={v:.3f} area={float(s["area_px"]):8.0f}')
 
     if not fast or not sam:
         print('\n⚠ 有一边没目标，无法配对（可能是空托盘）')
