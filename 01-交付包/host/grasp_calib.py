@@ -23,6 +23,8 @@ PAIRS_PATH = PKG_ROOT / 'vision' / 'runtime' / 'grasp_pairs.json'
 MIN_PAIRS = 3          # 3 点能解仿射，4 点以上才有冗余、能看残差
 GOOD_PAIRS = 5         # 推荐 5~6 点，覆盖托盘四个角
 MAX_RESIDUAL = 120.0   # 超过这个残差（脉冲）说明哪个点记错了
+OUTLIER_PULSE = 60.0   # 单点残差超过它 → 求解时自动剔除（可回退）
+DUP_UV = 0.02          # u/v 都差这么小的两点视为同一位置（会用新点替换旧点）
 
 
 def _path(path=None) -> Path:
@@ -65,14 +67,50 @@ def add_pair(u: float, v: float, px: float, py: float,
     if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
         raise ValueError('u/v 应该在 0~1 之间（现在是 %.3f / %.3f）' % (u, v))
     pairs = load_pairs(path)
-    pairs.append({'u': u, 'v': v, 'px': float(px), 'py': float(py),
-                  'ts': time.time(), 'note': note})
+    item = {'u': u, 'v': v, 'px': float(px), 'py': float(py),
+            'ts': time.time(), 'note': note}
+    # 同一位置重复记录 → 替换旧点（避免把“手抖记两次”当成两个独立点）
+    for i, old in enumerate(pairs):
+        if abs(old['u'] - u) <= DUP_UV and abs(old['v'] - v) <= DUP_UV:
+            pairs[i] = item
+            save_pairs(pairs, path)
+            return pairs
+    pairs.append(item)
     save_pairs(pairs, path)
     return pairs
 
 
 def clear(path=None) -> None:
     save_pairs([], path)
+
+
+def remove_last(path=None) -> List[Dict[str, float]]:
+    """删掉最后一个抓取点（记错了用）。"""
+    pairs = load_pairs(path)
+    if pairs:
+        pairs.pop()
+        save_pairs(pairs, path)
+    return pairs
+
+
+def preview(pairs, path=None) -> Dict[str, object]:
+    """只试算不写盘：返回每个点的残差（按从大到小），用于“记完立刻知道准不准”。"""
+    import calib_wizard as CW
+
+    ok, why = spread_ok(pairs)
+    if not ok:
+        raise ValueError(why)
+    res = CW.solve(to_points(pairs), write=False)
+    rows = []
+    for i, r in enumerate(res.get('residuals') or []):
+        dx = float(r.get('dx_pulse') or 0.0)
+        dy = float(r.get('dy_pulse') or 0.0)
+        rows.append({'idx': i + 1, 'u': r.get('u'), 'v': r.get('v'),
+                     'dx': dx, 'dy': dy, 'dist': (dx * dx + dy * dy) ** 0.5})
+    rows.sort(key=lambda d: -d['dist'])
+    return {'n': len(pairs), 'rows': rows,
+            'max': rows[0]['dist'] if rows else 0.0,
+            'affine': res.get('affine')}
 
 
 def to_points(pairs) -> List[Dict[str, float]]:
@@ -110,7 +148,33 @@ def solve(pairs, path=None, write: bool = False) -> Dict[str, object]:
     ok, why = spread_ok(pairs)
     if not ok:
         raise ValueError(why)
-    result = CW.solve(to_points(pairs), write=write)
+    pts = to_points(pairs)
+    dropped = []
+    # 先试算；若某点残差明显异常且冗余足够，剔除后重解（最多剔 2 个）
+    for _ in range(2):
+        if len(pts) <= 4:
+            break
+        try:
+            probe = CW.solve(pts, write=False)
+        except ValueError:
+            break
+        rows = []
+        for i, r in enumerate(probe.get('residuals') or []):
+            dx = float(r.get('dx_pulse') or 0.0)
+            dy = float(r.get('dy_pulse') or 0.0)
+            rows.append((((dx * dx + dy * dy) ** 0.5), i))
+        if not rows:
+            break
+        worst, idx = max(rows)
+        if worst <= OUTLIER_PULSE:
+            break
+        dropped.append({'u': pts[idx]['u'], 'v': pts[idx]['v'],
+                        'px': pts[idx]['px'], 'py': pts[idx]['py'],
+                        'residual': round(worst, 1)})
+        pts.pop(idx)
+    result = CW.solve(pts, write=write)
+    result['dropped'] = dropped
+    result['used'] = len(pts)
     result['pairs'] = len(pairs)
     result['max_abs'] = result.get('max_abs_pulse') or {}
     worst = max(result['max_abs'].get('dx', 0.0), result['max_abs'].get('dy', 0.0))

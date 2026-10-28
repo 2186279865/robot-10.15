@@ -99,6 +99,10 @@ class CalibTab(ttk.Frame):
                         ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='记录抓取点', command=self.on_record_grasp
                    ).pack(side='left', padx=(0, 4))
+        ttk.Button(bar, text='残差预览', command=self.on_preview_grasp
+                   ).pack(side='left', padx=3)
+        ttk.Button(bar, text='删掉最后一点', command=self.on_drop_last_grasp
+                   ).pack(side='left', padx=3)
         ttk.Button(bar, text='抓取点求解', command=self.on_solve_grasp
                    ).pack(side='left', padx=(0, 12))
 
@@ -453,6 +457,34 @@ class CalibTab(ttk.Frame):
             self.say('再摆 %d 个位置的物块记录，凑够 %d 个点才能求解'
                      % (GC.MIN_PAIRS - len(pairs), GC.MIN_PAIRS))
 
+    def on_preview_grasp(self):
+        """只试算不写盘：列出每个点的残差，挑最差的重记。"""
+        pairs = GC.load_pairs()
+        if not pairs:
+            self.say('还没有抓取点：先摆物块、对准、点「记录抓取点」')
+            return
+        try:
+            r = GC.preview(pairs)
+        except ValueError as exc:
+            self.say('还不能试算：%s' % exc)
+            return
+        self.say(GC.describe(pairs))
+        self.say('残差预览（%d 点，最大 %.0f 脉冲 ≈ %.1f mm）：'
+                 % (r['n'], r['max'], r['max'] * 0.0166))
+        for row in r['rows'][:6]:
+            self.say('   第 %d 点 u=%.3f v=%.3f → dx %+.0f / dy %+.0f（%.0f 脉冲）'
+                     % (row['idx'], row['u'] or 0, row['v'] or 0,
+                        row['dx'], row['dy'], row['dist']))
+        if r['max'] > GC.OUTLIER_PULSE:
+            self.say('最大残差 >%.0f 脉冲：先「删掉最后一点」或重记那个点，再求解'
+                     % GC.OUTLIER_PULSE)
+
+    def on_drop_last_grasp(self):
+        pairs = GC.remove_last()
+        self.say('已删掉最后一个点，剩 %d 个' % len(pairs))
+        if pairs:
+            self.say(GC.describe(pairs))
+
     def on_solve_grasp(self):
         """用记录的抓取点拟合 (u,v)→(X,Y)，写进 tray_calib.json。"""
         pairs = GC.load_pairs()
@@ -472,6 +504,13 @@ class CalibTab(ttk.Frame):
         mx = result.get('max_abs') or {}
         self.say('残差最大：dx %.0f / dy %.0f 脉冲（越小越好）'
                  % (mx.get('dx', 0), mx.get('dy', 0)))
+        used = result.get('used')
+        if used and used != len(pairs):
+            self.say('求解实际使用 %d 个点（剔除 %d 个离群点）'
+                     % (used, len(pairs) - used))
+            for d in (result.get('dropped') or []):
+                self.say('   剔除：u=%.3f v=%.3f 残差 %.0f 脉冲'
+                         % (d['u'], d['v'], d['residual']))
         if result.get('warning'):
             self.say(result['warning'])
         if result.get('path'):
