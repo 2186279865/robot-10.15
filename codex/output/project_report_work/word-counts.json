@@ -1,0 +1,22 @@
+{
+  "一": {
+    "nonspace_characters": 334,
+    "limit": 500
+  },
+  "二": {
+    "nonspace_characters": 1454,
+    "limit": 2000
+  },
+  "三": {
+    "nonspace_characters": 378,
+    "limit": 500
+  },
+  "四": {
+    "nonspace_characters": 191,
+    "limit": 300
+  },
+  "五": {
+    "nonspace_characters": 1565,
+    "limit": 2000
+  }
+}

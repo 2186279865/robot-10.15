@@ -1,0 +1,22 @@
+{
+  "changes": [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "docProps/core.xml",
+    "word/_rels/document.xml.rels",
+    "word/document.xml",
+    "word/settings.xml",
+    "word/styles.xml"
+  ],
+  "images": 4,
+  "pages": 6,
+  "source_sha256": "7c49e14664f3795d0f7ec58d0b5f1f59784145c8e426350145f9a7dabfd03245",
+  "visually_checked_pages": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "a_docx": "C:\\Users\\rs\\Desktop\\\u9644\u4ef67-\u547d\u9898\u6587\u6863_1785202024444.docx",
+  "b_docx": "D:\\study\\project\\robot-competition\\codex\\output\\\u51e0\u4f55\u7269\u5757\u667a\u80fd\u5206\u62e3\u7cfb\u7edf\u4f5c\u54c1\u8bf4\u660e\u4e66.docx",
+  "pages_a": 7,
+  "pages_b": 6,
+  "changed_pages": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "num_changed_pages": 7
+}
