@@ -232,6 +232,32 @@ def _dbg_dump(tag, warp, mask, extra=None):
         pass
 
 
+
+def _clean_mask(mask):
+    """去毛刺：只保留最大连通域，开运算 3x3，填小孔。（形状判据前统一调用）"""
+    try:
+        m = (mask > 0).astype(np.uint8)
+        if m.sum() < 100:
+            return mask
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
+        if n <= 1:
+            return mask
+        # 面积最大的连通域（跳过背景 0）
+        idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        keep = (lab == idx).astype(np.uint8)
+        keep = cv2.morphologyEx(keep, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        # 填孔洞：对临时图做 floodfill
+        h, w = keep.shape[:2]
+        ff = keep.copy()
+        mask2 = np.zeros((h + 2, w + 2), np.uint8)
+        cv2.floodFill(ff, mask2, (0, 0), 1)
+        holes = cv2.bitwise_not(ff)
+        keep = cv2.bitwise_or(keep, holes)
+        return (keep * 255).astype(mask.dtype)
+    except Exception:                              # noqa: BLE001
+        return mask
+
+
 def _split_top_face(warp, mask):
     """把一块物体的掩膜按亮度/位置拆成"顶面"和"侧面"。
 
@@ -266,7 +292,8 @@ def _split_top_face(warp, mask):
         hi_y = float(np.average(np.broadcast_to(yy, gray.shape)[hi]))
         lo_y = float(np.average(np.broadcast_to(yy, gray.shape)[lo]))
         cand = hi if hi_y < lo_y else lo          # 顶面一定在上方
-        if cand.sum() < .28 * sel.sum():          # 太小 → 不是"面"，是反光
+        frac = cand.sum() / max(1.0, sel.sum())
+        if frac < .28 or frac > .85:              # 太小=反光；太大=把整块都算进来了
             return None
         m = (cand.astype(np.uint8)) * 255
         cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -290,6 +317,10 @@ SQUARE_RATIO_MAX = 1.30
 
 def shape_of_item(warp, mask, contour):
     """整块轮廓判一次；非"方正"时再取顶面重判，取置信度更高者。"""
+    mask = _clean_mask(mask)
+    cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if cs:
+        contour = max(cs, key=cv2.contourArea)
     shape, conf, info = _shape_of(mask, contour)
     solid_ok = (info.get('rect_fill', 0) >= .88 and info.get('nv') == 4)
     if solid_ok:
