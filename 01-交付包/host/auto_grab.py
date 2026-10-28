@@ -54,8 +54,8 @@ except Exception:                                  # noqa: BLE001
 
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
-_ACC_DEFAULT = 0            # 加速度档：0 最快（现场实测 acc 越大越慢）
-TRAY_RPM = 10             # 转盘转速（5 稳、10 更快；太快会甩货，可现场回调）
+_ACC_DEFAULT = 1            # 加速度档：0 最猛（冲击大/看着僵硬），1 温和；2 更柔但更慢
+TRAY_RPM = 6              # 转盘转速（5 很稳、6 略快且顺；10 会甩货）
 BOX_STEP_DEG = 60.0
 BOX_COUNT = 6
 
@@ -269,7 +269,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         # 第二条会返回 E09(goto_busy)，所以**不能并行**，必须按 order 顺序走。
         first = not _prep_done['v']
         _prep_done['v'] = True
-        results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=0,
+        results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
                                      log=say, wait=wait, soft=soft, known=known,
                                      counts=counts, prep=first)
         bad = [r for r in results if not r.get('ok')]
@@ -292,7 +292,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         say('X/Y 并行到物块上方')
         prep_pose.move_xy_fast(client, {AXIS_X: x_pulse, AXIS_Y: y_pulse},
                                rpm=RPM, log=say, counts=counts,
-                               counts_fn=_live_counts)
+                               counts_fn=_live_counts, acc=_ACC_DEFAULT)
         soft2, known2, counts2 = pos()
         for _axis in (AXIS_X, AXIS_Y):
             _tgt = x_pulse if _axis == AXIS_X else y_pulse

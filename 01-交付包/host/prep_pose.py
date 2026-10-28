@@ -319,7 +319,7 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
 
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
-                 counts_fn=None, tol_pulses=8, timeout_s=10.0) -> List[Dict[str, object]]:
+                 counts_fn=None, tol_pulses=8, timeout_s=3.5, acc=1) -> List[Dict[str, object]]:
     """X/Y **同时**走：用 `motor_pos`（固件里是“发一帧就走”，不等结果）。
 
     固件的 host_goto 只有一个执行槽（并行下发第二条会回 E09），
@@ -372,7 +372,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
         for axis, pulses, rpm_i in plans:
             dirn = 1 if pulses < 0 else 0
             say('%s 并行下发 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
-            client.send('motor_pos', axis, dirn, rpm_i, 0, abs(pulses), 'rel', timeout_ms=2000)
+            client.send('motor_pos', axis, dirn, rpm_i, int(acc), abs(pulses), 'rel', timeout_ms=2000)
 
         # 不睡固定时间：轮询编码器，两个轴都到位就立刻返回（避免多余停顿）
         if counts_fn is not None:
