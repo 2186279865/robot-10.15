@@ -153,6 +153,45 @@ class App:
             crop = None
         return crop if crop is not None and crop.size else warp
 
+    def on_cloud_check(self):
+        """用云端 DeepSeek 复核当前画面里的物块（需联网）。"""
+        try:
+            import cloud_vlm as CV
+        except Exception as exc:                                  # noqa: BLE001
+            messagebox.showerror('DeepSeek 复核', '模块不可用：%s' % exc, parent=self)
+            return
+        if not CV.available():
+            messagebox.showwarning('DeepSeek 复核',
+                                   '云端不可用（没网 / 没配 DEEPSEEK_API_KEY）。\n'
+                                   '可把 key 写进 vision\\deepseek_key.txt 或设环境变量。',
+                                   parent=self)
+            return
+        frame = self._vlm_crop_now()
+        if frame is None:
+            self.note('DeepSeek 复核：没有可用的画面（先打开双画面）')
+            return
+        self.note('DeepSeek 复核中…')
+
+        def work():
+            r = CV.ask_objects(frame)
+            self.after(0, lambda: self._cloud_done(r))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cloud_done(self, r):
+        if not r or not r.get('objects'):
+            self.note('DeepSeek 复核失败（网络/额度/解析）')
+            messagebox.showwarning('DeepSeek 复核', '没拿到结果，可能是网络或额度问题', parent=self)
+            return
+        lines = []
+        for i, o in enumerate(r['objects'][:8], 1):
+            lines.append('#%d %s + %s（conf %.2f）%s' % (
+                i, o.get('shape'), o.get('color') or '?', float(o.get('conf') or 0),
+                (' · ' + o['reason']) if o.get('reason') else ''))
+        text = '用时 %d ms\n\n' % int(r.get('ms') or 0) + '\n'.join(lines)
+        self.note('DeepSeek 复核：' + ' | '.join(lines)[:200])
+        messagebox.showinfo('DeepSeek 复核', text, parent=self)
+
     def on_vlm_check(self):
         """手动让本地千问看一眼当前画面（用完即卸，避免和 SAM 抢显存）。"""
         try:
@@ -328,6 +367,7 @@ class App:
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
         ttk.Button(bot, text='千问复核', command=self.on_vlm_check).pack(side='left', padx=3)
+        ttk.Button(bot, text='DeepSeek复核', command=self.on_cloud_check).pack(side='left', padx=3)
         ttk.Button(bot, text='交换主副摄', command=self.swap_cams).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bot, text='高级', variable=self.adv_var,

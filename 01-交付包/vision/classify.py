@@ -21,6 +21,10 @@ try:
     import local_vlm as _VLM
 except Exception:            # noqa: BLE001
     _VLM = None
+try:
+    import cloud_vlm as _CVLM
+except Exception:  # noqa: BLE001
+    _CVLM = None
 
 ROOT = Path(__file__).resolve().parent
 SAMPLES = ROOT / 'samples.json'
@@ -451,7 +455,26 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
     vlm_info = None
     try:
         vc = (cfg or {}).get('vlm') or {}
-        if vc.get('enabled') and _VLM is not None:
+        cc = (cfg or {}).get('cloud_vlm') or {}
+        cmode = str(cc.get('mode') or 'off').lower()
+        if (cc.get('enabled') and _CVLM is not None and cmode in ('auto', 'auto_when_unsure')):
+            c_amb = tuple(cc.get('ambiguous') or vc.get('ambiguous') or ())
+            c_need = (shape_conf < float(cc.get('min_conf', 0.88))) or (shape in c_amb)
+            if c_need:
+                # 用整幅托盘图批量识别（同一帧只请求一次），再按中心距离匹配当前掩膜
+                r = _CVLM.match(
+                    warp, mask,
+                    candidates=cc.get('candidates') or _CVLM.SHAPES,
+                    timeout=float(cc.get('timeout_s', 10.0)),
+                    model=cc.get('model') or None)
+                if r and r.get('shape'):
+                    vlm_info = r
+                    if r['shape'] == shape:
+                        shape_conf = max(shape_conf, .90)
+                    elif float(r.get('conf') or 0) >= float(cc.get('accept_conf', 0.70)):
+                        shape = r['shape']
+                        shape_conf = max(.75, float(r['conf']))
+        if vlm_info is None and vc.get('enabled') and _VLM is not None:
             amb = tuple(vc.get('ambiguous') or ())
             need = (shape_conf < float(vc.get('min_conf', 0.85))) or (shape in amb)
             if need:
