@@ -44,7 +44,13 @@ SETTLE_GRAB_MS = 450       # 夹紧后等舵机走完
 SETTLE_OPEN_MS = 500       # 松爪后等货物落盒
 SETTLE_READY_MS = 250      # 回预备位
 
-RPM = {AXIS_Z: 1500, AXIS_X: 120, AXIS_Y: 300, AXIS_TRAY: 300}
+# 转速统一由 host/protocol.py 的 GOTO_RPM_BY_AXIS 决定（这里原来写死 1500/120/300，
+# 导致改 protocol 完全无效——日志里一直显示旧转速就是这个原因）
+try:
+    import protocol as _P
+    RPM = {int(k): int(v) for k, v in _P.GOTO_RPM_BY_AXIS.items()}
+except Exception:                                  # noqa: BLE001
+    RPM = {AXIS_Z: 2200, AXIS_X: 300, AXIS_Y: 2000, AXIS_TRAY: 300}
 
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
@@ -240,6 +246,23 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
     _prep_done = {'v': False}
 
+    def _live_counts() -> Dict[int, float]:
+        """直接读客户端缓存的最新编码器 counts（GUI 面板那份在主线程、此处不会刷新）。"""
+        try:
+            client.tick()
+        except Exception:                          # noqa: BLE001
+            pass
+        out: Dict[int, float] = {}
+        raw = getattr(client, 'last_counts', None) or {}
+        for k, v in raw.items():
+            c = v.get('counts') if isinstance(v, dict) else v
+            try:
+                if c is not None:
+                    out[int(k)] = float(c)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def move(targets: Dict[int, float], order: List[int]) -> None:
         soft, known, counts = pos()
         # 注意：固件的 host_goto 只有一个执行槽，两条 motor_goto 同时下发时
@@ -269,7 +292,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         say('X/Y 并行到物块上方')
         prep_pose.move_xy_fast(client, {AXIS_X: x_pulse, AXIS_Y: y_pulse},
                                rpm=RPM, log=say, counts=counts,
-                               counts_fn=lambda: pos()[2])
+                               counts_fn=_live_counts)
         soft2, known2, counts2 = pos()
         for _axis in (AXIS_X, AXIS_Y):
             _tgt = x_pulse if _axis == AXIS_X else y_pulse
