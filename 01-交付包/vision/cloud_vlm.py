@@ -115,7 +115,7 @@ def _fingerprint(img) -> str:
     return hashlib.md5(small.tobytes()).hexdigest()
 
 
-COLORS = ('红', '黄', '蓝', '绿', '黑', '浅蓝')
+COLORS = ('红', '橙', '黄', '绿', '蓝', '紫', '黑', '白', '浅蓝')
 
 
 def normalize_color(raw):
@@ -123,16 +123,25 @@ def normalize_color(raw):
     if not raw:
         return None
     t = str(raw).strip()
-    if any(k in t for k in ('浅蓝', '淡蓝', '天蓝')):
+    # 具体优先：浅蓝(青蓝) > 紫 > 橙 > 粉(归红) > 单色
+    if any(k in t for k in ('浅蓝', '淡蓝', '天蓝', '青蓝')):
         return '浅蓝'
-    if any(k in t for k in ('红', '橙', '粉')):
+    if any(k in t for k in ('紫', '藕荷', '蓝紫')):
+        return '紫'
+    if any(k in t for k in ('橙', '橘')):
+        return '橙'
+    if any(k in t for k in ('粉', '品红', '玫红')):
         return '红'
-    if any(k in t for k in ('黄', '金')):
+    if any(k in t for k in ('红',)):
+        return '红'
+    if any(k in t for k in ('黄', '金', '米')):
         return '黄'
     if any(k in t for k in ('蓝', '青')):
         return '蓝'
     if any(k in t for k in ('绿',)):
         return '绿'
+    if any(k in t for k in ('白',)):
+        return '白'
     if any(k in t for k in ('黑', '灰')):
         return '黑'
     return None

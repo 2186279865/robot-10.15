@@ -1282,7 +1282,8 @@ class App:
             self.note('DeepSeek 未返回目标（断网/无 Key/超时），已回退几何判据')
         if objs and str(_cc0.get('mode')) == 'primary':
             try:
-                labeled = classify.attach_vlm_to_fused(fused, objs, tw)
+                labeled = classify.attach_vlm_to_fused(fused, objs, tw,
+                                                color_from_mask=bool(_cc0.get('color_from_mask', False)))
                 if labeled:
                     fused[:] = labeled
                     self.note('DeepSeek 分类 + SAM 定位：%d 个目标' % len(labeled))
