@@ -1277,7 +1277,10 @@ class App:
         except Exception:                                  # noqa: BLE001
             objs = []
         # DeepSeek 主分类模式：SAM 负责分割/定位/面积，DeepSeek 负责类别与颜色
-        if objs and str((self.cfg.get('cloud_vlm') or {}).get('mode')) == 'primary':
+        _cc0 = (self.cfg.get('cloud_vlm') or {})
+        if _cc0.get('enabled') and str(_cc0.get('mode')) == 'primary' and not objs:
+            self.note('DeepSeek 未返回目标（断网/无 Key/超时），已回退几何判据')
+        if objs and str(_cc0.get('mode')) == 'primary':
             try:
                 labeled = classify.attach_vlm_to_fused(fused, objs, tw)
                 if labeled:
