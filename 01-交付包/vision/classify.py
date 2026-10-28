@@ -122,19 +122,48 @@ def _shape_of(mask, contour):
     solidity = area / max(1.0, float(cv2.contourArea(hull)))
     extent = area / max(1.0, float(w * h))
     aspect = h / max(1.0, float(w))
+    # ---- 旋转不敏感的最小外接矩形 ----
+    try:
+        (_rc, (rw, rh), _ra) = cv2.minAreaRect(contour)
+        rw, rh = float(rw), float(rh)
+        if rw < rh:
+            rw, rh = rh, rw
+        rect_ratio = rw / max(1.0, rh)
+        rect_fill = area / max(1.0, rw * rh)
+    except Exception:                                   # noqa: BLE001
+        rect_ratio, rect_fill = 1.0, 0.0
     info = {'circ': round(circ, 3), 'ratio': round(ratio, 3), 'nv': int(nv),
-            'solidity': round(solidity, 3), 'extent': round(extent, 3), 'aspect': round(aspect, 3)}
+            'solidity': round(solidity, 3), 'extent': round(extent, 3), 'aspect': round(aspect, 3),
+            'rect_ratio': round(rect_ratio, 3), 'rect_fill': round(rect_fill, 3),
+            'rw': round(rw, 1), 'rh': round(rh, 1)}
+
+    # 顶点数用更紧的 epsilon（0.03 周长）重算：旋转不敏感，能分开 4/5/6/8+
+    nv = len(cv2.approxPolyDP(contour, .03 * peri, True))
+    info['nv'] = int(nv)
+    # 1) 方形族：轮廓几乎填满最小外接矩形（旋转 45° 也 >=.88）
+    if nv == 4 and rect_fill >= .88 and solidity >= .90:
+        return ('正方体/正方形' if rect_ratio < 1.16 else '长方体/长方形'), .84, info
+    # 2) 三角形
     if nv == 3:
         return '三棱体/三角形', .82, info
-    if nv == 4:
-        return ('正方体/正方形' if ratio < 1.25 else '长方体/长方形'), .80, info
+    # 3) 五棱
     if nv == 5:
         return '五棱体', .78, info
-    # 圆/椭圆顶面：透视会让圆变成椭圆，所以不能只靠长宽比；
-    # 圆度>0.80 直接判圆，圆度稍低时用"顶点数≥6 + 实心度高 + 面积占比<0.84"兜底
-    # （六棱柱有被误判成圆柱的风险，现场登记时核对一下）。
-    if (circ > .80 and solidity > .93) or (nv >= 6 and circ > .74 and solidity > .93 and extent < .84):
-        return '圆柱/圆形', min(.95, .55 + .4 * min(1.0, max(0.0, circ - .74) / .22)), info
+    # 4) 六棱
+    if nv == 6:
+        return '六棱体/多棱', .78, info
+    # 5) 圆/椭圆（采样点足够多且圆度高）
+    if nv >= 7 and circ >= .86 and solidity >= .90:
+        return '圆柱/圆形', min(.95, .60 + .35 * min(1.0, (circ - .86) / .10)), info
+    if nv >= 7:
+        return '六棱体/多棱', .60, info
+    # 5) 兜底：沿用旧规则
+    if nv == 3:
+        return '三棱体/三角形', .70, info
+    if nv == 4:
+        return ('正方体/正方形' if rect_ratio < 1.25 else '长方体/长方形'), .70, info
+    if nv == 5:
+        return '五棱体', .68, info
     return '其他几何体', .55, info
 
 
