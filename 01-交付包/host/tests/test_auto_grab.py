@@ -124,8 +124,14 @@ class SequenceTest(unittest.TestCase):
         self.assertEqual(z_gotos[1], AG.Z_DOWN - AG.Z_UP)   # 降到抓取位（增量）
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
-        angles = [c for c in client.calls if c[0] == 'angle']
-        self.assertEqual(angles[0][1], (AG.AXIS_TRAY, AG.TRAY_DEG))
+        # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0
+        tray_moves = [c for c in client.calls
+                      if c[0] == 'motor_pos' and c[1][0] == AG.AXIS_TRAY]
+        self.assertEqual(len(tray_moves), 1)
+        args = tray_moves[0][1]                            # (addr, dir, rpm, acc, pulses, mode)
+        self.assertEqual(args[1], 0)                       # dir 正向
+        self.assertEqual(args[4], int(round(AG.TRAY_DEG / 360.0 * 3200)))  # 533 脉冲
+        self.assertEqual(args[5], 'rel')
 
     def test_run_once_refuses_when_offline(self):
         client = FakeClient()

@@ -576,6 +576,8 @@ class App:
         row = ttk.Frame(box)
         row.pack(fill="x", pady=(4, 0))
         ttk.Label(row, text="固定位置：").pack(side="left")
+        ttk.Button(row, text="托盘角度清零", width=12,
+                   command=self._tray_angle_zero).pack(side="left", padx=(10, 2))
         for key, text in (("p1", "回 P1"), ("z_up", "Z 抬顶"), ("z_down", "Z 降底"),
                           ("to_p1", "走通道(P1)"), ("to_p0", "退通道(P0)")):
             ttk.Button(row, text=text, width=11,
@@ -587,6 +589,27 @@ class App:
         ttk.Checkbutton(row, text="高级（接近段示教 / 回初始位）",
                         variable=self.axes_adv,
                         command=self._toggle_axes_adv).pack(side="right")
+
+    def _tray_angle_zero(self) -> None:
+        """把转盘当前位置定义为角度 0°（motor_angle_zero，仅供角度模式调试用）。"""
+        client = self.app.client
+        if client is None or not client.online:
+            messagebox.showwarning("托盘角度清零", "还没连接控制器")
+            return
+        if not messagebox.askyesno(
+                "托盘角度清零",
+                "把**转盘现在所在的位置**定义为角度 0°？\n\n"
+                "· 之后「角度模式」转 60° 才会生效；\n"
+                "· 若现在不是期望的 0 号盒位，设完后所有盒位会整体偏移；\n"
+                "· 掉电/重启后需重新设置（落货用的是相对脉冲，不受影响）。\n\n继续？"):
+            return
+        try:
+            r = client.angle_zero(3, timeout_ms=3000)
+            self._log("托盘角度清零：返回 %s" % (r,), "ok")
+            self.app.note("托盘角度基准已设为当前位置（0°）")
+        except Exception as exc:                           # noqa: BLE001
+            self._log("托盘角度清零失败：%s: %s" % (type(exc).__name__, exc), "err")
+            messagebox.showerror("托盘角度清零", "失败：%s" % exc)
 
     def _preset(self, key: str) -> None:
         calib = getattr(self, "calib_tab", None)
