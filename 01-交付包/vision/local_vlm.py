@@ -96,7 +96,7 @@ def ask_shape(img_bgr, candidates=None, timeout: float = 8.0, model: str = None)
             'stream': False,
             'format': 'json',
             'think': False,
-            'keep_alive': os.environ.get('ROBOT_VLM_KEEP_ALIVE', '0'),
+            'keep_alive': os.environ.get('ROBOT_VLM_KEEP_ALIVE', '120s'),
             'options': {'temperature': 0, 'num_predict': 220,
                         # 默认走 CPU：SAM 已占显存，4B 模型同时上 GPU 会 OOM
                         'num_gpu': int(os.environ.get('ROBOT_VLM_GPU', '99'))},
