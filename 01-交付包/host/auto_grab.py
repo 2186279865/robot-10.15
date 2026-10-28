@@ -268,7 +268,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     if counts and counts.get(AXIS_X) is not None and counts.get(AXIS_Y) is not None:
         say('X/Y 并行到物块上方')
         prep_pose.move_xy_fast(client, {AXIS_X: x_pulse, AXIS_Y: y_pulse},
-                               rpm=RPM, log=say, counts=counts)
+                               rpm=RPM, log=say, counts=counts,
+                               counts_fn=lambda: pos()[2])
         soft2, known2, counts2 = pos()
         for _axis in (AXIS_X, AXIS_Y):
             _tgt = x_pulse if _axis == AXIS_X else y_pulse

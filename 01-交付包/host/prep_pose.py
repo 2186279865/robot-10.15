@@ -319,7 +319,7 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
 
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
-                 tol_pulses=8, timeout_s=8.0) -> List[Dict[str, object]]:
+                 counts_fn=None, tol_pulses=8, timeout_s=10.0) -> List[Dict[str, object]]:
     """X/Y **同时**走：用 `motor_pos`（固件里是“发一帧就走”，不等结果）。
 
     固件的 host_goto 只有一个执行槽（并行下发第二条会回 E09），
@@ -369,13 +369,33 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
         if not plans:
             return []
 
-        est = 0.0
         for axis, pulses, rpm_i in plans:
             dirn = 1 if pulses < 0 else 0
             say('%s 并行下发 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
             client.send('motor_pos', axis, dirn, rpm_i, 0, abs(pulses), 'rel', timeout_ms=2000)
-            est = max(est, estimate_timeout_ms(pulses, rpm_i) / 1000.0)
-        time.sleep(min(timeout_s, est + 0.35))
+
+        # 不睡固定时间：轮询编码器，两个轴都到位就立刻返回（避免多余停顿）
+        if counts_fn is not None:
+            target_counts = {int(a): int(round(int(t) * COUNTS_PER_PULSE))
+                             for a, t in targets.items()}
+            deadline = time.monotonic() + float(timeout_s)
+            quiet = 0
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+                cur = counts_fn() or {}
+                left = []
+                for axis in target_counts:
+                    c = cur.get(int(axis))
+                    if c is None:
+                        left.append(999999)
+                    else:
+                        left.append(abs(target_counts[int(axis)] - int(c)))
+                if max(left) <= 12:          # 12 counts ≈ 0.2 mm
+                    quiet += 1
+                    if quiet >= 2:
+                        break
+                else:
+                    quiet = 0
 
         # 2) 回读校验（counts 由调用方刷新后传入第二次调用）
         return [{'axis': a, 'pulses': p, 'rpm': r, 'ok': True, 'code': '', 'text': '',
