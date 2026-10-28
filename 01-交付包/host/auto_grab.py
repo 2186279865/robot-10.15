@@ -49,7 +49,7 @@ RPM = {AXIS_Z: 1500, AXIS_X: 120, AXIS_Y: 300, AXIS_TRAY: 300}
 
 #: 每个盒位之间的角度（6 个盒子均分一圈）
 _ACC_DEFAULT = 0            # 加速度档：0 最快（现场实测 acc 越大越慢）
-TRAY_RPM = 8              # 转盘转速（5 稳、8 更快；太快会甩货，可现场回调）
+TRAY_RPM = 10             # 转盘转速（5 稳、10 更快；太快会甩货，可现场回调）
 BOX_STEP_DEG = 60.0
 BOX_COUNT = 6
 
@@ -238,11 +238,21 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         except Exception:                      # noqa: BLE001
             return None, None, None
 
+    _prep_done = {'v': False}
+
     def move(targets: Dict[int, float], order: List[int]) -> None:
         soft, known, counts = pos()
-        results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=0,
-                                     log=say, wait=wait, soft=soft, known=known,
-                                     counts=counts)
+        # X/Y 互相独立 → 同时走（省一个轴的时长）；其余情况按 order 顺序走
+        if set(int(a) for a in targets) <= {AXIS_X, AXIS_Y} and len(targets) > 1:
+            results = prep_pose.move_two(client, targets, rpm=RPM, acc=0,
+                                         log=say, wait=wait, soft=soft, known=known,
+                                         counts=counts)
+        else:
+            first = not _prep_done['v']
+            _prep_done['v'] = True
+            results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=0,
+                                         log=say, wait=wait, soft=soft, known=known,
+                                         counts=counts, prep=first)
         bad = [r for r in results if not r.get('ok')]
         if bad:
             first = bad[0]

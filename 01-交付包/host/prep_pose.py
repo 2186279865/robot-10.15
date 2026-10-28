@@ -141,7 +141,8 @@ AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
-             soft=None, known=None, counts=None) -> List[Dict[str, object]]:
+             soft=None, known=None, counts=None,
+             prep: bool = True) -> List[Dict[str, object]]:
     """按 `{轴号: 目标脉冲}` 依次闭环走到目标（增量由回读 counts / 软位置算出）。
 
     给「回 P1」「Z 抬顶」「Z 降底」「走通道」「退通道」这类固定位置按钮用：
@@ -155,18 +156,19 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
     waiter = wait or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
     results: List[Dict[str, object]] = []
 
-    try:
-        client.send('stop_clear', timeout_ms=1500)
-    except Exception:                                 # noqa: BLE001
-        pass
-    try:
-        client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
-    except Exception:                                 # noqa: BLE001
-        pass
-    try:
-        client.send('param_set', 'acc', max(0, min(255, int(acc))), timeout_ms=1500)
-    except Exception:                                 # noqa: BLE001
-        pass
+    if prep:                       # 一次动作序列里只需准备一次，省 3 次往返（约 0.15-0.25 s）
+        try:
+            client.send('stop_clear', timeout_ms=1500)
+        except Exception:                             # noqa: BLE001
+            pass
+        try:
+            client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+        except Exception:                             # noqa: BLE001
+            pass
+        try:
+            client.send('param_set', 'acc', max(0, min(255, int(acc))), timeout_ms=1500)
+        except Exception:                             # noqa: BLE001
+            pass
 
     def rpm_for(a: int) -> int:
         if isinstance(rpm, dict):
@@ -252,6 +254,64 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
             return results
     if not results:
         say('全部轴都已在目标位，不需要动')
+    return results
+
+
+
+def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
+             soft=None, known=None, counts=None) -> List[Dict[str, object]]:
+    """两根轴**同时**发 motor_goto 再一起等回执（用于 X/Y 这类互不干涉的轴）。
+
+    只支持「有回读 counts 或软位置」的情况；任一轴位置未知 → 返回 POS_UNKNOWN。
+    """
+    say = log or (lambda _t: None)
+    waiter = wait or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
+
+    def rpm_for(a):
+        return int(rpm.get(int(a), 50)) if isinstance(rpm, dict) else int(rpm)
+
+    plans = []
+    for axis, target in targets.items():
+        axis = int(axis)
+        target = int(target)
+        cur = None if counts is None else counts.get(axis)
+        rpm_i = rpm_for(axis)
+        if cur is not None:
+            want = int(round(target * COUNTS_PER_PULSE))
+            pulses = int(round((want - int(cur)) / COUNTS_PER_PULSE))
+        elif soft is not None and bool((known or {}).get(axis, False)):
+            pulses = target - int((soft or {}).get(axis, 0))
+        else:
+            return [{'axis': axis, 'pulses': 0, 'rpm': rpm_i, 'ok': False,
+                     'code': 'POS_UNKNOWN', 'text': '没有位置来源，拒绝盲走', 'pairs': {}}]
+        if abs(pulses) > MAX_STEP_PULSES.get(axis, 20000):
+            return [{'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
+                     'code': 'RANGE', 'text': '单步超行程 1.5 倍', 'pairs': {}}]
+        if abs(pulses) <= 2:
+            continue
+        plans.append((axis, pulses, rpm_i))
+
+    if not plans:
+        return []
+    for axis, pulses, rpm_i in plans:
+        say('%s 并行 目标 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
+
+    reqs = []
+    for axis, pulses, rpm_i in plans:
+        reqs.append((axis, client.goto(axis, pulses, rpm=rpm_i), pulses, rpm_i))
+    results = []
+    for axis, rid, pulses, rpm_i in reqs:
+        item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
+                'code': '', 'text': '', 'pairs': {}}
+        rep = waiter(rid, estimate_timeout_ms(pulses, rpm_i))
+        if rep is None:
+            item['code'] = 'TIMEOUT'
+        else:
+            item.update({k: rep.get(k, '') for k in ('code', 'text')})
+            item['pairs'] = rep.get('pairs') or {}
+            item['ok'] = (rep.get('kind') == 'reply') and not item['code']
+        results.append(item)
+        say('%s 并行：%s' % (AXIS_LABEL.get(axis, axis), 'ok' if item['ok'] else ('失败 %s' % item['code'])))
     return results
 
 

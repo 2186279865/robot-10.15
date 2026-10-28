@@ -131,8 +131,12 @@ class SequenceTest(unittest.TestCase):
         self.assertEqual(len(tray), 1)
         args = tray[0][1]                      # (addr, dir, rpm, acc, pulses, mode)
         self.assertEqual(args[1], 0)           # 正向
-        self.assertEqual(args[2], AG.TRAY_RPM) # 速度模式 rpm=5
-        self.assertEqual(args[4], int(round(AG.TRAY_DEG / 360.0 * 3200)))
+        # rpm 会按学到的 tray_scale 折算（保持物理角速度），所以只校验 ≤ TRAY_RPM 且 > 0
+        self.assertGreater(args[2], 0)
+        self.assertLessEqual(args[2], AG.TRAY_RPM) # 速度模式 rpm=5
+        _scale = AG._load_scale()
+        # 实现里先按 3200 脉冲/圈算 533 再乘比例，存在 ±2 的取整差
+        self.assertAlmostEqual(args[4], AG.TRAY_DEG / 360.0 * 3200 * _scale, delta=3)
         self.assertEqual(args[5], 'rel')
 
     def test_run_once_refuses_when_offline(self):
