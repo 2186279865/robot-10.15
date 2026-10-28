@@ -1218,6 +1218,13 @@ class App:
         except Exception:                      # noqa: BLE001
             pass
         top, tw = self.detect_targets(tf, 'top', st) if tf is not None else ([], None)
+        try:
+            if tw is not None:                      # 存一份干净校正帧，便于离线对比/调试
+                _rd = Path(__file__).parent / 'runtime'
+                _rd.mkdir(exist_ok=True)
+                cv2.imwrite(str(_rd / 'last_top_warp.jpg'), tw)
+        except Exception:                           # noqa: BLE001
+            pass
         side, sw, reused = [], None, False
         if sf is not None:
             self._side_tick += 1
@@ -1231,6 +1238,13 @@ class App:
                 except Exception:              # noqa: BLE001
                     pass
                 side, sw = self.detect_targets(sf, 'side', st)
+                try:
+                    if sw is not None:
+                        _rd = Path(__file__).parent / 'runtime'
+                        _rd.mkdir(exist_ok=True)
+                        cv2.imwrite(str(_rd / 'last_side_warp.jpg'), sw)
+                except Exception:                   # noqa: BLE001
+                    pass
                 self.side_cache = (side, sw)
         elif self.side_cache is not None:
             side, sw = self.side_cache
