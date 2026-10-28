@@ -418,6 +418,101 @@ def _roi_crop(warp, mask, pad=0.28, max_side=520):
         return None
 
 
+
+def vlm_targets(objs, half=0.055, min_conf=0.40, margin=0.05):
+    """把 DeepSeek 返回的 objects 合成为“目标字典”列表（不含 SAM 掩膜）。
+
+    half  : 目标半径（托盘归一化），仅用于给下游一个等价的 bbox/面积
+    margin: 托盘边缘留白，超出则丢弃（用于滤掉托盘外的物体）
+    """
+    out = []
+    for i, o in enumerate(objs or [], 1):
+        try:
+            u, v = float(o['center'][0]), float(o['center'][1])
+        except Exception:
+            continue
+        conf = float(o.get('conf') or 0.0)
+        if conf < min_conf:
+            continue
+        if not (margin <= u <= 1.0 - margin and margin <= v <= 1.0 - margin):
+            continue
+        shape = o.get('shape') or '其他几何体'
+        color = o.get('color') or '未知'
+        x0, y0 = int(max(0.0, (u - half)) * 700), int(max(0.0, (v - half)) * 700)
+        x1, y1 = int(min(1.0, (u + half)) * 700), int(min(1.0, (v + half)) * 700)
+        w, h = max(1, x1 - x0), max(1, y1 - y0)
+        item = {
+            'mask': None, 'contour': None,
+            'bbox': [x0, y0, w, h], 'bbox_warped': [x0, y0, w, h], 'bbox_orig': [x0, y0, w, h],
+            'center_px': [round(u * 700, 2), round(v * 700, 2)],
+            'center_orig': [round(u * 700, 2), round(v * 700, 2)],
+            'center_tray': [round(u, 4), round(v, 4)],
+            'area_px': round(float(w * h), 1),
+            'confidence': round(conf, 3),
+            'shape': shape, 'shape_conf': round(conf, 3),
+            'color': color, 'color_conf': round(conf, 3),
+            'class_key': '%s|%s' % (shape, color), 'class_name': shape,
+            'class_id': None, 'class_conf': round(conf, 3),
+            'class_source': 'deepseek', 'need_review': False, 'class_votes': None,
+            'views': 'top', 'vlm_used': True,
+        }
+        out.append({'id': i, 'views': 'top', 'top': item, 'side': None,
+                    'confidence': round(conf, 3), 'color_mismatch': False})
+    return out
+
+
+
+def refine_vlm_targets(warp, vt, items, max_dist=0.07, cone_circ=0.78, cone_solid=0.965):
+    """用 SAM 掩膜的几何/颜色信息修正 DeepSeek 的判定结果。
+
+    - 颜色：一律用掩膜内 HSV 实测（饱和色块比 VLM 命名可靠）
+    - 形状：仅当 VLM 判“方体类”且顶视轮廓很圆（circ>=cone_circ、solidity<=cone_solid）
+            时改判“圆锥”；solidity 更高的圆（>=0.985）改判“圆柱/圆形”
+    - 修不动的保持 VLM 原判
+    """
+    if warp is None or not items:
+        return vt
+    used = set()
+    for tgt in vt:
+        it = tgt.get('top')
+        if not it:
+            continue
+        cu, cv = it['center_tray']
+        best, bd = None, 1e9
+        for k, s in enumerate(items):
+            if k in used or s.get('mask') is None:
+                continue
+            su, sv = s['center_tray']
+            d = ((su - cu) ** 2 + (sv - cv) ** 2) ** .5
+            if d < bd:
+                best, bd = k, d
+        if best is None or bd > max_dist:
+            continue
+        used.add(best)
+        s = items[best]
+        try:
+            c, cc, _h = _color_stats(warp, s['mask'])
+            if c and c != '未知' and float(cc) >= 0.30:
+                it['color'] = c
+                it['color_conf'] = round(float(cc), 2)
+        except Exception:
+            pass
+        # 形状不再用几何覆盖：SAM 掩膜在密集摆放时是六边形/碎块，硬覆盖会把方块误判成圆柱。
+        # 留一个“尖顶”提示，供人工/后续二次询问参考。
+        try:
+            shape, conf, info = _shape_of(s['mask'], s['contour'])
+            circ = float(info.get('circ') or 0.0)
+            solid = float(info.get('solidity') or 0.0)
+            rad = float(info.get('rad_ratio') or 0.0)
+            if circ >= cone_circ and solid <= cone_solid and rad >= 1.35:
+                it['shape_hint'] = '可能是圆锥/棱锥（顶视圆且中心尖）'
+        except Exception:
+            pass
+        it['class_key'] = '%s|%s' % (it.get('shape'), it.get('color'))
+        it['class_name'] = it.get('shape')
+    return vt
+
+
 def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=None,
                   side_only=False, vlm_obj=None):
     """给一个检测项补全颜色/形状/类别字段，返回原 item（原地更新）。"""

@@ -208,10 +208,13 @@ class AutoSegmenter:
             cx = M['m10'] / M['m00'] if M['m00'] else x + bw / 2
             cy = M['m01'] / M['m00'] if M['m00'] else y + bh / 2
             _mean_bgr = cv2.mean(frame, mask=(m > 0).astype('uint8'))[:3]
+            _hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            _mean_hsv = cv2.mean(_hsv, mask=(m > 0).astype('uint8'))[:3]
             out.append({'mask': m, 'contour': c, 'bbox': [x, y, bw, bh],
                         'center_px': [round(cx, 2), round(cy, 2)],
                         'center_tray': [round(cx / w, 4), round(cy / h, 4)],
                         'mean_bgr': [round(v, 1) for v in _mean_bgr],
+                        'mean_hsv': [round(v, 1) for v in _mean_hsv],
                         'area_px': round(area, 1), 'confidence': round(float(score), 3)})
         # 去重：两路提示常常对同一个物体返回“顶面”和“整体”两张掩膜，它们可能只有
         # 部分重叠（IoU 不到 .45），所以除了 IoU/包含，还按中心距离合并同位置目标。
@@ -251,12 +254,29 @@ class AutoSegmenter:
         dy = max(0, max(ay, by) - min(ay + ah, by + bh))
         if dx > gap or dy > gap:
             return False
-        ca, cb = item.get('mean_bgr'), other.get('mean_bgr')
-        if ca and cb:
-            import math as _math
-            d = _math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(ca, cb)))
-            if d > 42.0:          # 颜色差太大 → 是两件不同色的物块，不合并
-                return False
+        # 同色系判定：优先看 HSV 色调（曲面物块上下明度差很大，但色调相同）
+        ha, hb = item.get('mean_hsv'), other.get('mean_hsv')
+        if ha and hb:
+            dh = abs(float(ha[0]) - float(hb[0]))
+            dh = min(dh, 180.0 - dh)          # OpenCV 色相 0~180，环形距离
+            sat_ok = max(float(ha[1]), float(hb[1])) >= 55.0
+            if sat_ok:
+                if dh > 14.0:                 # 色调差太大 → 不同色物块，不合并
+                    return False
+            else:
+                ca, cb = item.get('mean_bgr'), other.get('mean_bgr')
+                if ca and cb:
+                    import math as _math
+                    d = _math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(ca, cb)))
+                    if d > 42.0:
+                        return False
+        else:
+            ca, cb = item.get('mean_bgr'), other.get('mean_bgr')
+            if ca and cb:
+                import math as _math
+                d = _math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(ca, cb)))
+                if d > 42.0:
+                    return False
         uw = max(ax + aw, bx + bw) - min(ax, bx)
         uh = max(ay + ah, by + bh) - min(ay, by)
         return uw <= 1.40 * max(aw, bw) and uh <= 1.75 * max(ah, bh)
