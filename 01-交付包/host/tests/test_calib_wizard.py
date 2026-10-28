@@ -416,6 +416,8 @@ class TestTrayState(unittest.TestCase):
         self.assertEqual(VG.load_state(path), {'current_box': 1})
 
     def test_start_box_override_and_meta(self):
+        import box_map as BM
+        BM.reset()                              # 分盒登记是全局状态文件，先清空保证可重复
         cfg = VG._merge(VG.DEFAULTS, {
             'z': {'safe': 1200, 'lift': 900, 'place': -100, 'grasp': {'圆柱/圆形': -3200}},
             'tray': {'class_to_box': {}, 'start_box': 1},

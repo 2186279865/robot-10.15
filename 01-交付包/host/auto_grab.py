@@ -127,6 +127,23 @@ def describe(target: dict) -> str:
     return '%s %s u=%.2f v=%.2f' % (name, color, float(u), float(v))
 
 
+
+def tray_turn(client, deg: float, log=print) -> dict:
+    """转盘（轴 3）用速度模式走 deg 度：全程 rpm=TRAY_RPM，没有起步/收尾的补差猛冲。
+
+    deg 为正走正向。60° = 533 脉冲；预计用时 = 脉冲/(3200) 圈 ÷ (rpm/60) 秒。
+    """
+    n = int(round(deg / 360.0 * 3200.0))
+    if abs(n) < 1:
+        return {'pulses': 0, 'seconds': 0.0}
+    d = 0 if n > 0 else 1
+    pulses = abs(n)
+    dur = (pulses / 3200.0) / max(1.0, TRAY_RPM / 60.0)
+    log('[转盘] %+.0f° = %d 脉冲，速度模式 rpm=%d（预计 %.1f s）' % (deg, n, TRAY_RPM, dur))
+    client.send('motor_pos', AXIS_TRAY, d, TRAY_RPM, _ACC_DEFAULT, pulses, 'rel')
+    time.sleep(dur * 1.15 + 0.45)          # 等它走完（留 15% + 0.45 s 余量）
+    return {'pulses': n, 'seconds': dur}
+
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
              drop: bool = True, tray_deg: float = TRAY_DEG) -> Dict[str, object]:
@@ -189,17 +206,11 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
                 'target': describe(target), 'dropped': False}
     if abs(tray_deg) >= 1.0:
-        # 10 空盒转到落料位：闭环 goto + 指定慢转速（现场实测 rpm≈5 合适；motor_angle 需要角度基准，不用）
-        _n = int(round(tray_deg / 360.0 * 3200.0))
-        say('转盘 %+.0f°（%d 脉冲，rpm %d）' % (tray_deg, _n, TRAY_RPM))
-        try:
-            client.goto(AXIS_TRAY, _n, rpm=TRAY_RPM)
-        except Exception as _exc:                       # noqa: BLE001
-            say('转盘闭环失败（%s），退回相对脉冲' % _exc)
-            _d = 0 if tray_deg >= 0 else 1
-            client.send('motor_pos', AXIS_TRAY, _d, TRAY_RPM, _ACC_DEFAULT, abs(_n), 'rel')
-    time.sleep(0.3)
-    time.sleep(0.5)
+        # 10 空盒转到落料位：**纯速度模式**（rpm=TRAY_RPM）。
+        # 不用 goto：goto 的 COARSE 段用 goto_rpm、SETTLE 后 CORRECT 段用 goto_final_rpm(60)，
+        # 停一下再猛补差 → 现场看到“结束时会猛转一下”。速度模式全程恒定。
+        tray_turn(client, tray_deg, say)
+    time.sleep(0.35)
     say('松爪 180° → 等待落盒 → 回预备 158°')
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)

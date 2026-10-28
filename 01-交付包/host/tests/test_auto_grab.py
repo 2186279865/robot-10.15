@@ -125,11 +125,15 @@ class SequenceTest(unittest.TestCase):
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0
-        # 落货转盘：闭环慢速 goto（rpm=TRAY_RPM），60° = 533 脉冲
-        tray = [c for c in client.calls if c[0] == 'goto' and c[1][0] == AG.AXIS_TRAY]
+        # 落货转盘：纯速度模式 motor_pos（rpm=TRAY_RPM），60° = 533 脉冲
+        tray = [c for c in client.calls
+                if c[0] == 'motor_pos' and c[1][0] == AG.AXIS_TRAY]
         self.assertEqual(len(tray), 1)
-        self.assertEqual(tray[0][1][1], int(round(AG.TRAY_DEG / 360.0 * 3200)))
-        self.assertEqual(tray[0][1][2], AG.TRAY_RPM)
+        args = tray[0][1]                      # (addr, dir, rpm, acc, pulses, mode)
+        self.assertEqual(args[1], 0)           # 正向
+        self.assertEqual(args[2], AG.TRAY_RPM) # 速度模式 rpm=5
+        self.assertEqual(args[4], int(round(AG.TRAY_DEG / 360.0 * 3200)))
+        self.assertEqual(args[5], 'rel')
 
     def test_run_once_refuses_when_offline(self):
         client = FakeClient()

@@ -84,8 +84,10 @@ class CalibTab(ttk.Frame):
                    ).pack(side='left', padx=(0, 12))
         ttk.Button(bar, text='自动抓一件', command=self.on_auto_grab
                    ).pack(side='left', padx=(0, 6))
-        ttk.Button(bar, text='连续抓', command=self.on_auto_many
-                   ).pack(side='left', padx=(0, 3))
+        self.many_btn = ttk.Button(bar, text='连续抓', command=self.on_auto_many)
+        self.many_btn.pack(side='left', padx=(0, 3))
+        self.many_lbl = ttk.Label(bar, text='', foreground='#005599')
+        self.many_lbl.pack(side='left', padx=(0, 10))
         ttk.Button(bar, text='分盒清零', command=self.on_box_reset
                    ).pack(side='left', padx=(0, 6))
         self.many_var = tk.IntVar(value=6)
@@ -655,7 +657,50 @@ class CalibTab(ttk.Frame):
             except Exception:                          # noqa: BLE001
                 pass
 
+    def _set_many_state(self, running: bool, text: str = '') -> None:
+        """连续抓的可见状态：按钮文字 + 本页标签 + 顶栏状态。"""
+        try:
+            self.many_btn.configure(text=('■ 停止连续抓' if running else '连续抓'))
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            self.many_lbl.configure(text=text)
+        except Exception:                                   # noqa: BLE001
+            pass
+        try:
+            self.app.status_label.configure(text=text or '就绪')
+        except Exception:                                   # noqa: BLE001
+            pass
+
+    def _many_event(self, ev: dict) -> None:
+        """run_many 的事件 → 界面状态（异常一律吞）。"""
+        try:
+            kind = ev.get('kind')
+            if kind == 'item_start':
+                self._set_many_state(True, '连续抓 %d/%d · 识别中…'
+                                     % (ev.get('i', 0), ev.get('n', 0)))
+            elif kind == 'target':
+                self._set_many_state(True, '连续抓 %d 件 · %s → %s 号盒'
+                                     % (ev.get('i', 0), ev.get('target', ''), ev.get('box', 0)))
+            elif kind == 'item_ok':
+                self._set_many_state(True, '连续抓：第 %d 件完成' % ev.get('i', 0))
+            elif kind == 'item_fail':
+                self._set_many_state(True, '连续抓：第 %d 件失败（%s）'
+                                     % (ev.get('i', 0), ev.get('reason', '')))
+            elif kind == 'finished':
+                self._set_many_state(False, '连续抓结束：成功 %s / 失败 %s，用时 %.1f s'
+                                     % (ev.get('done'), ev.get('failed'),
+                                        ev.get('elapsed') or 0))
+        except Exception:                                   # noqa: BLE001
+            pass
+
     def _on_auto_many(self):
+        # 已经在跑 → 这个按钮就是「停止」：当前件走完后停
+        if getattr(self, '_prep_running', False) and                 getattr(self, '_many_thread', None) is not None and self._many_thread.is_alive():
+            self._many_stop = True
+            self.say('收到停止请求：当前件走完就停（再点一次不会重复）')
+            self._set_many_state(True, '连续抓：正在停止（等当前件走完）…')
+            return
         # 点按钮立刻给反馈：绝不允许“看起来没反应”
         self.say('连续抓：收到点击，正在检查前置条件…')
         if self._prep_running:
@@ -690,9 +735,11 @@ class CalibTab(ttk.Frame):
                  '急停请点顶部「停止全部」' % count)
         self._prep_running = True
         self._many_stop = False
-        self.say('开始连续抓 %d 件…' % count)
-        threading.Thread(target=self._many_worker, args=(client, vision, count, drop),
-                         daemon=True).start()
+        self._set_many_state(True, '连续抓：启动中…（%d 件）' % count)
+        self.say('▶ 开始连续抓 %d 件（每件重新识别，失败即停）' % count)
+        self._many_thread = threading.Thread(
+            target=self._many_worker, args=(client, vision, count, drop), daemon=True)
+        self._many_thread.start()
 
     def on_box_reset(self):
         """把"类别→盒号"的登记清空（每次比赛/换一批货前用）。"""
@@ -714,6 +761,7 @@ class CalibTab(ttk.Frame):
                 pos_source=self._pos_source,
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
+                on_event=self._many_event,
             )
             self.say('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
                      % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
@@ -722,6 +770,11 @@ class CalibTab(ttk.Frame):
         finally:
             self._prep_running = False
             self._many_stop = False
+            try:
+                if not (self.many_lbl.cget('text') or '').startswith('连续抓结束'):
+                    self._set_many_state(False, '连续抓已结束')
+            except Exception:                               # noqa: BLE001
+                pass
             try:
                 self._refresh_pos()
             except Exception:                          # noqa: BLE001
