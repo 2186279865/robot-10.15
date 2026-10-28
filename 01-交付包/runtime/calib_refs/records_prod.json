@@ -1,0 +1,306 @@
+[
+ {
+  "pos": 1,
+  "ts": 1793168282.512,
+  "ts_hms": "14:18:02",
+  "fusion": {
+   "axis": "u",
+   "axis_name": "左右(u)",
+   "flip": false,
+   "flip_mode": 0,
+   "axis_mode": 0,
+   "n_top": 1,
+   "n_side": 2,
+   "matched": 1,
+   "mean_dist": 0.008599999999999997,
+   "duplicate_side": 0,
+   "unmatched_top": 0,
+   "unmatched_side": 1,
+   "auto": true
+  },
+  "targets": [
+   {
+    "id": 1,
+    "views": "top+side",
+    "shape": "长方体/长方形",
+    "color": "红",
+    "class_name": "待登记",
+    "class_key": "长方体/长方形|红",
+    "center_tray": [
+     0.489,
+     0.5158
+    ],
+    "bbox": [
+     783,
+     416,
+     127,
+     150
+    ],
+    "bbox_warped": [
+     287,
+     290,
+     113,
+     146
+    ],
+    "area_px": 15272.0,
+    "height_ratio": 0.24,
+    "side_bbox": [
+     927,
+     654,
+     117,
+     144
+    ],
+    "side_center_px": [
+     985.16,
+     733.4
+    ],
+    "shape_conf": 0.8,
+    "color_conf": 0.95,
+    "confidence": 0.913
+   }
+  ]
+ },
+ {
+  "pos": 2,
+  "ts": 1793167896.276,
+  "ts_hms": "14:11:36",
+  "fusion": {
+   "axis": "v",
+   "axis_name": "前后(v)",
+   "flip": false,
+   "flip_mode": 0,
+   "axis_mode": 0,
+   "n_top": 1,
+   "n_side": 1,
+   "matched": 1,
+   "mean_dist": 0.0242,
+   "unmatched_top": 0,
+   "unmatched_side": 0,
+   "auto": true
+  },
+  "targets": [
+   {
+    "id": 1,
+    "views": "top+side",
+    "shape": "长方体/长方形",
+    "color": "红",
+    "class_name": "待登记",
+    "class_key": "长方体/长方形|红",
+    "center_tray": [
+     0.1749,
+     0.2261
+    ],
+    "bbox": [
+     1011,
+     612,
+     130,
+     145
+    ],
+    "bbox_warped": [
+     63,
+     77,
+     118,
+     166
+    ],
+    "area_px": 17853.0,
+    "height_ratio": 0.216,
+    "side_bbox": [
+     1144,
+     456,
+     160,
+     148
+    ],
+    "side_center_px": [
+     1223.09,
+     532.37
+    ],
+    "shape_conf": 0.8,
+    "color_conf": 0.95,
+    "confidence": 0.991
+   }
+  ]
+ },
+ {
+  "pos": 3,
+  "ts": 1793168375.911,
+  "ts_hms": "14:19:35",
+  "fusion": {
+   "axis": "v",
+   "axis_name": "前后(v)",
+   "flip": false,
+   "flip_mode": 0,
+   "axis_mode": 0,
+   "n_top": 1,
+   "n_side": 1,
+   "matched": 1,
+   "mean_dist": 0.004499999999999976,
+   "duplicate_side": 0,
+   "unmatched_top": 0,
+   "unmatched_side": 0,
+   "auto": true
+  },
+  "targets": [
+   {
+    "id": 1,
+    "views": "top+side",
+    "shape": "五棱体",
+    "color": "红",
+    "class_name": "待登记",
+    "class_key": "五棱体|红",
+    "center_tray": [
+     0.8173,
+     0.1979
+    ],
+    "bbox": [
+     545,
+     616,
+     163,
+     150
+    ],
+    "bbox_warped": [
+     500,
+     52,
+     146,
+     174
+    ],
+    "area_px": 21638.0,
+    "height_ratio": 0.27,
+    "side_bbox": [
+     1117,
+     831,
+     141,
+     142
+    ],
+    "side_center_px": [
+     1185.21,
+     904.83
+    ],
+    "shape_conf": 0.78,
+    "color_conf": 0.95,
+    "confidence": 0.856
+   }
+  ]
+ },
+ {
+  "pos": 4,
+  "ts": 1793168491.067,
+  "ts_hms": "14:21:31",
+  "fusion": {
+   "axis": "v",
+   "axis_name": "前后(v)",
+   "flip": false,
+   "flip_mode": 0,
+   "axis_mode": 0,
+   "n_top": 1,
+   "n_side": 1,
+   "matched": 1,
+   "mean_dist": 0.015800000000000036,
+   "duplicate_side": 0,
+   "unmatched_top": 0,
+   "unmatched_side": 0,
+   "auto": true
+  },
+  "targets": [
+   {
+    "id": 1,
+    "views": "top+side",
+    "shape": "正方体/正方形",
+    "color": "红",
+    "class_name": "待登记",
+    "class_key": "正方体/正方形|红",
+    "center_tray": [
+     0.1404,
+     0.8446
+    ],
+    "bbox": [
+     1057,
+     165,
+     163,
+     152
+    ],
+    "bbox_warped": [
+     36,
+     532,
+     124,
+     119
+    ],
+    "area_px": 13397.0,
+    "height_ratio": 0.214,
+    "side_bbox": [
+     656,
+     424,
+     147,
+     151
+    ],
+    "side_center_px": [
+     731.24,
+     501.67
+    ],
+    "shape_conf": 0.8,
+    "color_conf": 0.95,
+    "confidence": 0.978
+   }
+  ]
+ },
+ {
+  "pos": 5,
+  "ts": 1793168541.527,
+  "ts_hms": "14:22:21",
+  "fusion": {
+   "axis": "u",
+   "axis_name": "左右(u)",
+   "flip": false,
+   "flip_mode": 0,
+   "axis_mode": 0,
+   "n_top": 1,
+   "n_side": 1,
+   "matched": 1,
+   "mean_dist": 0.02100000000000002,
+   "duplicate_side": 0,
+   "unmatched_top": 0,
+   "unmatched_side": 0,
+   "auto": true
+  },
+  "targets": [
+   {
+    "id": 1,
+    "views": "top+side",
+    "shape": "五棱体",
+    "color": "红",
+    "class_name": "待登记",
+    "class_key": "五棱体|红",
+    "center_tray": [
+     0.8344,
+     0.8479
+    ],
+    "bbox": [
+     451,
+     149,
+     197,
+     156
+    ],
+    "bbox_warped": [
+     512,
+     533,
+     146,
+     122
+    ],
+    "area_px": 16281.0,
+    "height_ratio": 0.267,
+    "side_bbox": [
+     696,
+     835,
+     121,
+     141
+    ],
+    "side_center_px": [
+     759.25,
+     908.44
+    ],
+    "shape_conf": 0.78,
+    "color_conf": 0.95,
+    "confidence": 0.831
+   }
+  ]
+ }
+]

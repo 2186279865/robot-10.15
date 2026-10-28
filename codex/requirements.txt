@@ -1,0 +1,5 @@
+numpy>=1.26,<2.3
+opencv-python>=4.9
+Pillow>=10
+pyserial>=3.5
+# Optional SAM segmentation: pip install ultralytics torch torchvision

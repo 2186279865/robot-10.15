@@ -1,0 +1,77 @@
+{
+  "camera": {
+    "mode": "remote",
+    "host": "192.168.100.198",
+    "port": 5057,
+    "top": 1,
+    "side": 0,
+    "width": 1280,
+    "height": 720,
+    "top_points": [],
+    "side_points": []
+  },
+  "vision": {
+    "backend": "geometry",
+    "segmentation": "contour",
+    "sam_model": "D:\\study\\project\\robot-competition\\01-交付包\\vision\\models\\sam_b.pt",
+    "min_area": 350,
+    "interval": 1.0,
+    "stale_seconds": 5.0,
+    "side_pairing": false,
+    "side_axis": "u",
+    "side_flip": false,
+    "local_url": "http://127.0.0.1:11434",
+    "local_model": "qwen3-vl:4b-instruct",
+    "cloud_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "cloud_model": "qwen3-vl-plus",
+    "key_env": "DASHSCOPE_API_KEY",
+    "model_timeout": 180,
+    "cache_seconds": 10,
+    "shapes": [
+      "正方体",
+      "长方体",
+      "三棱柱",
+      "五棱柱",
+      "六棱柱",
+      "圆柱",
+      "球",
+      "圆锥",
+      "棱锥",
+      "菱面体",
+      "其他几何体",
+      "不确定"
+    ]
+  },
+  "robot": {
+    "endpoint": "tcp://192.168.100.198:5058",
+    "simulated": true,
+    "counts_per_pulse": 20.48,
+    "position_age": 2.0,
+    "limits": {},
+    "rpm": {
+      "1": 300,
+      "3": 120,
+      "4": 120,
+      "5": 120
+    },
+    "tolerance_counts": 200,
+    "move_timeout": 120,
+    "reference_confirmed": false,
+    "calibration_confirmed": false,
+    "affine": null,
+    "route": {
+      "p0_x": 0,
+      "p0_y": 0,
+      "p1_y": -13144,
+      "z_low": 0,
+      "z_high": -152000,
+      "z_pick": 0
+    },
+    "settle_seconds": 0.7,
+    "verify_pick": true,
+    "max_items": 12,
+    "display_required": true,
+    "display_host": "",
+    "display_port": 5059
+  }
+}

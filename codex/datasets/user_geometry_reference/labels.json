@@ -1,0 +1,86 @@
+{
+  "provenance": "用户提供的几何体示意图，仅供功能测试，不能代表实拍准确率。",
+  "cases": [
+    {
+      "id": "object-1",
+      "top": "object-1.png",
+      "mask": "object-1-mask.png",
+      "expected_shape": "三棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-2",
+      "top": "object-2.png",
+      "mask": "object-2-mask.png",
+      "expected_shape": "三棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-3",
+      "top": "object-3.png",
+      "mask": "object-3-mask.png",
+      "expected_shape": "三棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-4",
+      "top": "object-4.png",
+      "mask": "object-4-mask.png",
+      "expected_shape": "六棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-5",
+      "top": "object-5.png",
+      "mask": "object-5-mask.png",
+      "expected_shape": "六棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-6",
+      "top": "object-6.png",
+      "mask": "object-6-mask.png",
+      "expected_shape": "六棱柱",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-7",
+      "top": "object-7.png",
+      "mask": "object-7-mask.png",
+      "expected_shape": "菱面体",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-8",
+      "top": "object-8.png",
+      "mask": "object-8-mask.png",
+      "expected_shape": "菱面体",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    },
+    {
+      "id": "object-9",
+      "top": "object-9.png",
+      "mask": "object-9-mask.png",
+      "expected_shape": "菱面体",
+      "expected_color": "",
+      "expected_hollow": "",
+      "note": "形状来自用户示意图的分组标签；颜色、实心/镂空未提供独立真值。绿色轮廓已经边界修复，仍有渲染和修复误差。"
+    }
+  ]
+}
