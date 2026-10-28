@@ -11,11 +11,6 @@ Put sam_b.pt (or sam2_b.pt) in new_eye/models/.
 from pathlib import Path
 import os
 import cv2
-
-try:
-    import shape_features as _SF
-except Exception:            # noqa: BLE001
-    _SF = None
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
@@ -171,12 +166,6 @@ class AutoSegmenter:
             m = (mask > 0.5).astype(np.uint8) * 255
             if m.shape[:2] != (h, w):
                 m = cv2.resize(m, (w, h), interpolation=cv2.INTER_NEAREST)
-            # 掩膜加固：反光/贴纸会把掩膜打出洞，闭运算+填洞后再算形状，宽高比与圆度才稳。
-            if _SF is not None:
-                try:
-                    m = _SF.clean_mask(m, close_ksize=3)
-                except Exception:            # noqa: BLE001
-                    pass
             contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if not contours:
                 continue

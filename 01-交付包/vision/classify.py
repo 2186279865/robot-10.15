@@ -17,11 +17,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-try:
-    import shape_features as _SF
-except Exception:            # noqa: BLE001  （允许单独跑 classify 时缺模块）
-    _SF = None
-
 ROOT = Path(__file__).resolve().parent
 SAMPLES = ROOT / 'samples.json'
 
@@ -113,9 +108,7 @@ def _hist(hs, ss, vs):
 
 
 # --------------------------------------------------------------------- 形状
-def _shape_of(mask, contour, cfg=None):
-    if _SF is not None:
-        return _shape_of_v2(mask, contour, cfg)
+def _shape_of(mask, contour):
     area = float(cv2.contourArea(contour))
     peri = float(cv2.arcLength(contour, True))
     if area <= 0 or peri <= 0:
@@ -143,25 +136,6 @@ def _shape_of(mask, contour, cfg=None):
     if (circ > .80 and solidity > .93) or (nv >= 6 and circ > .74 and solidity > .93 and extent < .84):
         return '圆柱/圆形', min(.95, .55 + .4 * min(1.0, max(0.0, circ - .74) / .22)), info
     return '其他几何体', .55, info
-
-
-def _shape_of_v2(mask, contour, cfg=None):
-    """几何基元版形状判定（毫米尺寸 + 容错链），细节见 vision/shape_features.py。"""
-    cal = (cfg or {}).get('shape_calib') or {}
-    if cal.get('mm_per_px'):
-        mm_per_px = float(cal['mm_per_px'])          # 形状标定实测值优先
-    else:
-        tray_mm = float((cfg or {}).get('tray_mm') or 200.0)
-        mm_per_px = tray_mm / 700.0
-    k_front = float(cal.get('k_front') or 1.0)
-    feats = _SF.features(mask, contour, mm_per_px=mm_per_px, cfg=cfg, depth_scale=k_front)
-    name, conf, why = _SF.classify_shape(feats, cfg=cfg)
-    info = {'circ': feats['circ'], 'ratio': feats['ratio_mm'], 'nv': feats['nv'],
-            'solidity': feats['solidity'], 'extent': feats['extent'],
-            'aspect': round((feats['h_mm'] or 1.0) / max(1e-6, feats['w_mm'] or 1.0), 3),
-            'rect_fit': feats['rect_fit'], 'w_mm': feats['w_mm'], 'h_mm': feats['h_mm'],
-            'shape_why': why, 'shape_desc': _SF.describe(feats)}
-    return name, conf, info
 
 
 def _side_curvature(mask, contour):
@@ -227,17 +201,7 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
                      'need_review': True, 'feature': None})
         return item
     color, color_conf, hist = _color_stats(warp, mask)
-    shape, shape_conf, info = _shape_of(mask, contour, cfg)
-    side = None
-    if side_item is not None and side_item.get('mask') is not None and _SF is not None:
-        cal = (cfg or {}).get('shape_calib') or {}
-        try:
-            side = _SF.side_info_of(side_item['mask'], side_item['contour'],
-                                    mm_per_px=float((cfg or {}).get('tray_mm') or 160.0) / 700.0,
-                                    k_h=float(cal.get('k_h') or 1.0))
-            shape, shape_conf = _SF.refine_with_side(shape, shape_conf, info, side, cfg)
-        except Exception:                # noqa: BLE001
-            side = None
+    shape, shape_conf, info = _shape_of(mask, contour)
     side_curv = None
     if (side_item is not None and side_item.get('mask') is not None
             and cfg.get('side_shape_refine', True) and shape in ('圆柱/圆形', '其他几何体')):
@@ -253,8 +217,6 @@ def classify_item(warp, item, cfg=None, samples=None, side_warp=None, side_item=
     item.update({'color': color, 'color_conf': round(color_conf, 2),
                  'shape': shape, 'shape_conf': round(shape_conf, 2),
                  'side_curv': None if side_curv is None else round(side_curv, 2),
-                 'height_mm': (side or {}).get('height_mm'),
-                 'side_kind': (side or {}).get('kind'),
                  'feature': feat, **cls})
     return item
 

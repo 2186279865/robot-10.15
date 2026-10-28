@@ -295,7 +295,6 @@ class App:
                    command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
-        ttk.Button(bot, text='形状标定', command=self.on_shape_calib).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bot, text='高级', variable=self.adv_var,
                         command=self.toggle_adv).pack(side='right', padx=6)
@@ -990,95 +989,6 @@ class App:
             self.note('网络推送已关闭')
 
     # ------------------------------------------------------------- 识别：双摄
-    # ------------------------------------------------------------ 形状标定
-    def on_shape_calib(self):
-        """用已知边长的方块标出 mm/px、顶视深度修正 k_front、副摄高度修正 k_h。"""
-        try:
-            import shape_calib as SC
-        except Exception as exc:                       # noqa: BLE001
-            messagebox.showerror('形状标定', '缺少 shape_calib.py：%s' % exc)
-            return
-        if not (self.a and self.bstream):
-            messagebox.showwarning('形状标定', '先点「打开双画面」，标定要用到顶视 + 副摄两路。')
-            return
-        tf, sf = self.a.get(), self.bstream.get()
-        if tf is None or sf is None:
-            messagebox.showwarning('形状标定', '还没取到画面，等两路出图后再点。')
-            return
-        known = self.cfg.get('shape_calib', {}).get('known_mm') or 25.0
-        known = simpledialog.askfloat('形状标定', '方块实际边长（mm）：', initialvalue=float(known),
-                                      minvalue=5.0, maxvalue=200.0)
-        if not known:
-            return
-        # 实时分割会一直占着 SAM，标定时先停掉，避免两边抢（会出现 0 个目标）
-        if getattr(self, 'live', False):
-            try:
-                self.toggle_live()
-                self.note('[形状标定] 已暂停实时分割')
-            except Exception:                          # noqa: BLE001
-                pass
-        # 分割器是懒加载的（单次识别时才建），标定前先确保它存在，否则会报
-        # "'NoneType' object has no attribute 'segment'"
-        try:
-            if not self.ensure_segmenter():
-                messagebox.showerror('形状标定', 'SAM 模型没加载成功（看下方日志里的红色提示）。')
-                return
-        except Exception as exc:                       # noqa: BLE001
-            messagebox.showerror('形状标定', '加载分割模型失败：%s' % exc)
-            return
-        top, side, tw_n, sw_n = [], [], 0, 0
-        for attempt in range(3):
-            try:
-                tf = self.a.get()
-                sf = self.bstream.get()
-                top, _tw = self.detect_targets(tf, 'top')
-                side, _sw = self.detect_targets(sf, 'side')
-            except Exception as exc:                   # noqa: BLE001
-                messagebox.showerror('形状标定', '分割失败：%s' % exc)
-                return
-            tw_n, sw_n = len(top), len(side)
-            self.note('[形状标定] 第 %d 次：顶视 %d 个目标，副摄 %d 个目标' % (attempt + 1, tw_n, sw_n))
-            if top and side:
-                break
-            time.sleep(0.35)
-        if not top or not side:
-            messagebox.showwarning(
-                '形状标定：没分割到目标',
-                '本次：顶视 %d 个目标，副摄 %d 个目标。\n\n'
-                '请依次确认：\n'
-                '1) 方块是否放在托盘四点框**里面**（框外会被透视校正裁掉）\n'
-                '2) 两路画面是否都有图（先点「打开双画面」等 2 秒）\n'
-                '3) 方块是否单独摆放、不要和其它物块叠在一起\n'
-                '4) 实时分割是否已停（本按钮会自动暂停它）\n'
-                '确认后不用重启，直接再点一次「形状标定」。' % (tw_n, sw_n))
-            return
-        t_item = max(top, key=lambda z: z.get('area_px') or 0)
-        s_item = max(side, key=lambda z: z.get('area_px') or 0)
-        # detect_targets 的 item 里，bbox 是原始图像素的键叫 bbox_orig；
-        # 托盘校正图（700×700）里的键叫 bbox_warped —— 标定必须用后者。
-        res = SC.measure(t_item.get('bbox_warped') or t_item.get('bbox'),
-                         s_item.get('bbox_warped') or s_item.get('bbox'),
-                         tray_mm=float(self.cfg.get('tray_mm') or 160.0),
-                         known_mm=float(known))
-        self.note('[形状标定] ' + SC.fmt(res))
-        if not res.get('ok'):
-            messagebox.showwarning('形状标定（有警告）',
-                                   SC.fmt(res) + '\n\n' + '\n'.join(res.get('warn') or []))
-            return
-        cal = self.cfg.setdefault('shape_calib', {})
-        cal.update({'k_front': res['k_front'], 'k_h': res['k_h'],
-                    'known_mm': float(known), 'mm_per_px': res['mm_per_px'],
-                    'tray_mm_effective': res.get('tray_mm_effective'),
-                    'source': 'measured'})
-        try:
-            CONFIG.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding='utf8')
-        except Exception as exc:                       # noqa: BLE001
-            messagebox.showerror('形状标定', '写配置失败：%s' % exc)
-            return
-        messagebox.showinfo('形状标定完成',
-                            SC.fmt(res) + '\n\n已写入 vision/config.json，'
-                            '之后形状判定就按这些系数走。')
-
     def detect_targets(self, frame, which='top', stats=None):
         pts = self.points if which == 'top' else self.side_points
         if frame is None or len(pts) != 4:
