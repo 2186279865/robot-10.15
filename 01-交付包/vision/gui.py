@@ -1263,10 +1263,15 @@ class App:
             if (cc.get('enabled') and cc.get('mode') == 'primary'
                     and tw is not None and tops
                     and getattr(classify, '_CVLM', None) is not None):
-                r = classify._CVLM.ask_objects_cached(
-                    tw, candidates=cc.get('candidates'),
-                    timeout=float(cc.get('timeout_s') or 10.0),
-                    model=cc.get('model'))
+                _views = str(cc.get('views') or 'two')
+                _call = (classify._CVLM.ask_objects2_cached if (_views != 'top' and sw is not None)
+                         else classify._CVLM.ask_objects_cached)
+                if _call is classify._CVLM.ask_objects2_cached:
+                    r = _call(tw, sw, candidates=cc.get('candidates'),
+                              timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
+                else:
+                    r = _call(tw, candidates=cc.get('candidates'),
+                              timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
                 objs = [o for o in (r or {}).get('objects', []) if o.get('shape')]
                 self._vlm_ms = (r or {}).get('ms')
         except Exception:                                  # noqa: BLE001

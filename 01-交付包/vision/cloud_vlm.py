@@ -529,3 +529,85 @@ def describe(res: Optional[Dict[str, Any]]) -> str:
     return '%s + %s（conf %.2f，%d ms）%s' % (
         res.get('shape'), res.get('color') or '?', float(res.get('conf') or 0),
         int(res.get('ms') or 0), (' · ' + res['reason']) if res.get('reason') else '')
+
+
+# --------------------------------------------------------------------------
+# 两视角联合识别：图1=顶视，图2=副摄（可选）。两图一起请求，让模型交叉校验。
+# --------------------------------------------------------------------------
+def _prompt_two_views(candidates: List[str]) -> str:
+    cand = '/'.join(candidates or SHAPES)
+    return (
+        '你收到两张图，拍的是**同一个灰色托盘**：\n'
+        '图1 = 顶视相机（从上方约 60° 俯视）；图2 = 副摄（另一个方位，同样约 60° 俯视，能看到物块的另一个侧面）。\n'
+        '请结合两张图，逐个判断托盘里每个物块的几何形状与颜色。'
+        '**只回答落在灰色托盘内部的物块**；托盘外的桌面、杯子、白色圆球一律不要回答。\n'
+        f'形状只能从这个列表里选：{cand}。\n'
+        '两图互相校验的要点：\n'
+        '- 正方体：两图顶面都接近正方形，且侧高约等于边长；长方体：某一方向明显更长。\n'
+        '- 菱体/菱形：顶面是菱形或平行四边形（四边接近等长但角不是 90°），侧面是斜的。\n'
+        '- 六棱体：顶面六边形；三棱体：顶面三角形；五棱体：顶面五边形。\n'
+        '- 圆柱：顶面圆、侧面竖直；球：两图轮廓都圆、看不到平面；棱锥/圆锥：顶面有中心尖点、侧面收成三角。\n'
+        '若两张图给你的判断冲突，请在 reason 里说明，并给较低的 confidence。'
+        '只输出 JSON，不要多余文字，格式：'
+        '{"objects":[{"shape":"...","color":"...","confidence":0.0,"reason":"...","center":[x,y]}]}；'
+        'center 是**图1（顶视）**中的归一化中心坐标 0~1（左上为原点，x 向右 y 向下），**每个物体都必须给出 center，即使不确定也要给最接近的估计值，不能省略、不能为 null**。'
+    )
+
+
+def ask_objects2(top_img, side_img=None, candidates: Optional[List[str]] = None,
+                 timeout: float = DEFAULT_TIMEOUT, model: Optional[str] = None,
+                 detail: str = 'high') -> Optional[Dict[str, Any]]:
+    """顶视(+副摄)联合识别；返回结构与 ask_objects 相同，多一个 views 字段。"""
+    key = api_key()
+    if not key:
+        return None
+    t0 = time.time()
+    try:
+        text_prompt = (_prompt_two_views(candidates or SHAPES) if side_img is not None
+                       else _prompt_objects(candidates or SHAPES))
+        content = [{'type': 'text', 'text': text_prompt}]
+        for im in ([top_img] + ([side_img] if side_img is not None else [])):
+            content.append({'type': 'image_url', 'image_url': {
+                'url': 'data:image/jpeg;base64,' + _encode(im), 'detail': detail}})
+        body = {
+            'model': model or DEFAULT_MODEL,
+            'messages': [{'role': 'user', 'content': content}],
+            'max_tokens': 900,
+            'thinking': {'type': 'disabled'},
+            'temperature': 0,
+            'response_format': {'type': 'json_object'},
+        }
+        payload = _post(body, key, timeout)
+        text = (payload.get('choices') or [{}])[0].get('message', {}).get('content') or ''
+        obj = json.loads(text) if text.strip() else {}
+        out = []
+        for it in (obj.get('objects') or []):
+            raw = str(it.get('shape') or '')
+            c = it.get('center') or it.get('centre') or []
+            out.append({
+                'shape': normalize_shape(raw),
+                'raw_shape': raw,
+                'color': str(it.get('color') or ''),
+                'conf': float(it.get('confidence') or it.get('conf') or 0.0),
+                'reason': str(it.get('reason') or '')[:160],
+                'center': [float(c[0]), float(c[1])] if len(c) >= 2 else None,
+                'views': 'top+side' if side_img is not None else 'top',
+            })
+        return {'objects': out, 'ms': int((time.time() - t0) * 1000), 'raw': text,
+                'views': 'top+side' if side_img is not None else 'top'}
+    except Exception:                                   # noqa: BLE001
+        return None
+
+
+def ask_objects2_cached(top_img, side_img=None, candidates: Optional[List[str]] = None,
+                        timeout: float = DEFAULT_TIMEOUT, model: Optional[str] = None
+                        ) -> Optional[Dict[str, Any]]:
+    """两视角识别缓存版（10 s 内同一对图只请求一次）。"""
+    fp = _fingerprint(top_img) + '|' + (_fingerprint(side_img) if side_img is not None else '-')
+    hit = _CACHE.get(fp)
+    if hit and time.time() - hit[0] < _CACHE_TTL:
+        return hit[1]
+    r = ask_objects2(top_img, side_img, candidates=candidates, timeout=timeout, model=model)
+    if r is not None:
+        _CACHE[fp] = (time.time(), r)
+    return r
