@@ -295,6 +295,7 @@ class App:
                    command=lambda: self.start_points('side')).pack(side='left', padx=3)
         ttk.Button(bot, text='清除定位', command=self.clear).pack(side='left', padx=3)
         ttk.Button(bot, text='采集空托盘', command=self.capture_empty).pack(side='left', padx=3)
+        ttk.Button(bot, text='交换主副摄', command=self.swap_cams).pack(side='left', padx=3)
         self.adv_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(bot, text='高级', variable=self.adv_var,
                         command=self.toggle_adv).pack(side='right', padx=6)
@@ -918,6 +919,24 @@ class App:
         self.cfg['side_axis'] = mode
         self.note('副摄对齐轴：' + {'自动': '自动判断', '左右': '左右(u)',
                                     '前后': '前后(v)'}[text] + '，下一帧生效')
+
+    def swap_cams(self):
+        """两路相机插反时的应急开关：交换 cam_map（顶视 ↔ 副摄）并立即重连画面。"""
+        try:
+            remote = self.cfg.setdefault('remote', {})
+            cm = remote.get('cam_map') or {'1': 1, '2': 0}
+            cm = {str(k): int(v) for k, v in cm.items()}
+            cm = {k: (1 if v == 0 else 0) for k, v in cm.items()}
+            remote['cam_map'] = cm
+            CONFIG.write_text(json.dumps(self.cfg, ensure_ascii=False, indent=2), encoding='utf8')
+            self.note('已交换主副摄：%s —— 正重新打开画面' % cm)
+            try:
+                self.stop()
+            except Exception:            # noqa: BLE001
+                pass
+            self.start()
+        except Exception as exc:         # noqa: BLE001
+            self.note('交换主副摄失败：%s' % exc)
 
     def save(self):
         self.cfg['top_camera_index'] = int(self.tv.get())
