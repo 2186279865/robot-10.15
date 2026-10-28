@@ -39,6 +39,38 @@ class Stream:
         self.t0 = time.time()
 
 
+    def start(self):
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        try:
+            self.cam.open()
+            while not self.stop_evt.is_set():
+                ok = self.cam.cap.grab()
+                if ok:
+                    ok, fr = self.cam.cap.retrieve()
+                    if ok:
+                        with self.lock:
+                            self.frame = fr
+                        self.frames += 1
+        except Exception as e:
+            self.error = str(e)
+        finally:
+            self.cam.close()
+
+    def fps(self):
+        dt = time.time() - self.t0
+        return (self.frames / dt) if dt > 0 else 0.0
+
+    def get(self):
+        with self.lock:
+            return None if self.frame is None else self.frame.copy()
+
+    def close(self):
+        self.stop_evt.set()
+        self.cam.close()
+
+
 class View:
     def __init__(self, c, click=None):
         self.c = c
