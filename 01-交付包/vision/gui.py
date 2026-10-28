@@ -1222,7 +1222,9 @@ class App:
             if tw is not None:                      # 存一份干净校正帧，便于离线对比/调试
                 _rd = Path(__file__).parent / 'runtime'
                 _rd.mkdir(exist_ok=True)
-                cv2.imwrite(str(_rd / 'last_top_warp.jpg'), tw)
+                _ok, _buf = cv2.imencode('.jpg', tw, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                if _ok:
+                    (_rd / 'last_top_warp.jpg').write_bytes(_buf.tobytes())
         except Exception:                           # noqa: BLE001
             pass
         side, sw, reused = [], None, False
@@ -1242,7 +1244,9 @@ class App:
                     if sw is not None:
                         _rd = Path(__file__).parent / 'runtime'
                         _rd.mkdir(exist_ok=True)
-                        cv2.imwrite(str(_rd / 'last_side_warp.jpg'), sw)
+                        _ok, _buf = cv2.imencode('.jpg', sw, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                        if _ok:
+                            (_rd / 'last_side_warp.jpg').write_bytes(_buf.tobytes())
                 except Exception:                   # noqa: BLE001
                     pass
                 self.side_cache = (side, sw)
