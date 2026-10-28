@@ -140,6 +140,25 @@ def fuse(top, side, max_dist=MAX_DIST, flip_mode=0, axis_mode=0, info=None,
         fused.append({'top': None, 'side': s, 'views': 'side'})
         side_only += 1
 
+    # 后置过滤：side-only 目标如果和任何"有顶视"的目标挨得很近，就是同一物块被
+    # SAM 拆成两块后的碎块（顶面/前面各一块），丢掉。
+    def _uv2(it):
+        c = it.get('center_tray') or (0.0, 0.0)
+        return float(c[0]), float(c[1])
+
+    anchors = [_uv2(f['top']) for f in fused if f.get('top') is not None]
+    if anchors:
+        kept = []
+        for f in fused:
+            if f.get('top') is None:
+                su, sv = _uv2(f['side'])
+                if any(math.hypot(su - au, sv - av) <= dup_dist for au, av in anchors):
+                    dup_side += 1
+                    continue
+            kept.append(f)
+        fused = kept
+        side_only = sum(1 for f in fused if f.get('top') is None)
+
     def key(f):
         it = f['top'] or f['side']
         return (it['center_tray'][1], it['center_tray'][0])
