@@ -80,7 +80,8 @@ GRIPPER_READY_DEG = 158
 
 #: 闭环 goto 的默认转速（圈/分，按轴分）。实测 rpm 就是速度，
 #: 驱动器自己封顶约 274 圈/分。Z 要快（满行程 3 s），X/Y 慢一点不得不快不震。
-GOTO_RPM_BY_AXIS = {1: 1500, 3: 300, 4: 120, 5: 300}
+# Z=1500 已验证；Y 从 300 提到 800（现场可再调）；X=120 偏保守，提到 300；托盘仍 300
+GOTO_RPM_BY_AXIS = {1: 1500, 3: 300, 4: 300, 5: 800}
 
 PARAM_DEFAULTS: Dict[str, object] = {
     "speed_rpm": 60,
@@ -108,7 +109,7 @@ PARAM_DEFAULTS: Dict[str, object] = {
     #: 闭环首段速度（RPM）。
     "goto_rpm": 300,
     #: 闭环补差段速度（RPM）。
-    "goto_final_rpm": 60,
+    "goto_final_rpm": 150,
     #: 闭环最多补几轮（含首段后）。
     "goto_max_passes": 4,
     #: 闭环最长耗时（ms，0=按距离自动估算）。
