@@ -165,7 +165,19 @@ def _shape_of(mask, contour):
         rect_fill = area / max(1.0, rw * rh)
     except Exception:                                   # noqa: BLE001
         rect_ratio, rect_fill = 1.0, 0.0
+    # 尖顶度量：轮廓点到质心距离的 max / median。正多边形/圆 ≈1.0~1.1；圆锥/棱锥顶视带尖 → 明显 >1.3
+    try:
+        _mm = cv2.moments(contour)
+        _cx, _cy = _mm['m10'] / max(1e-6, _mm['m00']), _mm['m01'] / max(1e-6, _mm['m00'])
+        _pts = contour.reshape(-1, 2).astype('float32')
+        _d = np.sqrt((_pts[:, 0] - _cx) ** 2 + (_pts[:, 1] - _cy) ** 2)
+        _med = float(np.median(_d)) if _d.size else 0.0
+        rad_ratio = float(_d.max() / _med) if _med > 1e-6 else 1.0
+    except Exception:                                   # noqa: BLE001
+        rad_ratio = 1.0
+
     info = {'circ': round(circ, 3), 'ratio': round(ratio, 3), 'nv': int(nv),
+            'rad_ratio': round(rad_ratio, 3),
             'solidity': round(solidity, 3), 'extent': round(extent, 3), 'aspect': round(aspect, 3),
             'rect_ratio': round(rect_ratio, 3), 'rect_fill': round(rect_fill, 3),
             'rw': round(rw, 1), 'rh': round(rh, 1)}
