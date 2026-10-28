@@ -128,21 +128,86 @@ def describe(target: dict) -> str:
 
 
 
-def tray_turn(client, deg: float, log=print) -> dict:
-    """转盘（轴 3）用速度模式走 deg 度：全程 rpm=TRAY_RPM，没有起步/收尾的补差猛冲。
+SCALE_FILE = Path(__file__).resolve().parent.parent / 'runtime' / 'tray_scale.json'
 
-    deg 为正走正向。60° = 533 脉冲；预计用时 = 脉冲/(3200) 圈 ÷ (rpm/60) 秒。
+
+def _load_scale() -> float:
+    try:
+        v = json.loads(SCALE_FILE.read_text(encoding='utf-8')).get('scale')
+        v = float(v)
+        return v if 0.3 <= v <= 8.0 else 1.0
+    except Exception:                                   # noqa: BLE001
+        return 1.0
+
+
+def _save_scale(v: float) -> None:
+    try:
+        SCALE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SCALE_FILE.write_text(json.dumps({'scale': round(float(v), 4)}), encoding='utf-8')
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
+    """转盘（轴 3）**全程速度模式**走 deg 度，并用编码器 counts 实测校验。
+
+    - 发 motor_pos(rpm=TRAY_RPM) 定长；rpm 按学到的脉冲比例折算，保证**物理角速度恒定**；
+    - 若实测脉冲与期望差得多（比如只走到一半）→ 自动把比例 ×2 存盘，下次就对了；
+    - 残差 > 25 脉冲（≈0.8°）时再补 1~2 次同样 rpm 的小步（仍然是速度模式，不猛转）。
+    counts_get() 返回轴 3 的 counts（dict 或数字）；拿不到就跳过校验。
     """
-    n = int(round(deg / 360.0 * 3200.0))
-    if abs(n) < 1:
+    want = int(round(deg / 360.0 * 3200.0))
+    if abs(want) < 1:
         return {'pulses': 0, 'seconds': 0.0}
-    d = 0 if n > 0 else 1
-    pulses = abs(n)
-    dur = (pulses / 3200.0) / max(1.0, TRAY_RPM / 60.0)
-    log('[转盘] %+.0f° = %d 脉冲，速度模式 rpm=%d（预计 %.1f s）' % (deg, n, TRAY_RPM, dur))
-    client.send('motor_pos', AXIS_TRAY, d, TRAY_RPM, _ACC_DEFAULT, pulses, 'rel')
-    time.sleep(dur * 1.15 + 0.45)          # 等它走完（留 15% + 0.45 s 余量）
-    return {'pulses': n, 'seconds': dur}
+
+    def cnt():
+        if counts_get is None:
+            return None
+        try:
+            v = counts_get()
+            if isinstance(v, dict):
+                v = v.get(AXIS_TRAY)
+            return None if v is None else float(v)
+        except Exception:                               # noqa: BLE001
+            return None
+
+    scale = _load_scale()
+    for attempt in (1, 2, 3):
+        cur = want if attempt == 1 else want
+        pulses = max(1, int(round(abs(cur) * scale)))
+        d = 0 if cur > 0 else 1
+        rpm = max(1, int(round(TRAY_RPM / max(0.3, scale))))
+        dur = (pulses / (3200.0 * scale)) / max(1.0, rpm / 60.0)
+        c0 = cnt()
+        if attempt == 1:
+            log('[转盘] %+.0f° → 期望 %d 脉冲；实际下发 %d 脉冲（比例 %.3g，rpm %d，约 %.1f s）'
+                % (deg, want, pulses, scale, rpm, dur))
+        client.send('motor_pos', AXIS_TRAY, d, rpm, _ACC_DEFAULT, pulses, 'rel')
+        time.sleep(dur * 1.15 + 0.45)
+        c1 = cnt()
+        if c0 is None or c1 is None:
+            return {'pulses': pulses, 'scale': scale, 'measured': None}
+        moved = (c1 - c0) / 20.48                      # counts → 脉冲
+        err = abs(cur) - abs(moved)
+        log('[转盘] 实测 %+.0f 脉冲（期望 %d，差 %+.0f）；比例 %.3g'
+            % (moved, abs(cur), err if cur > 0 else -err, scale))
+        # 几乎没动 → 多半是拿不到实时遥测（counts 不刷新），不要盲目重发
+        if abs(moved) < 0.05 * abs(cur):
+            log('[转盘] 实测几乎没动（可能没有遥测回读），跳过补差')
+            return {'pulses': pulses, 'scale': scale, 'measured': moved}
+        # 只走到一半 → 说明驱动器每圈脉冲数是 6400 而不是 3200，比例翻倍
+        if attempt == 1 and abs(cur) >= 200 and 0.35 < abs(moved) / abs(cur) < 0.65:
+            scale = min(8.0, scale * 2.0)
+            _save_scale(scale)
+            log('[转盘] 实测只有一半 → 脉冲比例自动改为 %.3g（已存盘，下次生效）' % scale)
+            continue
+        if abs(err) <= 25 or attempt >= 3:
+            return {'pulses': pulses, 'scale': scale, 'measured': moved}
+        want = int(round((-err) if cur > 0 else err))   # 下一次补差
+        want = -abs(want) if cur < 0 else abs(want)
+        log('[转盘] 残差偏大，补一步 %+d 脉冲（仍是速度模式）' % want)
+    return {'pulses': pulses, 'scale': scale}
+
 
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
@@ -209,7 +274,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         # 10 空盒转到落料位：**纯速度模式**（rpm=TRAY_RPM）。
         # 不用 goto：goto 的 COARSE 段用 goto_rpm、SETTLE 后 CORRECT 段用 goto_final_rpm(60)，
         # 停一下再猛补差 → 现场看到“结束时会猛转一下”。速度模式全程恒定。
-        tray_turn(client, tray_deg, say)
+        tray_turn(client, tray_deg, say,
+                  counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
     time.sleep(0.35)
     say('松爪 180° → 等待落盒 → 回预备 158°')
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
