@@ -131,19 +131,16 @@ class SequenceTest(unittest.TestCase):
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：速度模式匀速（rpm=TRAY_RPM），到点前刹车，残差大才补一次
+        # 转盘改为「位置模式 + acc=1（驱动器慢斜坡）+ 一次算好脉冲」
         tray = [c for c in client.calls
-                if c[0] == 'motor_speed' and int(c[1][0]) == AG.AXIS_TRAY]
-        # 惯性大 → 多级升速 + 多级降速，因此会有多次 motor_speed
-        self.assertGreaterEqual(len(tray), 2)
-        rpms = [float(c[1][2]) for c in tray]
-        self.assertLess(rpms[0], AG.TRAY_RPM)          # 第一级必须比满速低（软启动）
-        self.assertEqual(rpms.count(float(AG.TRAY_RPM)) >= 1, True)
-        for c in tray:
-            self.assertEqual(int(c[1][1]), 0)          # 全部正向
-        self.assertLessEqual(max(rpms), float(AG.TRAY_RPM))
-        stops = [c for c in client.calls
-                 if c[0] == 'motor_stop' and int(c[1][0]) == AG.AXIS_TRAY]
-        self.assertGreaterEqual(len(stops), 1)
+                if c[0] == 'motor_pos' and int(c[1][0]) == AG.AXIS_TRAY]
+        self.assertGreaterEqual(len(tray), 1)
+        args = tray[0][1]                              # (addr, dir, rpm, acc, pulses, mode)
+        self.assertEqual(int(args[1]), 0)              # 正向
+        self.assertEqual(int(args[3]), AG.TRAY_ACC)    # acc=1 慢斜坡
+        self.assertEqual(str(args[5]), 'rel')          # 相对脉冲
+        self.assertGreater(int(args[4]), 0)
+        # 位置模式一次到位：不再需要 motor_stop（驱动器自己减速停在目标点）
 
     def test_run_once_refuses_when_offline(self):
         client = FakeClient()

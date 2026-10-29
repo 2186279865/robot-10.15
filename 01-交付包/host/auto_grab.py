@@ -59,6 +59,9 @@ _ACC_DEFAULT = 0            # 加速度档：0 = 最快（现场实测 acc=1 约
 TRAY_RPM = 6              # 转盘转速（5 很稳、6 略快且顺；10 会甩货）
 TRAY_BRAKE_S = 0.18        # 速度模式刹车提前量（秒）
 TRAY_TOL_PULSES = 50      # 停车后残差容忍（脉冲）
+TRAY_ACC = 1                  # 位置模式加速度档：1 = 驱动器慢斜坡（转盘惯性大，必须用这个）
+TRAY_VERIFY_TOL_PULSES = 40   # 停车后残差超过多少脉冲才补一次
+TRAY_WAIT_EXTRA_S = 1.2       # acc=1 斜坡很慢，估算时长之外再多等这么久
 TRAY_TIMEOUT_S = 20.0     # 单次转动最长等待（秒）
 
 # 转盘软启动/软停车（惯性很大，必须慢升速、慢降速）
@@ -164,14 +167,12 @@ def _save_scale(v: float) -> None:
 
 
 def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
-    """转盘（轴 3）走 deg 度：慢升速 → 匀速 → 慢降速（梯形速度），带编码器到点判定。
+    """转盘（轴 3）走 deg 度 —— 位置模式 + 驱动器慢斜坡（acc=1），脉冲一次算好发下去。
 
-    为什么这么改：转盘负载惯性大，直接 motor_speed 给满速会“猛启动/停车甩动”。
-    现在分三段：
-      1) 升速：TRAY_RAMP_RPMS 逐级提速，每级 TRAY_RAMP_MS；
-      2) 匀速：每 40 ms 读编码器，剩余 < 减速距离（按 TRAY_DECEL_S 估算）就进入减速；
-      3) 降速：按相反阶梯逐级降速，最后 motor_stop；
-    停车后残差 > TRAY_TOL_PULSES 才用一次 2 rpm 位置模式补差（不反复补）。
+    为什么这样：转盘 + 6 个盒惯性很大。
+      * 速度模式（motor_speed）从 0 跳满速 → 猛启动、停车靠断电 → 甩；
+      * 主机侧多级升降速 → 多次启停，容易被看成“一段一段”，且每次都要重新起转；
+      * 位置模式 + acc=1 → **驱动器内部自己做匀加速/匀减速**，一次性平滑转到位，主机只等结果。
     """
     want = int(round(deg / 360.0 * 3200.0))
     if abs(want) < 1:
@@ -191,69 +192,47 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
     scale = _load_scale()
     target = abs(want) * scale
     direction = 0 if want > 0 else 1
-    top = float(TRAY_RPM)
-    ramp = [r for r in TRAY_RAMP_RPMS if r < top] + [top]
+    rpm = max(1, int(TRAY_RPM))
     t0 = time.monotonic()
-
-    def speed(rpm):
-        client.send('motor_speed', AXIS_TRAY, direction, rpm, _ACC_DEFAULT)
-        time.sleep(TRAY_RAMP_MS / 1000.0)
-
     c0 = cnt()
 
-    # ---------- 无法读编码器：定时 + 同样软启动/软停车 ----------
     if c0 is None:
-        cruise = max(0.2, target / max(1.0, top / 60.0 * 3200.0))
-        for rpm in ramp:
-            speed(rpm)
-        time.sleep(cruise)
-        for rpm in reversed(ramp[:-1]):
-            speed(rpm)
-        client.send('motor_stop', AXIS_TRAY)
-        time.sleep(0.35)
-        el = time.monotonic() - t0
-        log('[转盘] %+.1f°（无回读）→ 软启动软停车，定时 %.2f s，实发 %.0f 脉冲'
-            % (deg, cruise, target))
-        return {'pulses': target, 'scale': scale, 'measured': None,
-                'mode': 'speed_timed', 'seconds': round(el, 2)}
+        log('[转盘] %+.1f°（无回读）→ 位置模式 acc=%d 下发 %.0f 脉冲（比例 %.3g）'
+            % (deg, TRAY_ACC, target, scale))
+    else:
+        log('[转盘] %+.1f° → 位置模式 acc=%d、%d rpm、%.0f 脉冲（比例 %.3g）'
+            % (deg, TRAY_ACC, rpm, target, scale))
 
-    top_pulse_rate = top / 60.0 * 3200.0                 # 满速时的脉冲/秒
-    log('[转盘] %+.1f° → 软启动到 %.1f rpm（%d 级），目标 %.0f 脉冲（比例 %.3g）'
-        % (deg, top, len(ramp), target, scale))
+    client.send('motor_pos', AXIS_TRAY, direction, rpm, TRAY_ACC, int(round(target)), 'rel')
 
-    for rpm in ramp:
-        speed(rpm)
+    # 估算时长：按 rpm 折算 + acc=1 的斜坡额外等待
+    cruise = target / max(1.0, rpm / 60.0 * 3200.0)
+    deadline = t0 + min(TRAY_TIMEOUT_S, cruise + TRAY_WAIT_EXTRA_S + 3.0)
 
     moved = 0.0
-    last_progress_t = time.monotonic()
-    prev_moved = 0.0
-    while time.monotonic() - t0 < TRAY_TIMEOUT_S:
-        time.sleep(0.04)
-        c = cnt()
-        if c is None:
-            continue
-        moved = abs(c - c0) / 20.48
-        remain = target - moved
-        decel_dist = top_pulse_rate * TRAY_DECEL_S
-        if remain <= decel_dist:
-            break
-        if moved > prev_moved + 3.0:
-            prev_moved = moved
-            last_progress_t = time.monotonic()
-        elif time.monotonic() - last_progress_t > 1.2:
-            log('[转盘] counts 1.2 s 没变化，提前减速停车')
-            break
+    if c0 is not None:
+        stable, prev = 0, None
+        while time.monotonic() < deadline:
+            time.sleep(0.08)
+            c = cnt()
+            if c is None:
+                break
+            moved = abs(c - c0) / 20.48
+            if prev is not None and abs(c - prev) <= 20:
+                stable += 1
+                if stable >= 3 and moved > 0.5 * target:
+                    break
+            else:
+                stable = 0
+            prev = c
+    else:
+        time.sleep(min(TRAY_TIMEOUT_S, cruise + TRAY_WAIT_EXTRA_S))
 
-    for rpm in reversed(ramp[:-1]):
-        speed(rpm)
-    client.send('motor_stop', AXIS_TRAY)
-    time.sleep(0.40)
-
-    c1 = cnt()
     el = time.monotonic() - t0
-    if c1 is None:
-        return {'pulses': target, 'scale': scale, 'measured': moved,
-                'mode': 'speed', 'seconds': round(el, 2)}
+    c1 = cnt()
+    if c0 is None or c1 is None:
+        return {'pulses': target, 'scale': scale, 'measured': None,
+                'mode': 'pos_acc', 'seconds': round(el, 2)}
 
     moved = abs(c1 - c0) / 20.48
     resid = target - moved
@@ -266,16 +245,16 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
         _save_scale(scale)
         log('[转盘] 实测只有约一半 → 脉冲比例自动改为 %.3g（已存盘，下次生效）' % scale)
 
-    # 小残差：一次 2 rpm 慢补（不再循环）
-    if TRAY_TOL_PULSES < abs(resid) < 0.30 * max(1.0, target):
+    # 残差不大就结束；大了只慢速补一次（同样 acc=1）
+    if TRAY_VERIFY_TOL_PULSES < abs(resid) < 0.25 * max(1.0, target):
         rpm2 = 2
+        log('[转盘] 残差 %+.0f 脉冲 → 慢速补一次（%d rpm，acc=%d）' % (resid, rpm2, TRAY_ACC))
         client.send('motor_pos', AXIS_TRAY, 0 if resid > 0 else 1,
-                    rpm2, _ACC_DEFAULT, int(round(abs(resid))), 'rel')
-        time.sleep(abs(resid) / max(1.0, rpm2 / 60.0 * 3200.0) + 0.45)
-        log('[转盘] 慢速补差一次 %+.0f 脉冲（%d rpm）' % (resid, rpm2))
+                    rpm2, TRAY_ACC, int(round(abs(resid))), 'rel')
+        time.sleep(abs(resid) / max(1.0, rpm2 / 60.0 * 3200.0) + 0.9)
 
     return {'pulses': target, 'scale': scale, 'measured': moved,
-            'mode': 'speed', 'seconds': round(el, 2)}
+            'mode': 'pos_acc', 'seconds': round(el, 2)}
 
 
 def run_once(client, target: dict, log=print, wait=None, calib=None,
