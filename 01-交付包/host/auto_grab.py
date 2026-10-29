@@ -63,7 +63,7 @@ TRAY_TOL_PULSES = 50      # 停车后残差容忍（脉冲）
 TRAY_AUTOSCALE = False        # True 时才按“实测一半”自动 ×2 改 tray_scale（容易被 counts 误导，默认关）
 TRAY_ACC = 1                  # 位置模式加速度档：1 = 驱动器慢斜坡（转盘惯性大，必须用这个）
 TRAY_VERIFY_TOL_PULSES = 40   # 停车后残差超过多少脉冲才补一次
-TRAY_WAIT_EXTRA_S = 1.2       # acc=1 斜坡很慢，估算时长之外再多等这么久
+TRAY_WAIT_EXTRA_S = 0.5       # acc=1 斜坡很慢，估算时长之外再多等这么久
 TRAY_TIMEOUT_S = 20.0     # 单次转动最长等待（秒）
 
 # 转盘软启动/软停车（惯性很大，必须慢升速、慢降速）
@@ -181,6 +181,21 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
         return {'pulses': 0, 'seconds': 0.0, 'mode': 'none'}
 
     def cnt():
+        # 后台线程里 GUI 面板那份 counts 可能滞后 100+ ms；优先用客户端最新遥测。
+        try:
+            client.tick()
+        except Exception:                               # noqa: BLE001
+            pass
+        raw = getattr(client, 'last_counts', None) or {}
+        info = raw.get(AXIS_TRAY)
+        if isinstance(info, dict) and info.get('counts') is not None:
+            try:
+                now_ms = float(client.now_ms())
+                ts = float(info.get('ts') or 0.0)
+                if 0.0 <= (now_ms - ts) <= 400.0:
+                    return float(info['counts'])
+            except Exception:                           # noqa: BLE001
+                pass
         if counts_get is None:
             return None
         try:
@@ -209,20 +224,20 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 
     # 估算时长：按 rpm 折算 + acc=1 的斜坡额外等待
     cruise = target / max(1.0, rpm / 60.0 * 3200.0)
-    deadline = t0 + min(TRAY_TIMEOUT_S, cruise + TRAY_WAIT_EXTRA_S + 3.0)
+    deadline = t0 + min(TRAY_TIMEOUT_S, cruise * 1.6 + TRAY_WAIT_EXTRA_S + 0.8)
 
     moved = 0.0
     if c0 is not None:
         stable, prev = 0, None
         while time.monotonic() < deadline:
-            time.sleep(0.08)
+            time.sleep(0.06)
             c = cnt()
             if c is None:
                 break
             moved = abs(c - c0) / 20.48
             if prev is not None and abs(c - prev) <= 20:
                 stable += 1
-                if stable >= 3 and moved > 0.5 * target:
+                if stable >= 2 and moved >= 0.85 * target:
                     break
             else:
                 stable = 0
@@ -249,11 +264,24 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 
     # 残差不大就结束；大了只慢速补一次（同样 acc=1）
     if TRAY_VERIFY_TOL_PULSES < abs(resid) < 0.25 * max(1.0, target):
-        rpm2 = 2
-        log('[转盘] 残差 %+.0f 脉冲 → 慢速补一次（%d rpm，acc=%d）' % (resid, rpm2, TRAY_ACC))
+        rpm2 = 4
+        log('[转盘] 残差 %+.0f 脉冲 → 补一次（%d rpm，acc=%d）' % (resid, rpm2, TRAY_ACC))
         client.send('motor_pos', AXIS_TRAY, 0 if resid > 0 else 1,
                     rpm2, TRAY_ACC, int(round(abs(resid))), 'rel')
-        time.sleep(abs(resid) / max(1.0, rpm2 / 60.0 * 3200.0) + 0.9)
+        # 轮询：先看到"开始动"，再看到"停住"就结束（比固定 sleep 准，也更短）
+        _t_end = time.monotonic() + abs(resid) / max(1.0, rpm2 / 60.0 * 3200.0) + 1.0
+        _started = False
+        _prev = cnt()
+        while _prev is not None and time.monotonic() < _t_end:
+            time.sleep(0.06)
+            _c2 = cnt()
+            if _c2 is None:
+                break
+            if abs(_c2 - _prev) > 20:
+                _started = True
+            elif _started:
+                break
+            _prev = _c2
 
     return {'pulses': target, 'scale': scale, 'measured': moved,
             'mode': 'pos_acc', 'seconds': round(el, 2)}
@@ -421,18 +449,20 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 'target': describe(target), 'dropped': False}
     if tray_job is not None:
         # 10 等后台转盘到位（最多再等 TRAY_TIMEOUT_S+5 s）；失败/超时都不松爪
+        _w0 = time.monotonic()
         tray_job.join(timeout=TRAY_TIMEOUT_S + 5.0)
+        _waited = time.monotonic() - _w0
         if tray_job.is_alive():
             raise GrabError('转盘 %+.0f° 超过 %.0f s 还没转到位，暂不松爪（避免落错盒）'
                             % (tray_deg, TRAY_TIMEOUT_S + 5.0))
         if tray_box.get('err') is not None:
             raise GrabError('转盘没转到位：%s（暂不松爪，避免落错盒）' % tray_box['err'])
-        say('转盘已到位（%+.0f°），可以松爪' % tray_deg)
+        say('转盘已到位（%+.0f°），join 只等了 %.2f s → 松爪' % (tray_deg, _waited))
     elif abs(tray_deg) >= 1.0:
         # 10 串行转（单件抓/未开 tray_async 时走这里）
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
-    time.sleep(0.35)
+    time.sleep(0.2)
     say('松爪 180° → 等待落盒 → 回预备 158°')
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)
