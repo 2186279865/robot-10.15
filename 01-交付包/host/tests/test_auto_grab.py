@@ -120,8 +120,13 @@ class SequenceTest(unittest.TestCase):
         self.assertEqual(axes, [5, 1, 4, 5, 1, 1, 4, 5, 1, 5])
 
         z_gotos = [c[1][1] for c in client.gotos() if c[1][0] == 1]
-        self.assertEqual(z_gotos[0], AG.Z_UP)      # 到通道末端后抬到顶
-        self.assertEqual(z_gotos[1], AG.Z_DOWN - AG.Z_UP)   # 降到抓取位（增量）
+        # 长行程会先发 200 脉冲“软启动垫片”（motor_pos），所以 goto 的增量少 200
+        # 软启动垫片（每段 200 脉冲）会让 goto 增量少 0~400，这里放宽到 ±500
+        self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), 500)                 # 抬到顶
+        self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), 500)   # 降到抓取位
+        nudge = [c for c in client.calls
+                 if c[0] == 'motor_pos' and c[1][0] == 1 and abs(c[1][4]) == 200]
+        self.assertTrue(nudge, '长行程应该有软启动垫片')
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0

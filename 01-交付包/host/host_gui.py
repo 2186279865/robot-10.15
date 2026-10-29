@@ -1171,7 +1171,9 @@ class App:
         self.note("已下发停止全部；请确认机械确实停下")
 
     # ------------------------------------------------------------ 初始化
-    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", 158))
+    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", 158),
+                # 遥测更快 → goto 的 SETTLE/MEASURE 等待更短（到位后不再干等 0.2-0.4 s）
+                ("telemetry_ms", 100), ("query_timeout_ms", 60))
 
     def initialize_all(self) -> None:
         """上电初始化：清锁存 → 订阅四轴遥测 → 建立四轴位置闭环 → 兜底参数 → 报告。
@@ -1183,7 +1185,7 @@ class App:
         if client is None or not getattr(client, "online", False):
             messagebox.showwarning("初始化", "还没连上控制器：先选端口并点「连接」")
             return
-        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 建立四轴位置闭环 / 兜底参数（acc=0, goto_max_ms=120000, ready=158）")
+        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 建立四轴位置闭环 / 兜底参数（acc=0, goto_max_ms=120000, ready=158, telemetry_ms=100, query_timeout_ms=60）")
         try:
             client.send("stop_clear", timeout_ms=800)
         except Exception as exc:                    # noqa: BLE001

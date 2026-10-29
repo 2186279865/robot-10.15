@@ -227,6 +227,18 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
 
         item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
                 'code': '', 'text': '', 'pairs': {}}
+        # 软启动垫片：长行程 + 高速时先慢走约 2 mm 吃掉静摩擦，再全速走；
+        # 否则驱动器一上来就是最大加速度，机械冲击很"猛"（用户反馈）。
+        if abs(pulses) >= 3000 and rpm_i >= 1000:
+            nudge = 200 if pulses > 0 else -200
+            try:
+                client.send('motor_pos', axis, 0 if nudge > 0 else 1, 200, int(acc),
+                            abs(nudge), 'rel', timeout_ms=1500)
+                say('%s：软启动 %+d 脉冲（200 RPM）→ 再全速 %d RPM' % (label, nudge, rpm_i))
+                pulses -= nudge
+                time.sleep(0.05)
+            except Exception as exc:                  # noqa: BLE001
+                say('%s：软启动失败（%s），改为直接全速' % (label, exc))
         try:
             req = client.goto(axis, pulses, rpm=rpm_i)
             rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
