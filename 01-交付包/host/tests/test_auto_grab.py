@@ -114,32 +114,14 @@ class SequenceTest(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertAlmostEqual(result['elapsed'] >= 0, True)
 
-        # 末段减速会把一段长行程拆成“主体 + 收尾”两次 goto，
-        # 校验顺序时把收尾段（|pulses| == TAIL_PULSES）忽略。
-        def _is_tail(axis, pulses):
-            # X/Y 的收尾长度与 Z 不同，按轴取
-            return abs(int(pulses)) == int(AG.prep_pose.tail_for(int(axis))[0])
-
-        axes = [c[1][0] for c in client.gotos()
-                if c[1][0] != AG.AXIS_TRAY and not _is_tail(c[1][0], c[1][1])]  # 转盘单独校验
+        axes = [c[1][0] for c in client.gotos() if c[1][0] != AG.AXIS_TRAY]  # 转盘单独校验
         # 顺序（固定路线硬规矩：穿通道时 Z 必须在底部）：
         # Y 进通道 → Z 抬顶 → X/Y 对准 → Z 降底 → Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0
         self.assertEqual(axes, [5, 1, 4, 5, 1, 1, 4, 5, 1, 5])
 
-        z_gotos = [c[1][1] for c in client.gotos()
-                   if c[1][0] == 1 and not _is_tail(1, c[1][1])]
-        # 长行程会先发 200 脉冲“软启动垫片”（motor_pos），所以 goto 的增量少 200
-        # 软启动垫片（每段 200 脉冲）会让 goto 增量少 0~400，这里放宽到 ±500
-        import prep_pose as _PP
-        # 软启动垫片（0~3×SOFT_PULSES）与末段减速收尾（TAIL_PULSES）都会让 goto 增量变短
-        tol = _PP.SOFT_PULSES * 3 + int(_PP.TAIL_PULSES)
-        self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), tol)                 # 抬到顶
-        self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), tol)   # 降到抓取位
-        import prep_pose as _PP2
-        soft_rpms = {int(r) for r, _n in _PP2.SOFT_STEPS}
-        nudge = [c for c in client.calls
-                 if c[0] == 'motor_pos' and c[1][0] == 1 and int(c[1][2]) in soft_rpms]
-        self.assertGreaterEqual(len(nudge), len(_PP2.SOFT_STEPS), '长行程应该有两级软启动垫片')
+        z_gotos = [c[1][1] for c in client.gotos() if c[1][0] == 1]
+        self.assertEqual(z_gotos[0], AG.Z_UP)      # 到通道末端后抬到顶
+        self.assertEqual(z_gotos[1], AG.Z_DOWN - AG.Z_UP)   # 降到抓取位（增量）
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0

@@ -22,8 +22,6 @@
 """
 from __future__ import annotations
 
-import time
-
 import json
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -141,20 +139,6 @@ def describe(cfg: Dict[str, object]) -> str:
 
 AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
-# 软启动：长行程先以 SOFT_RPM 慢走 SOFT_PULSES 脉冲（吃掉静摩擦/减小起步冲击），
-# 再全速走剩余。200 脉冲还不够柔 -> 提到 600（约 6 mm）；嫌慢可调回 300。
-# 两台阶软启动：300 rpm x 300 脉冲 -> 900 rpm x 300 脉冲 -> 全速。
-# 单个 600 脉冲的台阶只把"第一下"变柔，真正顿挫发生在 300->1800 那一步；
-# 拆成两级后每次台阶幅度减半，而中段速度完全不变（不"掉速"）。
-SOFT_STEPS = ((300, 300), (900, 300))          # Z/托盘默认（两级）
-# X/Y 单独用三级台阶：用户反馈"一惊一乍"，只在 X/Y 上更柔，Z 不动。
-SOFT_STEPS_XY = ((250, 200), (600, 300), (1100, 300))
-SOFT_PULSES = sum(n for _r, n in SOFT_STEPS)
-
-
-def soft_steps_for(axis):
-    return SOFT_STEPS_XY if int(axis) in (4, 5) else SOFT_STEPS
-
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
              soft=None, known=None, counts=None,
@@ -241,23 +225,9 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
 
         item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
                 'code': '', 'text': '', 'pairs': {}}
-        # 软启动垫片：长行程 + 高速时先慢走约 2 mm 吃掉静摩擦，再全速走；
-        # 否则驱动器一上来就是最大加速度，机械冲击很"猛"（用户反馈）。
-        if abs(pulses) >= 3000 and rpm_i >= 1000:
-            sign = 1 if pulses > 0 else -1
-            try:
-                for soft_rpm, soft_n in soft_steps_for(axis):
-                    step = sign * int(soft_n)
-                    client.send('motor_pos', axis, 0 if step > 0 else 1, int(soft_rpm),
-                                int(acc), abs(step), 'rel', timeout_ms=1500)
-                    pulses -= step
-                    say('%s：软启动 %+d 脉冲（%d RPM）' % (label, step, soft_rpm))
-                    time.sleep(0.06)
-                say('%s：软启动完成，剩余 %+d 脉冲按 %d RPM 走' % (label, pulses, rpm_i))
-            except Exception as exc:                  # noqa: BLE001
-                say('%s：软启动失败（%s），改为直接全速' % (label, exc))
         try:
-            rep = goto_smooth(client, axis, pulses, rpm_i, acc=acc, say=say, waiter=waiter)
+            req = client.goto(axis, pulses, rpm=rpm_i)
+            rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
         except Exception as exc:                      # noqa: BLE001
             item['code'] = 'EXC'
             item['text'] = '%s: %s' % (type(exc).__name__, exc)
@@ -343,203 +313,6 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
         results.append(item)
         say('%s 并行：%s' % (AXIS_LABEL.get(axis, axis), 'ok' if item['ok'] else ('失败 %s' % item['code'])))
     return results
-
-
-
-def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
-                 counts_fn=None, tol_pulses=8, timeout_s=3.5, acc=0) -> List[Dict[str, object]]:
-    """X/Y **同时**走：用 `motor_pos`（固件里是“发一帧就走”，不等结果）。
-
-    ⚠ 固件会拒绝 rpm > speed_rpm_max（默认 300）→ 必须先 param_set 放开，
-    并且 send() 只返回 rid，必须 wait_reply 才能拿到真实值/错误。
-    """
-    say = log or (lambda _t: None)
-    last = []
-
-    def rpm_of(a: int) -> int:
-        return int(rpm.get(int(a), 300)) if isinstance(rpm, dict) else int(rpm)
-
-    _wait = getattr(client, 'wait_reply', None)      # 测试用 FakeClient 没有 wait_reply
-    _no_reply = _wait is None
-
-    def _call(cmd, *args, timeout_ms=1500):
-        rid = client.send(cmd, *args, timeout_ms=timeout_ms)
-        if _no_reply:
-            return None
-        try:
-            return _wait(rid, timeout_ms=timeout_ms)
-        except TypeError:
-            return _wait(rid, timeout_ms)
-
-    def _pairs(r):
-        if not r:
-            return {}
-        try:
-            if r.get('kind') != 'reply':
-                return {}
-        except AttributeError:
-            return {}
-        return r.get('pairs') or {}
-
-    def _pget(name):
-        pr = _pairs(_call('param_get', name, timeout_ms=800))
-        try:
-            return int(pr.get('value'))
-        except (TypeError, ValueError):
-            return None
-
-    # 1) 放开速度上限（motor_pos 会拒绝 rpm > speed_rpm_max，出厂 300）
-    want_max = max(rpm_of(a) for a in targets)
-    old_max = None if _no_reply else _pget('speed_rpm_max')
-    say('并行：speed_rpm_max 原值=%s，需要=%d' % (old_max, want_max))
-    raised = False
-    if _no_reply:
-        raised = True                                  # 无回执能力时不做参数调优
-    elif (old_max is None) or (old_max < want_max):
-        pr = _pairs(_call('param_set', 'speed_rpm_max', int(want_max), timeout_ms=1500))
-        now = _pget('speed_rpm_max')
-        say('并行：param_set speed_rpm_max=%d → 回读=%s %s'
-            % (want_max, now, ('' if pr else '(无应答)')))
-        raised = (now is not None and now >= want_max)
-        if not raised:
-            say('并行：速度上限没放开，直接退化为顺序 goto')
-            return _fallback(client, targets, rpm_of, say, tol_pulses)
-
-    try:
-        plans = []
-        for axis, target in targets.items():
-            axis = int(axis)
-            target = int(target)
-            cur = None if counts is None else counts.get(axis)
-            if cur is None:
-                last.append({'axis': axis, 'pulses': 0, 'rpm': rpm_of(axis), 'ok': False,
-                             'code': 'POS_UNKNOWN', 'text': '没有回读，拒绝盲走', 'pairs': {}})
-                return last
-            want = int(round(target * COUNTS_PER_PULSE))
-            pulses = int(round((want - int(cur)) / COUNTS_PER_PULSE))
-            if abs(pulses) <= 2:
-                continue
-            plans.append((axis, pulses, rpm_of(axis)))
-        if not plans:
-            return []
-
-        # 2) 三段式：慢速垫片 → 全速主体 → 慢速收尾（用户要求 X/Y 别一惊一乍）
-        #    每段都两轴同时下发，发完轮询一次编码器，避免段间叠在一起。
-        def _settle(timeout=2.5):
-            if counts_fn is None:
-                return
-            dl = time.monotonic() + float(timeout)
-            quiet = 0
-            while time.monotonic() < dl:
-                time.sleep(0.04)
-                cur = counts_fn() or {}
-                left = []
-                for axis, tgt in targets.items():
-                    c = cur.get(int(axis))
-                    left.append(999999 if c is None else abs(int(round(int(tgt) * COUNTS_PER_PULSE)) - int(c)))
-                if max(left) <= 40:
-                    quiet += 1
-                    if quiet >= 2:
-                        return
-                else:
-                    quiet = 0
-
-        def _send_rel(axis, pulses):
-            dirn = 1 if pulses < 0 else 0
-            return _call('motor_pos', axis, dirn, int(rpm_of(axis)) if not isinstance(_phase_rpm, dict) else int(_phase_rpm[axis]),
-                         int(acc), abs(int(pulses)), 'rel', timeout_ms=1500)
-
-        phases = []
-        for axis, pulses, rpm_i in plans:
-            total = abs(int(pulses))
-            sign = 1 if pulses > 0 else -1
-            if total >= 3000:
-                pad = int(min(700, max(200, total // 8)))
-                tail = int(min(1200, max(300, total // 6)))
-                body = total - pad - tail
-                phases.append((axis, sign, pad, body, tail))
-            else:
-                phases.append((axis, sign, 0, total, 0))
-
-        # 垫片段（慢速 25%）
-        pad_rpm = {a: max(300, int(rpm_of(a) * 0.25)) for a, _s, pad, _b, _t in phases if pad}
-        if pad_rpm:
-            _phase_rpm = pad_rpm
-            for axis, sign, pad, _b, _t in phases:
-                if pad:
-                    _send_rel(axis, sign * pad)
-            _settle(1.5)
-
-        # 主体段（全速）
-        body_rpm = {a: rpm_of(a) for a, _s, _p, body, _t in phases if body}
-        if body_rpm:
-            _phase_rpm = body_rpm
-            for axis, sign, _p, body, _t in phases:
-                if body:
-                    say('%s 主体 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), sign * body, body_rpm[axis]))
-                    _send_rel(axis, sign * body)
-            _settle(3.0)
-
-        # 收尾段（慢速 30%）
-        tail_rpm = {a: max(300, int(rpm_of(a) * 0.30)) for a, _s, _p, _b, tail in phases if tail}
-        if tail_rpm:
-            _phase_rpm = tail_rpm
-            for axis, sign, _p, _b, tail in phases:
-                if tail:
-                    say('%s 收尾 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), sign * tail, tail_rpm[axis]))
-                    _send_rel(axis, sign * tail)
-            _settle(1.5)
-
-        # 3) 轮询编码器到位即返回
-        if counts_fn is not None:
-            target_counts = {int(a): int(round(int(t) * COUNTS_PER_PULSE))
-                             for a, t in targets.items()}
-            deadline = time.monotonic() + float(timeout_s)
-            quiet = 0
-            while time.monotonic() < deadline:
-                time.sleep(0.05)
-                cur = counts_fn() or {}
-                left = []
-                for axis in target_counts:
-                    c = cur.get(int(axis))
-                    left.append(999999 if c is None else abs(target_counts[int(axis)] - int(c)))
-                if max(left) <= 12:
-                    quiet += 1
-                    if quiet >= 2:
-                        break
-                else:
-                    quiet = 0
-
-        # 4) 被拒的轴：退回顺序 goto（三段式下不再有 bad，保留兜底）
-        bad = []
-        if bad:
-            say('并行：%d 个轴被拒绝，改用顺序 goto 补走' % len(bad))
-            for axis, pulses, rpm_i in bad:
-                try:
-                    client.goto(axis, pulses, rpm=rpm_i)
-                except Exception as exc:            # noqa: BLE001
-                    say('%s 顺序补走异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
-
-        return [{'axis': a, 'pulses': p, 'rpm': r0, 'ok': True, 'code': '', 'text': '', 'pairs': {}}
-                for a, p, r0 in plans]
-    finally:
-        if raised and old_max is not None and not _no_reply:
-            try:
-                _call('param_set', 'speed_rpm_max', int(old_max), timeout_ms=800)
-            except Exception:                       # noqa: BLE001
-                pass
-
-
-def _fallback(client, targets, rpm_of, say, tol_pulses):
-    """并行不可用时的顺序闭环走位。"""
-    for axis, target in targets.items():
-        axis = int(axis)
-        try:
-            say('%s 顺序 goto → %d 脉冲' % (AXIS_LABEL.get(axis, axis), int(target)))
-            client.goto(axis, int(target), rpm=rpm_of(axis))
-        except Exception as exc:                    # noqa: BLE001
-            say('%s 顺序 goto 异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
-    return []
 
 
 def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
@@ -661,43 +434,15 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
             return results
     return results
 
-#: 末段减速：长行程最后 TAIL_PULSES 脉冲改用慢速走，让“停车”不再是急刹。
-#: 代价约 0.2-0.4 s/次；TAIL_RPM_RATIO 越小越柔、越慢。
-TAIL_PULSES = 700
-TAIL_RPM_RATIO = 0.35
-TAIL_MIN_RPM = 300
-# X/Y 收尾更长更慢（用户要求只在 X/Y 上更柔）
-TAIL_BY_AXIS = {4: (1300, 0.30), 5: (1300, 0.30)}
+def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=None,
+                 tol_pulses=8, timeout_s=3.5, acc=0):
+    """兼容层：当前 auto_grab 会调它。
 
-
-def tail_for(axis):
-    return TAIL_BY_AXIS.get(int(axis), (TAIL_PULSES, TAIL_RPM_RATIO))
-
-
-def goto_smooth(client, axis, pulses, rpm, acc=0, say=None, waiter=None):
-    """把一次长行程拆成「全速主体 + 慢速收尾」，减小停车冲击。
-
-    返回最后一次的应答（dict 或 None），与 client.goto 的语义一致：
-    调用方只看 kind/code/pairs。
+    为了“运动控制回到 07:15 的版本”，这里不做任何并行/软启动，
+    直接按 X→Y 顺序调用 move_abs（与 07:15 时 auto_grab 的行为一致）。
     """
-    say = say or (lambda _t: None)
-    waiter = waiter or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
-    n = int(pulses)
-    rpm = int(rpm)
-    if abs(n) < 3000 or rpm < 800:
-        rid = client.goto(axis, n, rpm=rpm)
-        return waiter(rid, estimate_timeout_ms(n, rpm))
-
-    sign = 1 if n > 0 else -1
-    tail_n, tail_ratio = tail_for(axis)
-    tail = sign * int(tail_n)
-    main = n - tail
-    tail_rpm = max(TAIL_MIN_RPM, int(rpm * tail_ratio))
-    say('%s：全速 %+d 脉冲（%d RPM）→ 收尾 %+d 脉冲（%d RPM）'
-        % (AXIS_LABEL.get(int(axis), axis), main, rpm, tail, tail_rpm))
-    rid = client.goto(axis, main, rpm=rpm)
-    rep = waiter(rid, estimate_timeout_ms(main, rpm))
-    if rep is None or rep.get('code'):
-        return rep
-    rid = client.goto(axis, tail, rpm=tail_rpm)
-    return waiter(rid, estimate_timeout_ms(tail, tail_rpm))
+    say = log or (lambda _t: None)
+    order = [int(a) for a in (4, 5) if int(a) in {int(k) for k in targets}]
+    say('X/Y 顺序走位（已回滚到 07:15 运动参数）：%s' % order)
+    return move_abs(client, targets, order=order, rpm=rpm, acc=acc,
+                    log=log, counts=counts, prep=False)
