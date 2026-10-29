@@ -23,6 +23,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 import box_map as BM
 import prep_pose
+import display_link
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 TARGETS_PATH = PKG_ROOT / 'vision' / 'runtime' / 'latest_targets.json'
@@ -341,7 +342,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
              stop_flag: Optional[Callable[[], bool]] = None,
              current_box: int = 1,
-             on_event: Optional[Callable[[dict], None]] = None) -> Dict[str, object]:
+             on_event: Optional[Callable[[dict], None]] = None,
+             display=None, warp_path=None, total: Optional[int] = None) -> Dict[str, object]:
     """连续抓 N 件：每件都"重新识别 → 挑目标 → 走一遍 run_once"。
 
     recognize() 由 GUI 传入（阻塞式单次识别，返回值得能从中读 latest_targets.json），
@@ -350,6 +352,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
     drop=True 时每件都会执行"转盘 60° + 松爪"，物块按 6 个盒位轮流落；
     stop_flag() 返回 True 时在当前件结束后停下（界面的「停止全部」也能中断）。
+
+    display：可选，`display_link.DisplayLink` 实例，用于把"第 N 件/类别/盒号/缩略图"
+    推给派端 1024×600 比赛屏（赛题要求显示序号、名称、图片、总数量）。
     """
     def emit(kind, **kw):
         """给界面/日志用的事件回调（异常一律吞掉，绝不影响抓取）。"""
@@ -362,12 +367,24 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         except Exception:                          # noqa: BLE001
             pass
 
+    def say_display(fn, **kw):
+        """推给派端屏；任何异常都吞掉（屏只是展示，绝不能影响抓取）。"""
+        if fn is None:
+            return
+        try:
+            fn(**kw)
+        except Exception:                          # noqa: BLE001
+            pass
+
     done = 0
     failed = 0
     started = time.perf_counter()
     results: List[Dict[str, object]] = []
     box_now = int(current_box) if 1 <= int(current_box) <= BOX_COUNT else 1
+    total_n = int(total or count)
     log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 6 盒，每盒 60°）' % box_now)
+    say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
+                status='running', last_event='开始连续抓 %d 件' % count)
     for i in range(max(0, int(count))):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
@@ -406,6 +423,17 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°）'
                 % (i + 1, key, box, deg))
         emit('target', i=i + 1, target=describe(target), key=key, box=box, deg=deg)
+        _shape = str(target.get('shape') or '—')
+        _color = str(target.get('color') or '')
+        _name = (_shape + ' ' + _color).strip()
+        _label = ('%d 号盒' % box) if box else ''
+        _thumb = None
+        if warp_path is not None and display is not None:
+            _bbox = target.get('bbox_warped') or target.get('bbox') or target.get('bbox_orig')
+            _thumb = display_link.DisplayLink.thumb_b64(warp_path, _bbox)
+        say_display(getattr(display, 'item', None), seq=i + 1, name=_shape, color=_color, box=box,
+                    box_label=_label, total_done=done, thumb_b64=_thumb,
+                    last_event='第 %d 件：%s → %s' % (i + 1, _name, _label or '抓取位'))
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
                            drop=drop, tray_deg=deg)
@@ -413,6 +441,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             failed += 1
             log('[连续抓] 第 %d 件失败：%s' % (i + 1, exc))
             emit('item_fail', i=i + 1, reason=str(exc))
+            say_display(getattr(display, 'alarm', None), text='第 %d 件失败：%s' % (i + 1, exc))
             break
         except Exception as exc:                       # noqa: BLE001
             failed += 1
@@ -425,9 +454,17 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         results.append(one)
         log('[连续抓] 第 %d 件完成（累计 %d 件）' % (i + 1, done))
         emit('item_ok', i=i + 1, res=one, box=box)
+        say_display(getattr(display, 'item_done', None), seq=i + 1, total_done=done, ok=True,
+                    last_event='第 %d 件已入 %s' % (i + 1, _label or '抓取位'))
+        say_display(getattr(display, 'state', None), done=done, total=total_n,
+                    elapsed_s=time.perf_counter() - started, status='running',
+                    last_event='已完成 %d 件' % done)
     elapsed = time.perf_counter() - started
     log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
         % (done, failed, elapsed, BM.describe()))
     emit('finished', done=done, failed=failed, elapsed=elapsed)
+    say_display(getattr(display, 'state', None), done=done, total=total_n, elapsed_s=elapsed,
+                status=('done' if failed == 0 else 'stopped'),
+                last_event='结束：成功 %d 件、失败 %d 件' % (done, failed))
     return {'ok': failed == 0, 'done': done, 'failed': failed,
             'elapsed': elapsed, 'items': results}

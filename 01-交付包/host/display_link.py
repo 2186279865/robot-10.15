@@ -62,6 +62,113 @@ class DisplayLink:
         fields['message'] = message
         self.push(**fields)
 
+    # ---------- 赛题版（NDJSON v2，给 pi_display.py 的六列界面） ----------
+
+    def state(self, done=None, total=None, elapsed_s=None, status='running',
+              last_event=None, current_box=None, current_label=None):
+        msg = {'kind': 'state', 'state': status}
+        if done is not None:
+            msg['done'] = int(done)
+        if total is not None:
+            msg['total'] = int(total)
+        if elapsed_s is not None:
+            msg['elapsed_s'] = round(float(elapsed_s), 1)
+        if last_event:
+            msg['last_event'] = str(last_event)[:80]
+        if current_box:
+            msg['current_box'] = int(current_box)
+        if current_label:
+            msg['current_label'] = str(current_label)[:40]
+        self.push(**msg)
+
+    def item(self, seq, name, color='', box=0, box_label='', total_done=None,
+             last_event=None, thumb_b64=None):
+        msg = {'kind': 'item', 'seq': int(seq), 'name': str(name)[:24],
+               'color': str(color)[:8], 'box': int(box)}
+        if box_label:
+            msg['box_label'] = str(box_label)[:40]
+        if total_done is not None:
+            msg['total_done'] = int(total_done)
+        if last_event:
+            msg['last_event'] = str(last_event)[:80]
+        if thumb_b64:
+            msg['thumb_b64'] = thumb_b64
+        self.push(**msg)
+
+    def item_done(self, seq, total_done, ok=True, last_event=None):
+        msg = {'kind': 'item_done', 'seq': int(seq), 'total_done': int(total_done),
+               'ok': bool(ok)}
+        if last_event:
+            msg['last_event'] = str(last_event)[:80]
+        self.push(**msg)
+
+    def alarm(self, text):
+        self.push(kind='alarm', message=str(text)[:80])
+
+    def start_keepalive(self, interval_s=5.0, provider=None):
+        """赛题要求“超 15 s 无动作/无显示 → 本轮结束”，这里定时刷状态保活。
+
+        provider() 返回 dict(done=, total=, elapsed_s=, status=, last_event=)；
+        为 None 时只发一个“运行中”的状态。
+        """
+        if not self.host or getattr(self, '_ka_thread', None):
+            return
+        self._ka_stop = threading.Event()
+
+        def _loop():
+            while not self._ka_stop.is_set():
+                try:
+                    info = provider() if provider else {}
+                except Exception:                     # noqa: BLE001
+                    info = {}
+                try:
+                    self.state(**info)
+                except Exception:                     # noqa: BLE001
+                    pass
+                self._ka_stop.wait(interval_s)
+
+        self._ka_thread = threading.Thread(target=_loop, name='display-keepalive',
+                                           daemon=True)
+        self._ka_thread.start()
+
+    def stop_keepalive(self):
+        ev = getattr(self, '_ka_stop', None)
+        if ev is not None:
+            ev.set()
+
+    @staticmethod
+    def thumb_b64(frame_path, bbox, size=96, pad=0.18):
+        """从顶视校正图裁出该目标，缩成 size×size 的 JPEG，返回 base64（失败返回 None）。"""
+        try:
+            import base64
+            import cv2
+            import numpy as np
+            arr = np.fromfile(str(frame_path), dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None or not bbox:
+                return None
+            x, y, w, h = [float(v) for v in bbox[:4]]
+            pw, ph = w * pad, h * pad
+            x0 = max(0, int(x - pw))
+            y0 = max(0, int(y - ph))
+            x1 = min(img.shape[1], int(x + w + pw))
+            y1 = min(img.shape[0], int(y + h + ph))
+            if x1 - x0 < 4 or y1 - y0 < 4:
+                return None
+            crop = img[y0:y1, x0:x1]
+            side = max(crop.shape[:2])
+            canvas = np.full((side, side, 3), 240, dtype=np.uint8)
+            oy = (side - crop.shape[0]) // 2
+            ox = (side - crop.shape[1]) // 2
+            canvas[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
+            small = cv2.resize(canvas, (size, size), interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode('.jpg', small, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if not ok:
+                return None
+            return base64.b64encode(buf.tobytes()).decode('ascii')
+        except Exception:                             # noqa: BLE001
+            return None
+
     # ---------- 内部 ----------
 
     def _close(self):

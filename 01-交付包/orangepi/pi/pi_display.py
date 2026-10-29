@@ -356,14 +356,22 @@ class Screen:
         self.redraw()
 
     # ---------------------------------------------------------- 渲染
+    def _cur_text(self) -> str:
+        """顶栏“当前 …”文案：标签里已带盒号时不再重复拼“→ N 号盒”。"""
+        label = (self.current_label or '').strip()
+        box = self.current_box or 0
+        if not label:
+            return ('当前：%d 号盒' % box) if box else '当前：—'
+        if '号盒' in label or (box and ('%d号' % box) in label):
+            return '当前：%s' % label
+        return ('当前：%s → %d 号盒' % (label, box)) if box else ('当前：%s' % label)
+
     def redraw(self):
         st = self.state if self.state in STATE_TEXT else 'idle'
         self.lb_state.configure(text=STATE_TEXT[st], fg=STATE_COLOR[st])
         self.dot.itemconfigure(1, fill=STATE_COLOR[st])
         if self.current_box:
-            self.lb_cur.configure(
-                text='当前：%s → %d 号盒' % (self.current_label or '—',
-                                          self.current_box), fg=FG)
+            self.lb_cur.configure(text=self._cur_text(), fg=FG)
         else:
             self.lb_cur.configure(text=self.last_event, fg=DIM)
         m, sec = divmod(int(self.elapsed), 60)

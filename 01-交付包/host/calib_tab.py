@@ -792,6 +792,13 @@ class CalibTab(ttk.Frame):
 
     def _many_worker(self, client, vision, count, drop):
         try:
+            _disp = getattr(self.app, 'display', None)
+            _warp = None
+            try:
+                _warp = Path(vision.runtime_dir) / 'last_top_warp.jpg' \
+                    if getattr(vision, 'runtime_dir', None) else None
+            except Exception:                               # noqa: BLE001
+                _warp = None
             res = AG.run_many(
                 client, count,
                 recognize=(vision.recognize_blocking
@@ -801,6 +808,8 @@ class CalibTab(ttk.Frame):
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
                 on_event=self._many_event,
+                display=_disp,
+                warp_path=_warp,
             )
             self.say('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
                      % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 import tkinter as tk
@@ -28,7 +29,8 @@ from pathlib import Path  # noqa: E402
 
 PKG_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import protocol as P  # noqa: E402
+import protocol as P
+import display_link  # noqa: E402
 import approach_route as AR
 import journey as J  # noqa: E402
 import pi_link  # noqa: E402
@@ -393,6 +395,7 @@ class App:
         self.root = root
         self.args = args
         self.client = HostClient(clock=time.monotonic, service=True)
+        self.display = None          # 派端 5059 比赛屏推送（可选）
         self.reconnector = AutoReconnector(self.client, self._make_link, time.monotonic)
         self.client.link_factory = self._make_link
         self.axes = {}
@@ -1115,12 +1118,56 @@ class App:
             self.client.attach(link)
             if self.client.connect():
                 self.reconnector.arm()
+                self._start_display()
             else:
                 # 以前这里只写一条 note，用户在大窗口里看不到，会以为「点了没反应」
                 self._warn_link_failed(self.client.last_error or "未知原因（链路打不开）")
         else:
             self.reconnector.disarm()
+            self._stop_display()
             self.client.disconnect()
+
+    def _start_display(self) -> None:
+        """连接成功后，把"第 N 件/类别/盒号/缩略图"推给派端 1024×600 比赛屏（5059）。"""
+        try:
+            text = self._selected_port()
+        except Exception:                                  # noqa: BLE001
+            text = ""
+        m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", text or "")
+        if not m:
+            return
+        host = m.group(1)
+        self._stop_display()
+        try:
+            self.display = display_link.DisplayLink(host, verbose=False)
+            self.display.start()
+
+            def _provider():
+                done = total = 0
+                try:
+                    done = int(getattr(self.calib_tab, '_many_done', 0) or 0)
+                    total = int(getattr(self.calib_tab, '_many_total', 0) or 0)
+                except Exception:                          # noqa: BLE001
+                    pass
+                return {'done': done, 'total': total, 'status': 'running',
+                        'elapsed_s': time.monotonic() - self._disp_t0}
+
+            self._disp_t0 = time.monotonic()
+            self.display.start_keepalive(5.0, _provider)
+            self.note(f"派端比赛屏已连接：{host}:5059")
+        except Exception as exc:                           # noqa: BLE001
+            self.display = None
+            self.note(f"派端比赛屏未连接（不影响抓取）：{exc}")
+
+    def _stop_display(self) -> None:
+        d, self.display = getattr(self, 'display', None), None
+        if d is None:
+            return
+        try:
+            d.stop_keepalive()
+            d.stop()
+        except Exception:                                  # noqa: BLE001
+            pass
 
     def _warn_link_failed(self, reason: str) -> None:
         """连接失败时给出看得见的反馈：状态栏红字 + 提示音 + 弹窗 + 排查建议。"""
