@@ -122,10 +122,13 @@ class SequenceTest(unittest.TestCase):
         z_gotos = [c[1][1] for c in client.gotos() if c[1][0] == 1]
         # 长行程会先发 200 脉冲“软启动垫片”（motor_pos），所以 goto 的增量少 200
         # 软启动垫片（每段 200 脉冲）会让 goto 增量少 0~400，这里放宽到 ±500
-        self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), 500)                 # 抬到顶
-        self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), 500)   # 降到抓取位
+        import prep_pose as _PP
+        tol = _PP.SOFT_PULSES * 3                      # 软启动垫片会让 goto 增量少 0~3x
+        self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), tol)                 # 抬到顶
+        self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), tol)   # 降到抓取位
+        import prep_pose as _PP2
         nudge = [c for c in client.calls
-                 if c[0] == 'motor_pos' and c[1][0] == 1 and abs(c[1][4]) == 200]
+                 if c[0] == 'motor_pos' and c[1][0] == 1 and abs(c[1][4]) == _PP2.SOFT_PULSES]
         self.assertTrue(nudge, '长行程应该有软启动垫片')
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
