@@ -133,10 +133,14 @@ class SequenceTest(unittest.TestCase):
         # 落货转盘：速度模式匀速（rpm=TRAY_RPM），到点前刹车，残差大才补一次
         tray = [c for c in client.calls
                 if c[0] == 'motor_speed' and int(c[1][0]) == AG.AXIS_TRAY]
-        self.assertEqual(len(tray), 1)
-        args = tray[0][1]                      # (addr, dir, rpm, acc)
-        self.assertEqual(args[1], 0)           # 正向
-        self.assertEqual(args[2], AG.TRAY_RPM)  # 物理转速，不再按比例折算
+        # 惯性大 → 多级升速 + 多级降速，因此会有多次 motor_speed
+        self.assertGreaterEqual(len(tray), 2)
+        rpms = [float(c[1][2]) for c in tray]
+        self.assertLess(rpms[0], AG.TRAY_RPM)          # 第一级必须比满速低（软启动）
+        self.assertEqual(rpms.count(float(AG.TRAY_RPM)) >= 1, True)
+        for c in tray:
+            self.assertEqual(int(c[1][1]), 0)          # 全部正向
+        self.assertLessEqual(max(rpms), float(AG.TRAY_RPM))
         stops = [c for c in client.calls
                  if c[0] == 'motor_stop' and int(c[1][0]) == AG.AXIS_TRAY]
         self.assertGreaterEqual(len(stops), 1)
