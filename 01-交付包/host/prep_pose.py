@@ -331,9 +331,17 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
     def rpm_of(a: int) -> int:
         return int(rpm.get(int(a), 300)) if isinstance(rpm, dict) else int(rpm)
 
+    _wait = getattr(client, 'wait_reply', None)      # 测试用 FakeClient 没有 wait_reply
+    _no_reply = _wait is None
+
     def _call(cmd, *args, timeout_ms=1500):
         rid = client.send(cmd, *args, timeout_ms=timeout_ms)
-        return client.wait_reply(rid, timeout_ms=timeout_ms)
+        if _no_reply:
+            return None
+        try:
+            return _wait(rid, timeout_ms=timeout_ms)
+        except TypeError:
+            return _wait(rid, timeout_ms)
 
     def _pairs(r):
         if not r:
@@ -354,10 +362,12 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
 
     # 1) 放开速度上限（motor_pos 会拒绝 rpm > speed_rpm_max，出厂 300）
     want_max = max(rpm_of(a) for a in targets)
-    old_max = _pget('speed_rpm_max')
+    old_max = None if _no_reply else _pget('speed_rpm_max')
     say('并行：speed_rpm_max 原值=%s，需要=%d' % (old_max, want_max))
     raised = False
-    if (old_max is None) or (old_max < want_max):
+    if _no_reply:
+        raised = True                                  # 无回执能力时不做参数调优
+    elif (old_max is None) or (old_max < want_max):
         pr = _pairs(_call('param_set', 'speed_rpm_max', int(want_max), timeout_ms=1500))
         now = _pget('speed_rpm_max')
         say('并行：param_set speed_rpm_max=%d → 回读=%s %s'
@@ -392,6 +402,8 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
             say('%s 并行下发 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
             r = _call('motor_pos', axis, dirn, rpm_i, int(acc), abs(pulses), 'rel', timeout_ms=1200)
             pr = _pairs(r)
+            if _no_reply:
+                continue
             if not pr:
                 say('%s 并行：没有回执（超时），继续观察编码器' % AXIS_LABEL.get(axis, axis))
                 continue
@@ -435,7 +447,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
         return [{'axis': a, 'pulses': p, 'rpm': r0, 'ok': True, 'code': '', 'text': '', 'pairs': {}}
                 for a, p, r0 in plans]
     finally:
-        if raised and old_max is not None:
+        if raised and old_max is not None and not _no_reply:
             try:
                 _call('param_set', 'speed_rpm_max', int(old_max), timeout_ms=800)
             except Exception:                       # noqa: BLE001
