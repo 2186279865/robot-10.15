@@ -143,8 +143,11 @@ AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
 # 软启动：长行程先以 SOFT_RPM 慢走 SOFT_PULSES 脉冲（吃掉静摩擦/减小起步冲击），
 # 再全速走剩余。200 脉冲还不够柔 -> 提到 600（约 6 mm）；嫌慢可调回 300。
-SOFT_PULSES = 600
-SOFT_RPM = 300
+# 两台阶软启动：300 rpm x 300 脉冲 -> 900 rpm x 300 脉冲 -> 全速。
+# 单个 600 脉冲的台阶只把"第一下"变柔，真正顿挫发生在 300->1800 那一步；
+# 拆成两级后每次台阶幅度减半，而中段速度完全不变（不"掉速"）。
+SOFT_STEPS = ((300, 300), (900, 300))
+SOFT_PULSES = sum(n for _r, n in SOFT_STEPS)
 
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
@@ -235,13 +238,16 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         # 软启动垫片：长行程 + 高速时先慢走约 2 mm 吃掉静摩擦，再全速走；
         # 否则驱动器一上来就是最大加速度，机械冲击很"猛"（用户反馈）。
         if abs(pulses) >= 3000 and rpm_i >= 1000:
-            nudge = SOFT_PULSES if pulses > 0 else -SOFT_PULSES
+            sign = 1 if pulses > 0 else -1
             try:
-                client.send('motor_pos', axis, 0 if nudge > 0 else 1, SOFT_RPM, int(acc),
-                            abs(nudge), 'rel', timeout_ms=1500)
-                say('%s：软启动 %+d 脉冲（200 RPM）→ 再全速 %d RPM' % (label, nudge, rpm_i))
-                pulses -= nudge
-                time.sleep(0.05)
+                for soft_rpm, soft_n in SOFT_STEPS:
+                    step = sign * int(soft_n)
+                    client.send('motor_pos', axis, 0 if step > 0 else 1, int(soft_rpm),
+                                int(acc), abs(step), 'rel', timeout_ms=1500)
+                    pulses -= step
+                    say('%s：软启动 %+d 脉冲（%d RPM）' % (label, step, soft_rpm))
+                    time.sleep(0.06)
+                say('%s：软启动完成，剩余 %+d 脉冲按 %d RPM 走' % (label, pulses, rpm_i))
             except Exception as exc:                  # noqa: BLE001
                 say('%s：软启动失败（%s），改为直接全速' % (label, exc))
         try:
