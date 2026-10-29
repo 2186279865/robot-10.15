@@ -127,9 +127,10 @@ class SequenceTest(unittest.TestCase):
         self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), tol)                 # 抬到顶
         self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), tol)   # 降到抓取位
         import prep_pose as _PP2
+        soft_rpms = {int(r) for r, _n in _PP2.SOFT_STEPS}
         nudge = [c for c in client.calls
-                 if c[0] == 'motor_pos' and c[1][0] == 1 and abs(c[1][4]) == _PP2.SOFT_PULSES]
-        self.assertTrue(nudge, '长行程应该有软启动垫片')
+                 if c[0] == 'motor_pos' and c[1][0] == 1 and int(c[1][2]) in soft_rpms]
+        self.assertGreaterEqual(len(nudge), len(_PP2.SOFT_STEPS), '长行程应该有两级软启动垫片')
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
         # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0
