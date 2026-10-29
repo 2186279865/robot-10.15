@@ -423,25 +423,72 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
         if not plans:
             return []
 
-        # 2) 两轴同时下发（motor_pos 每轴独立、立即回执）
-        bad = []
-        for axis, pulses, rpm_i in plans:
+        # 2) 三段式：慢速垫片 → 全速主体 → 慢速收尾（用户要求 X/Y 别一惊一乍）
+        #    每段都两轴同时下发，发完轮询一次编码器，避免段间叠在一起。
+        def _settle(timeout=2.5):
+            if counts_fn is None:
+                return
+            dl = time.monotonic() + float(timeout)
+            quiet = 0
+            while time.monotonic() < dl:
+                time.sleep(0.04)
+                cur = counts_fn() or {}
+                left = []
+                for axis, tgt in targets.items():
+                    c = cur.get(int(axis))
+                    left.append(999999 if c is None else abs(int(round(int(tgt) * COUNTS_PER_PULSE)) - int(c)))
+                if max(left) <= 40:
+                    quiet += 1
+                    if quiet >= 2:
+                        return
+                else:
+                    quiet = 0
+
+        def _send_rel(axis, pulses):
             dirn = 1 if pulses < 0 else 0
-            say('%s 并行下发 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), pulses, rpm_i))
-            r = _call('motor_pos', axis, dirn, rpm_i, int(acc), abs(pulses), 'rel', timeout_ms=1200)
-            pr = _pairs(r)
-            if _no_reply:
-                continue
-            if not pr:
-                say('%s 并行：没有回执（超时），继续观察编码器' % AXIS_LABEL.get(axis, axis))
-                continue
-            reason = str(pr.get('reason') or '')
-            if reason:
-                say('%s 并行：被拒绝 reason=%s max=%s'
-                    % (AXIS_LABEL.get(axis, axis), reason, pr.get('max')))
-                bad.append((axis, pulses, rpm_i))
+            return _call('motor_pos', axis, dirn, int(rpm_of(axis)) if not isinstance(_phase_rpm, dict) else int(_phase_rpm[axis]),
+                         int(acc), abs(int(pulses)), 'rel', timeout_ms=1500)
+
+        phases = []
+        for axis, pulses, rpm_i in plans:
+            total = abs(int(pulses))
+            sign = 1 if pulses > 0 else -1
+            if total >= 3000:
+                pad = int(min(700, max(200, total // 8)))
+                tail = int(min(1200, max(300, total // 6)))
+                body = total - pad - tail
+                phases.append((axis, sign, pad, body, tail))
             else:
-                say('%s 并行：已受理（%s 脉冲）' % (AXIS_LABEL.get(axis, axis), pr.get('pulses')))
+                phases.append((axis, sign, 0, total, 0))
+
+        # 垫片段（慢速 25%）
+        pad_rpm = {a: max(300, int(rpm_of(a) * 0.25)) for a, _s, pad, _b, _t in phases if pad}
+        if pad_rpm:
+            _phase_rpm = pad_rpm
+            for axis, sign, pad, _b, _t in phases:
+                if pad:
+                    _send_rel(axis, sign * pad)
+            _settle(1.5)
+
+        # 主体段（全速）
+        body_rpm = {a: rpm_of(a) for a, _s, _p, body, _t in phases if body}
+        if body_rpm:
+            _phase_rpm = body_rpm
+            for axis, sign, _p, body, _t in phases:
+                if body:
+                    say('%s 主体 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), sign * body, body_rpm[axis]))
+                    _send_rel(axis, sign * body)
+            _settle(3.0)
+
+        # 收尾段（慢速 30%）
+        tail_rpm = {a: max(300, int(rpm_of(a) * 0.30)) for a, _s, _p, _b, tail in phases if tail}
+        if tail_rpm:
+            _phase_rpm = tail_rpm
+            for axis, sign, _p, _b, tail in phases:
+                if tail:
+                    say('%s 收尾 %+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), sign * tail, tail_rpm[axis]))
+                    _send_rel(axis, sign * tail)
+            _settle(1.5)
 
         # 3) 轮询编码器到位即返回
         if counts_fn is not None:
@@ -463,7 +510,8 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None,
                 else:
                     quiet = 0
 
-        # 4) 被拒的轴：退回顺序 goto（闭环、可靠）
+        # 4) 被拒的轴：退回顺序 goto（三段式下不再有 bad，保留兜底）
+        bad = []
         if bad:
             say('并行：%d 个轴被拒绝，改用顺序 goto 补走' % len(bad))
             for axis, pulses, rpm_i in bad:
