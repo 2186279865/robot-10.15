@@ -270,9 +270,25 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 continue
         return out
 
+    def _settle_counts(axes=None, tries=10, gap=0.15, tol=20.0):
+        """等遥测 counts 稳定（连续两次差 ≤ tol）。遥测约 200 ms 一次，
+        上一条运动刚结束时很容易读到旧值——用旧值算 delta 会多走一整段（撞机元凶）。"""
+        axes = [int(a) for a in (axes or (1, 3, 4, 5))]
+        prev = _live_counts()
+        for _i in range(tries):
+            time.sleep(gap)
+            now = _live_counts()
+            if prev and now and all(abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= tol
+                                    for a in axes if a in prev):
+                return now
+            prev = now or prev
+        say('读数未在 %.1f s 内稳定，按现有值继续（有偏风险）' % (tries * gap))
+        return prev
+
     def move_xy(targets: Dict[int, float]) -> None:
         """X/Y 同时走一步：两轴 motor_pos 并行；没有编码器读数才退回顺序 goto。"""
         targets = {int(k): int(v) for k, v in targets.items()}
+        _settle_counts(list(targets))
         soft_, known_, cnt_ = pos()
         if cnt_ and all(cnt_.get(a) is not None for a in targets):
             say('X/Y 并行一步走：%s'
@@ -286,6 +302,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
             move(targets, list(targets))
 
     def move(targets: Dict[int, float], order: List[int]) -> None:
+        _settle_counts(list(targets))
         soft, known, counts = pos()
         # 注意：固件的 host_goto 只有一个执行槽，两条 motor_goto 同时下发时
         # 第二条会返回 E09(goto_busy)，所以**不能并行**，必须按 order 顺序走。

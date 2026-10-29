@@ -493,8 +493,13 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             say('%s 补走等待异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
             return False
         pr = _pairs(rep) or {}
-        if not pr:
+        code = str(rep.get('code') or '') if isinstance(rep, dict) else ''
+        if not pr and not code:
             say('%s 补走：等回执超时（%d ms）' % (AXIS_LABEL.get(axis, axis), tmo))
+            return False
+        if code or str(pr.get('reason') or ''):
+            say('%s 补走失败：code=%s reason=%s（不再继续下一步）'
+                % (AXIS_LABEL.get(axis, axis), code or '-', pr.get('reason') or '-'))
             return False
         detail = ' '.join('%s=%s' % (k, pr[k]) for k in ('err', 'passes', 'elapsed_ms', 'reason') if k in pr)
         say('%s 补走完成：%s' % (AXIS_LABEL.get(axis, axis), detail))
@@ -515,7 +520,18 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 continue
         return out
 
-    cur = read_counts()
+    def fresh_counts(min_gap=0.15, max_tries=10, tol=30.0):
+        """连续两次读数一致才认为新鲜；避免拿上一条运动的旧 counts 去算 delta（会多走一整段）。"""
+        prev = read_counts()
+        for _i in range(max_tries):
+            time.sleep(min_gap)
+            now = read_counts()
+            if prev and now and all(abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= tol for a in targets):
+                return now
+            prev = now or prev
+        return prev or {}
+
+    cur = fresh_counts()
     if not all(a in cur for a in targets):
         say('X/Y 并行：没有编码器读数，退回顺序走位')
         _c = dict(counts) if counts else None
@@ -603,10 +619,16 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                     if _prev is None or _now is None or abs(_now - _prev) <= 24:
                         break
                     _prev = _now
-                say('%s 并行残差 %+d 脉冲，顺序补一次（等回执）' % (AXIS_LABEL.get(axis, axis), miss))
-                _goto_wait(axis, tgt, rpm_of(axis))
+                if abs(miss) > 3000:
+                    raise RuntimeError('%s 并行后偏离目标 %+d 脉冲（>3000），不做补走，请人工检查'
+                                       % (AXIS_LABEL.get(axis, axis), miss))
+                say('%s 并行残差 %+d 脉冲，顺序补一次（相对量，等回执）' % (AXIS_LABEL.get(axis, axis), miss))
+                if not _goto_wait(axis, miss, rpm_of(axis)):
+                    raise RuntimeError('%s 补走未完成（锁存/超时），中止本件' % AXIS_LABEL.get(axis, axis))
         for axis in bad:
-            _goto_wait(axis, targets[axis], rpm_of(axis))
+            rel = targets[axis] - int(round((cur.get(axis) or 0) / COUNTS_PER_PULSE))
+            if not _goto_wait(axis, rel, rpm_of(axis)):
+                raise RuntimeError('%s 并行被拒后补走失败' % AXIS_LABEL.get(axis, axis))
 
         return [{'axis': a, 'pulses': targets[a], 'ok': True, 'code': '', 'text': '', 'pairs': {}}
                 for a in sorted(targets)]
