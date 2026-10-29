@@ -598,14 +598,15 @@ class App:
                         command=self._toggle_axes_adv).pack(side="right")
 
     def _tray_step(self, deg: float) -> None:
-        """用 auto_grab.tray_turn（速度模式匀速 + 到点刹车）手动转 deg 度。
-
-        用于现场验证顺滑度与对位：+60° 走一个盒，-60° 退回一个盒。
-        """
+        """后台线程转 deg 度（位置模式 + acc=1），绝不阻塞 Tk 主线程。"""
         client = getattr(self, 'client', None)
         if client is None or not getattr(client, 'online', False):
             self.note("未连接：先点「连接」")
             return
+        if getattr(self, '_tray_busy', False):
+            self.note("转盘正在动，等它停下来再点")
+            return
+        import threading
         import auto_grab as _AG
 
         panel = (getattr(self, 'axes', None) or {}).get(_AG.AXIS_TRAY)
@@ -614,12 +615,21 @@ class App:
             c = None if panel is None else panel.last_counts
             return None if c is None else {_AG.AXIS_TRAY: c}
 
-        try:
-            self.note("转盘 %+.0f°（速度模式）开始" % deg)
-            res = _AG.tray_turn(client, deg, log=self.note, counts_get=_cnt)
-            self.note("转盘 %+.0f° 完成：%s" % (deg, res))
-        except Exception as exc:                       # noqa: BLE001
-            self.note("转盘转动失败：%s" % (exc,))
+        def _log(text: str) -> None:                 # 从工作线程回到主线程刷日志
+            self.root.after(0, lambda t=text: self.note(t))
+
+        def _work() -> None:
+            try:
+                res = _AG.tray_turn(client, deg, log=_log, counts_get=_cnt)
+                self.root.after(0, lambda r=res: self.note("转盘 %+.0f° 完成：%s" % (deg, r)))
+            except Exception as exc:                 # noqa: BLE001
+                self.root.after(0, lambda e=exc: self.note("转盘转动失败：%s" % (e,)))
+            finally:
+                self.root.after(0, lambda: setattr(self, '_tray_busy', False))
+
+        self._tray_busy = True
+        self.note("转盘 %+.0f°（位置模式 acc=1）开始，可继续操作界面" % deg)
+        threading.Thread(target=_work, daemon=True).start()
 
     def _tray_angle_zero(self) -> None:
         """把转盘当前位置定义为角度 0°（motor_angle_zero，仅供角度模式调试用）。"""
