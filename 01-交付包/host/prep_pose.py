@@ -531,7 +531,9 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             prev = now or prev
         return prev or {}
 
-    cur = fresh_counts()
+    # 调用方（auto_grab.move_xy）已做过"新鲜+稳定"校验，这里直接取一次即可，
+    # 避免每步再多等 0.3~1.5 s。
+    cur = read_counts()
     if not all(a in cur for a in targets):
         say('X/Y 并行：没有编码器读数，退回顺序走位')
         _c = dict(counts) if counts else None
@@ -574,7 +576,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
 
         # 3) 等停稳：等满估算时长（含减速余量），再要求 **连续 3 次** 读数几乎不变
         if plans:
-            t_wait = min(9.0, t_est * 1.35 + 0.50)
+            t_wait = min(9.0, t_est * 1.20 + 0.30)
             t_end = time.monotonic() + t_wait
             while time.monotonic() < t_end:
                 time.sleep(0.05)
@@ -582,12 +584,12 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             prev = read_counts()
             stable = 0
             while time.monotonic() < hard:
-                time.sleep(0.15)
+                time.sleep(0.10)
                 now = read_counts()
                 if now and prev and all(
                         abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans):
                     stable += 1
-                    if stable >= 4:
+                    if stable >= 3:
                         prev = now
                         break
                 else:
