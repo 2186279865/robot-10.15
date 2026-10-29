@@ -130,20 +130,16 @@ class SequenceTest(unittest.TestCase):
         self.assertEqual(z_gotos[1], AG.Z_DOWN - AG.Z_UP)   # 降到抓取位（增量）
         grippers = [c[1][0] for c in client.calls if c[0] == 'gripper']
         self.assertEqual(grippers, ['grab', 'open', 'ready'])
-        # 落货转盘：改为相对脉冲（不依赖固件角度基准），60° = 533 脉冲、正向 dir=0
-        # 落货转盘：纯速度模式 motor_pos（rpm=TRAY_RPM），60° = 533 脉冲
+        # 落货转盘：速度模式匀速（rpm=TRAY_RPM），到点前刹车，残差大才补一次
         tray = [c for c in client.calls
-                if c[0] == 'motor_pos' and c[1][0] == AG.AXIS_TRAY]
+                if c[0] == 'motor_speed' and int(c[1][0]) == AG.AXIS_TRAY]
         self.assertEqual(len(tray), 1)
-        args = tray[0][1]                      # (addr, dir, rpm, acc, pulses, mode)
+        args = tray[0][1]                      # (addr, dir, rpm, acc)
         self.assertEqual(args[1], 0)           # 正向
-        # rpm 会按学到的 tray_scale 折算（保持物理角速度），所以只校验 ≤ TRAY_RPM 且 > 0
-        self.assertGreater(args[2], 0)
-        self.assertLessEqual(args[2], AG.TRAY_RPM) # 速度模式 rpm=5
-        _scale = AG._load_scale()
-        # 实现里先按 3200 脉冲/圈算 533 再乘比例，存在 ±2 的取整差
-        self.assertAlmostEqual(args[4], AG.TRAY_DEG / 360.0 * 3200 * _scale, delta=3)
-        self.assertEqual(args[5], 'rel')
+        self.assertEqual(args[2], AG.TRAY_RPM)  # 物理转速，不再按比例折算
+        stops = [c for c in client.calls
+                 if c[0] == 'motor_stop' and int(c[1][0]) == AG.AXIS_TRAY]
+        self.assertGreaterEqual(len(stops), 1)
 
     def test_run_once_refuses_when_offline(self):
         client = FakeClient()
