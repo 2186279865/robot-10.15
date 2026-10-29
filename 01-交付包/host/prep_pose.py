@@ -141,6 +141,11 @@ def describe(cfg: Dict[str, object]) -> str:
 
 AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
+# 软启动：长行程先以 SOFT_RPM 慢走 SOFT_PULSES 脉冲（吃掉静摩擦/减小起步冲击），
+# 再全速走剩余。200 脉冲还不够柔 -> 提到 600（约 6 mm）；嫌慢可调回 300。
+SOFT_PULSES = 600
+SOFT_RPM = 300
+
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
              soft=None, known=None, counts=None,
@@ -230,9 +235,9 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         # 软启动垫片：长行程 + 高速时先慢走约 2 mm 吃掉静摩擦，再全速走；
         # 否则驱动器一上来就是最大加速度，机械冲击很"猛"（用户反馈）。
         if abs(pulses) >= 3000 and rpm_i >= 1000:
-            nudge = 200 if pulses > 0 else -200
+            nudge = SOFT_PULSES if pulses > 0 else -SOFT_PULSES
             try:
-                client.send('motor_pos', axis, 0 if nudge > 0 else 1, 200, int(acc),
+                client.send('motor_pos', axis, 0 if nudge > 0 else 1, SOFT_RPM, int(acc),
                             abs(nudge), 'rel', timeout_ms=1500)
                 say('%s：软启动 %+d 脉冲（200 RPM）→ 再全速 %d RPM' % (label, nudge, rpm_i))
                 pulses -= nudge
