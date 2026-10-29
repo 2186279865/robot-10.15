@@ -894,6 +894,13 @@ static void host_query_sweep(uint32_t now)
 #define HOST_GOTO_FAIL    5U
 #define HOST_GOTO_PRIME   6U   /* 等第一份新鲜的 counts，再决定起点 */
 #define HOST_GOTO_GAP     7U   /* 发位移帧前先等总线安静 */
+#define HOST_GOTO_SPIN      8U  /* 长行程预转：低速转一小会儿再走位置段 */
+#define HOST_GOTO_SPIN_WAIT 9U  /* 预转已停，等新 counts 样本折算已走量 */
+
+#define HOST_GOTO_SPIN_MIN       4000   /* 脉冲数达到这个量才值得预转 */
+#define HOST_GOTO_SPIN_MS        120U   /* 预转时长 */
+#define HOST_GOTO_SPIN_RPM_MIN   300U   /* 预转最低转速 */
+#define HOST_GOTO_SPIN_FRESH_MS  300U   /* 等样本的上限，超了就直接按原脉冲走 */
 
 #define HOST_GOTO_FRESH_MS      3000U   /* counts 超过这么久没更新就不敢用它算误差 */
 #define HOST_GOTO_STABLE_COUNTS 60      /* 两个新样本差多少算"没动"（放宽防误判）*/
@@ -925,6 +932,8 @@ typedef struct
     uint32_t max_ms;
     uint32_t next_query_ms;  /* goto 期间下一次允许发 0x36 的时刻 */
     uint32_t mute_query_ms;  /* 刚发完 FD 后的查询静默截止时刻 */
+    uint32_t spin_until_ms;  /* 预转结束时刻 */
+    uint32_t spin_stop_ms;   /* 预转停车时刻 */
     uint8_t  tx_res;         /* 最近一次下发的返回值（1=成功） */
     uint8_t  tx_cnt;         /* 成功下发次数 */
     const char *fail_reason;
@@ -1106,6 +1115,31 @@ static void host_goto_begin(uint8_t addr, int32_t pulses, int32_t tol,
     host_goto.stable = 0U;
 }
 
+/* 长行程先从静止低速“预转”一小会儿，再发位置帧：
+ * 目的不是提速，而是让起步有个缓的起点（accel 档位在这台驱动器上没法给出中间档）。
+ * 返回 1 表示已转入预转，调用方不要再发位置帧。 */
+static uint8_t host_goto_prespin_start(uint32_t now)
+{
+    uint16_t spin_rpm;
+
+    if ((host_goto.pulses < (int32_t)HOST_GOTO_SPIN_MIN) || (host_goto.rpm < 800U))
+    {
+        return 0U;
+    }
+
+    spin_rpm = (uint16_t)(host_goto.rpm / 4U);
+    if (spin_rpm < HOST_GOTO_SPIN_RPM_MIN)
+    {
+        spin_rpm = HOST_GOTO_SPIN_RPM_MIN;
+    }
+
+    host_goto.spin_until_ms = now + HOST_GOTO_SPIN_MS;
+    host_goto.phase         = HOST_GOTO_SPIN;
+    (void)control_apply_speed(host_goto.addr, host_goto.dir, spin_rpm,
+                              (uint8_t)host_param_value("acc"), 0);
+    return 1U;
+}
+
 /* 每轮调用。now 来自任务开头（与 query 同源，避免时间基不一致）。 */
 static void host_goto_service(uint32_t now)
 {
@@ -1158,10 +1192,95 @@ static void host_goto_service(uint32_t now)
                 int32_t seg = (host_goto.dir != 0U)
                     ? -(int32_t)host_goto.pulses : (int32_t)host_goto.pulses;
             
+                if (host_goto_prespin_start(now) != 0U)
+                {
+                    return;
+                }
+
                 if (!host_goto_move(seg, host_goto.rpm))
                 {
                     host_goto_fail("send");
                 }
+            }
+        }
+        return;
+    }
+
+    if (host_goto.phase == HOST_GOTO_SPIN)
+    {
+        /* 预转时间到：停车，等一份新样本算已走量 */
+        if ((int32_t)(now - host_goto.spin_until_ms) >= 0)
+        {
+            (void)control_apply_stop(host_goto.addr);
+            host_goto.spin_stop_ms = now;
+            host_goto.phase        = HOST_GOTO_SPIN_WAIT;
+        }
+        return;
+    }
+
+    if (host_goto.phase == HOST_GOTO_SPIN_WAIT)
+    {
+        int32_t moved;
+        int32_t left;
+
+        if ((r->have != 0U) && (r->stamp_ms != host_goto.last_stamp) &&
+            ((int32_t)(now - r->stamp_ms) <= (int32_t)HOST_GOTO_FRESH_MS))
+        {
+            moved = Emm_CountsToPulses((int32_t)(r->counts - host_goto.base_counts),
+                                       host_goto_counts_per_rev(),
+                                       host_goto_pulses_per_rev());
+            if (moved < 0)
+            {
+                moved = -moved;
+            }
+
+            left = (int32_t)host_goto.pulses - moved;
+            if (left < 0)
+            {
+                left = 0;
+            }
+            if (left > (int32_t)host_goto.pulses)
+            {
+                left = (int32_t)host_goto.pulses;
+            }
+
+            host_goto.last_counts = r->counts;
+            host_goto.last_stamp  = r->stamp_ms;
+            host_goto.pulses      = left;
+            host_goto.stable      = 0U;
+
+            if (left <= 100)
+            {
+                host_goto.seg_start_ms = Stepper_Millis();
+                host_goto.seg_ms       = 0U;
+                host_goto.phase        = HOST_GOTO_SETTLE;
+                return;
+            }
+
+            host_goto.tx_res = control_apply_position(host_goto.addr, host_goto.dir,
+                                                      host_goto.rpm,
+                                                      (uint8_t)host_param_value("acc"),
+                                                      (uint32_t)left, 0U, 0U);
+            if (host_goto.tx_res == 1U)
+            {
+                host_goto.tx_cnt++;
+                host_goto.mute_query_ms = Stepper_Millis() + 30U;
+            }
+            host_goto.seg_start_ms = Stepper_Millis();
+            host_goto.seg_ms       = host_goto_estimate_ms(left, (uint32_t)host_goto.rpm);
+            host_goto.phase        = HOST_GOTO_COARSE;
+            return;
+        }
+
+        /* 等不到新样本：退回原逻辑，按原始脉冲走位置段 */
+        if ((int32_t)(now - host_goto.spin_stop_ms) > (int32_t)HOST_GOTO_SPIN_FRESH_MS)
+        {
+            int32_t seg = (host_goto.dir != 0U)
+                ? -(int32_t)host_goto.pulses : (int32_t)host_goto.pulses;
+
+            if (!host_goto_move(seg, host_goto.rpm))
+            {
+                host_goto_fail("send");
             }
         }
         return;

@@ -146,8 +146,14 @@ AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 # 两台阶软启动：300 rpm x 300 脉冲 -> 900 rpm x 300 脉冲 -> 全速。
 # 单个 600 脉冲的台阶只把"第一下"变柔，真正顿挫发生在 300->1800 那一步；
 # 拆成两级后每次台阶幅度减半，而中段速度完全不变（不"掉速"）。
-SOFT_STEPS = ((300, 300), (900, 300))
+SOFT_STEPS = ((300, 300), (900, 300))          # Z/托盘默认（两级）
+# X/Y 单独用三级台阶：用户反馈"一惊一乍"，只在 X/Y 上更柔，Z 不动。
+SOFT_STEPS_XY = ((250, 200), (600, 300), (1100, 300))
 SOFT_PULSES = sum(n for _r, n in SOFT_STEPS)
+
+
+def soft_steps_for(axis):
+    return SOFT_STEPS_XY if int(axis) in (4, 5) else SOFT_STEPS
 
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
@@ -240,7 +246,7 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         if abs(pulses) >= 3000 and rpm_i >= 1000:
             sign = 1 if pulses > 0 else -1
             try:
-                for soft_rpm, soft_n in SOFT_STEPS:
+                for soft_rpm, soft_n in soft_steps_for(axis):
                     step = sign * int(soft_n)
                     client.send('motor_pos', axis, 0 if step > 0 else 1, int(soft_rpm),
                                 int(acc), abs(step), 'rel', timeout_ms=1500)
@@ -612,6 +618,12 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
 TAIL_PULSES = 700
 TAIL_RPM_RATIO = 0.35
 TAIL_MIN_RPM = 300
+# X/Y 收尾更长更慢（用户要求只在 X/Y 上更柔）
+TAIL_BY_AXIS = {4: (1300, 0.30), 5: (1300, 0.30)}
+
+
+def tail_for(axis):
+    return TAIL_BY_AXIS.get(int(axis), (TAIL_PULSES, TAIL_RPM_RATIO))
 
 
 def goto_smooth(client, axis, pulses, rpm, acc=0, say=None, waiter=None):
@@ -629,9 +641,10 @@ def goto_smooth(client, axis, pulses, rpm, acc=0, say=None, waiter=None):
         return waiter(rid, estimate_timeout_ms(n, rpm))
 
     sign = 1 if n > 0 else -1
-    tail = sign * TAIL_PULSES
+    tail_n, tail_ratio = tail_for(axis)
+    tail = sign * int(tail_n)
     main = n - tail
-    tail_rpm = max(TAIL_MIN_RPM, int(rpm * TAIL_RPM_RATIO))
+    tail_rpm = max(TAIL_MIN_RPM, int(rpm * tail_ratio))
     say('%s：全速 %+d 脉冲（%d RPM）→ 收尾 %+d 脉冲（%d RPM）'
         % (AXIS_LABEL.get(int(axis), axis), main, rpm, tail, tail_rpm))
     rid = client.goto(axis, main, rpm=rpm)
