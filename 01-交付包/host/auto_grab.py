@@ -228,6 +228,12 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     """
     if not client.online:
         raise GrabError('还没连上控制板（右上角要显示「在线」）')
+    # 识别期间（可能十几秒）没有字节，固件 3 s link_timeout 会自动锁存停止；
+    # 每件开始时先清一次锁存，避免第一段 goto 被 E14 stopped 拒掉。
+    try:
+        clear_latch()
+    except Exception:                               # noqa: BLE001
+        pass
     x_pulse, y_pulse = target_xy(target, calib=calib)
     log('目标：%s → X %+.0f / Y %+.0f 脉冲' % (describe(target), x_pulse, y_pulse))
     if abs(x_pulse) > 30000 or abs(y_pulse) > 200000:

@@ -474,6 +474,32 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         except Exception:                           # noqa: BLE001
             return None
 
+    def _goto_wait(axis, tgt, rpm_i):
+        """闭环补走并**等它跑完**。client.goto() 只发不等，必须自己等回执。"""
+        try:
+            rid = client.goto(axis, tgt, rpm=rpm_i)
+        except Exception as exc:                    # noqa: BLE001
+            say('%s 补走下发异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
+            return False
+        wf = wait if wait is not None else getattr(client, 'wait_reply', None)
+        if wf is None:
+            say('%s 补走已下发（无回执可等）' % AXIS_LABEL.get(axis, axis))
+            return False
+        spd = min(max(1, int(rpm_i)), 274)
+        tmo = int(abs(int(tgt)) / 3200.0 / spd * 60000 * 3) + 8000
+        try:
+            rep = wf(rid, timeout_ms=tmo)
+        except Exception as exc:                    # noqa: BLE001
+            say('%s 补走等待异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
+            return False
+        pr = _pairs(rep) or {}
+        if not pr:
+            say('%s 补走：等回执超时（%d ms）' % (AXIS_LABEL.get(axis, axis), tmo))
+            return False
+        detail = ' '.join('%s=%s' % (k, pr[k]) for k in ('err', 'passes', 'elapsed_ms', 'reason') if k in pr)
+        say('%s 补走完成：%s' % (AXIS_LABEL.get(axis, axis), detail))
+        return True
+
     def read_counts():
         if counts_fn is None:
             return {}
@@ -524,14 +550,15 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 say('%s 并行：被拒绝 reason=%s' % (AXIS_LABEL.get(axis, axis), reason))
                 bad.append(axis)
                 continue
-            sec = abs(delta) / max(1.0, rpm_of(axis) * 3200.0 / 60.0)
+            eff_rpm = min(float(rpm_of(axis)), 1240.0)   # 驱动器实际封顶≈1240 rpm，按指令值估会等不够
+            sec = abs(delta) / max(1.0, eff_rpm * 3200.0 / 60.0)
             t_est = max(t_est, sec)
             plans.append((axis, tgt, delta))
             say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
         # 3) 等停稳：等满估算时长（含减速余量），再要求 **连续 3 次** 读数几乎不变
         if plans:
-            t_wait = min(8.0, t_est * 1.25 + 0.30)
+            t_wait = min(9.0, t_est * 1.35 + 0.50)
             t_end = time.monotonic() + t_wait
             while time.monotonic() < t_end:
                 time.sleep(0.05)
@@ -539,12 +566,12 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             prev = read_counts()
             stable = 0
             while time.monotonic() < hard:
-                time.sleep(0.12)
+                time.sleep(0.15)
                 now = read_counts()
                 if now and prev and all(
                         abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans):
                     stable += 1
-                    if stable >= 3:
+                    if stable >= 4:
                         prev = now
                         break
                 else:
@@ -560,22 +587,26 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 continue
             now_p = int(round(c / COUNTS_PER_PULSE))
             miss = tgt - now_p
-            # 读数滞后保护：残差几乎等于刚下发的整段位移 → 说明遥测还没刷新，别补走（否则会走过头）
-            if abs(miss) >= 0.85 * abs(delta) - 30:
+            # 读数滞后保护：只有"残差≈整段位移"（0.6~1.15 倍）才判遥测没刷新；
+            # 残差远大于位移 = 真的没到位，必须补走。
+            d = abs(int(delta))
+            if d >= 200 and (0.60 * d) <= abs(miss) <= (1.15 * d):
                 say('%s 并行：读数疑似滞后（残差 %+d ≈ 位移 %+d），跳过补走'
                     % (AXIS_LABEL.get(axis, axis), miss, delta))
                 continue
             if abs(miss) > max(60, int(tol_pulses)):
-                say('%s 并行残差 %+d 脉冲，顺序补一次' % (AXIS_LABEL.get(axis, axis), miss))
-                try:
-                    client.goto(axis, tgt, rpm=rpm_of(axis))
-                except Exception as exc:                # noqa: BLE001
-                    say('%s 顺序补走异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
+                # 补走前再确认一次：读数在 250 ms 内还在变就再等，避免"运动未停就补走"叠加位移
+                _prev = fin.get(axis)
+                for _k in range(4):
+                    time.sleep(0.12)
+                    _now = read_counts().get(axis)
+                    if _prev is None or _now is None or abs(_now - _prev) <= 24:
+                        break
+                    _prev = _now
+                say('%s 并行残差 %+d 脉冲，顺序补一次（等回执）' % (AXIS_LABEL.get(axis, axis), miss))
+                _goto_wait(axis, tgt, rpm_of(axis))
         for axis in bad:
-            try:
-                client.goto(axis, targets[axis], rpm=rpm_of(axis))
-            except Exception as exc:                    # noqa: BLE001
-                say('%s 顺序补走异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
+            _goto_wait(axis, targets[axis], rpm_of(axis))
 
         return [{'axis': a, 'pulses': targets[a], 'ok': True, 'code': '', 'text': '', 'pairs': {}}
                 for a in sorted(targets)]
