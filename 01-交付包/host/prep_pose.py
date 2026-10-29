@@ -526,34 +526,46 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 continue
             sec = abs(delta) / max(1.0, rpm_of(axis) * 3200.0 / 60.0)
             t_est = max(t_est, sec)
-            plans.append((axis, tgt))
+            plans.append((axis, tgt, delta))
             say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
-        # 3) 等停稳：先等估算时长的 90%，再要求两次读数几乎不变
+        # 3) 等停稳：等满估算时长（含减速余量），再要求 **连续 3 次** 读数几乎不变
         if plans:
-            t_end = time.monotonic() + min(6.0, t_est * 0.9 + 0.15)
+            t_wait = min(8.0, t_est * 1.25 + 0.30)
+            t_end = time.monotonic() + t_wait
             while time.monotonic() < t_end:
                 time.sleep(0.05)
-            hard = time.monotonic() + 2.0
+            hard = time.monotonic() + 3.0
             prev = read_counts()
+            stable = 0
             while time.monotonic() < hard:
-                time.sleep(0.10)
+                time.sleep(0.12)
                 now = read_counts()
                 if now and prev and all(
-                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 40 for a, _ in plans):
-                    prev = now
-                    break
+                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans):
+                    stable += 1
+                    if stable >= 3:
+                        prev = now
+                        break
+                else:
+                    stable = 0
                 prev = now or prev
+            say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
 
         # 4) 残差 > tol 的轴顺序补一次
         fin = read_counts()
-        for axis, tgt in plans:
+        for axis, tgt, delta in plans:
             c = fin.get(axis)
             if c is None:
                 continue
             now_p = int(round(c / COUNTS_PER_PULSE))
             miss = tgt - now_p
-            if abs(miss) > int(tol_pulses):
+            # 读数滞后保护：残差几乎等于刚下发的整段位移 → 说明遥测还没刷新，别补走（否则会走过头）
+            if abs(miss) >= 0.85 * abs(delta) - 30:
+                say('%s 并行：读数疑似滞后（残差 %+d ≈ 位移 %+d），跳过补走'
+                    % (AXIS_LABEL.get(axis, axis), miss, delta))
+                continue
+            if abs(miss) > max(60, int(tol_pulses)):
                 say('%s 并行残差 %+d 脉冲，顺序补一次' % (AXIS_LABEL.get(axis, axis), miss))
                 try:
                     client.goto(axis, tgt, rpm=rpm_of(axis))
