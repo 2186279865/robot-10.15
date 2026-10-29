@@ -234,6 +234,8 @@ class Screen:
         self.lb_cur.place(x=self.x(148), y=self.y(16))
         self.lb_time = self.lab(self.top, '00:00', size=28, mono=True, anchor='e', bg=PANEL)
         self.lb_time.place(x=W - self.x(492), y=self.y(12), width=self.x(150))
+        self._t_anchor = None
+        self.root.after(200, self._tick)
         self.lb_prog = self.lab(self.top, '已完成 0 / 0', size=22, anchor='e', bg=PANEL)
         self.lb_prog.place(x=W - self.x(336), y=self.y(15), width=self.x(184))
 
@@ -305,6 +307,7 @@ class Screen:
         elif kind == 'state':
             self.state = msg.get('state') or self.state
             self.elapsed = float(msg.get('elapsed_s') or self.elapsed or 0)
+            self._t_anchor = time.time() - self.elapsed
             self.done = int(msg.get('done') or self.done)
             self.total = int(msg.get('total') or self.total or 0)
             self.alerts = list(msg.get('alerts') or [])
@@ -366,6 +369,27 @@ class Screen:
             return '当前：%s' % label
         return ('当前：%s → %d 号盒' % (label, box)) if box else ('当前：%s' % label)
 
+    # ---------------------------------------------------------- 计时（本地走表）
+    def _clock_text(self) -> str:
+        """显示用时：以最近一次 state 的 elapsed_s 为锚点，叠加本地流逝，200 ms 刷新一次。"""
+        base = float(getattr(self, 'elapsed', 0.0) or 0.0)
+        anchor = getattr(self, '_t_anchor', None)
+        if anchor is not None and self.state in ('running', 'paused'):
+            base = max(base, time.time() - anchor)
+        m, sec = divmod(int(base), 60)
+        return '%02d:%02d' % (m, sec)
+
+    def _tick(self):
+        """只刷新时间文本，避免整屏重绘。"""
+        try:
+            self.lb_time.configure(text=self._clock_text())
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            self.root.after(200, self._tick)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def redraw(self):
         st = self.state if self.state in STATE_TEXT else 'idle'
         self.lb_state.configure(text=STATE_TEXT[st], fg=STATE_COLOR[st])
@@ -374,8 +398,7 @@ class Screen:
             self.lb_cur.configure(text=self._cur_text(), fg=FG)
         else:
             self.lb_cur.configure(text=self.last_event, fg=DIM)
-        m, sec = divmod(int(self.elapsed), 60)
-        self.lb_time.configure(text='%02d:%02d' % (m, sec))
+        self.lb_time.configure(text=self._clock_text())
         total = max(1, self.total or 0)
         self.lb_prog.configure(text='已完成 %d / %d' % (self.done, self.total or 0))
 

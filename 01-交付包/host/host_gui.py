@@ -1169,7 +1169,7 @@ class App:
                 return info
 
             self._disp_t0 = time.monotonic()
-            self.display.start_keepalive(5.0, _provider)
+            self.display.start_keepalive(1.0, _provider)
             self.note(f"派端比赛屏已连接：{host}:5059")
         except Exception as exc:                           # noqa: BLE001
             self.display = None

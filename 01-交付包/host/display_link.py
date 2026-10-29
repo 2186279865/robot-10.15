@@ -105,7 +105,7 @@ class DisplayLink:
     def alarm(self, text):
         self.push(kind='alarm', message=str(text)[:80])
 
-    def start_keepalive(self, interval_s=5.0, provider=None):
+    def start_keepalive(self, interval_s=1.0, provider=None):
         """赛题要求“超 15 s 无动作/无显示 → 本轮结束”，这里定时刷状态保活。
 
         provider() 返回 dict(done=, total=, elapsed_s=, status=, last_event=)；
