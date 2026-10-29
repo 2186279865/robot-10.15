@@ -365,6 +365,22 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
                 continue
             say('%s：目标 %+d 脉冲(%s counts)、回读 %d counts → 走 %+d 脉冲（%d RPM）'
                 % (title, target, format(want, ','), int(cur_counts), pulses, rpm))
+            # 基准一致性：counts 换算出的位置必须与界面软位置吻合，否则说明有轴被“部分清零”
+            try:
+                if soft is not None and bool((known or {}).get(axis, False)):
+                    _sp = float((soft or {}).get(axis, 0.0))
+                    _cp = float(cur_counts) / COUNTS_PER_PULSE
+                    if abs(_cp - _sp) > 500.0:
+                        item = {'key': key, 'axis': axis, 'pulses': 0, 'rpm': rpm, 'ok': False,
+                                'code': 'POS_INCONSISTENT',
+                                'text': '回读位置%+d 与软位置%+d 差 %+d 脉冲（基准不一致）'
+                                        % (int(_cp), int(_sp), int(_cp - _sp)),
+                                'pairs': {}}
+                        results.append(item)
+                        say('%s：基准不一致（回读 %+d / 软位置 %+d），先回 P0 重新清零' % (title, int(_cp), int(_sp)))
+                        return results
+            except Exception:                       # noqa: BLE001
+                pass
         elif soft is not None:
             cur_ok = bool((known or {}).get(axis, False))
             if not cur_ok:

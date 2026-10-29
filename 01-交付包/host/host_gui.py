@@ -1383,6 +1383,22 @@ class App:
             "确定现在是 P0？")
         if not ok:
             return
+        # 前置：四轴必须静止（遥测 rpm=0 且回读够新）。否则会出现“部分轴清零成功、
+        # 部分轴 E09 被拒”，四轴零点错位后每次按 counts 算增量都会跑偏（10-29 事故）。
+        _now = client.now_ms()
+        _moving = []
+        for addr, panel in self.axes.items():
+            rpm = getattr(panel, "last_rpm", None)
+            ts = getattr(panel, "last_counts_ms", 0) or 0
+            age = (_now - ts) if ts else 10 ** 9
+            if (rpm not in (0, None)) or age > 1500:
+                _moving.append("%s(rpm=%s, 回读 %s ms 前)" % (AXIS_LABELS[addr], rpm, age))
+        if _moving:
+            messagebox.showwarning(
+                "位置清零",
+                "有轴还在动或回读过期，先停止/等停稳再清零：\n" + "\n".join(_moving))
+            return
+
         for addr in AXIS_LABELS:
             try:
                 client.send("motor_zero", addr)
@@ -1395,8 +1411,29 @@ class App:
                 except Exception:                   # noqa: BLE001
                     pass
         self._log("位置清零已下发（4 轴）：X/Y/Z/托盘 当前位置 = 0")
+        self.root.after(1000, self._verify_zero_axes)
         self._log("如当前不在 P0，请用 tools\\calib_shift.py 平移标定，否则自动抓会走偏", "warn")
         self.root.after(800, self._init_report)
+
+    def _verify_zero_axes(self) -> None:
+        """清零后 1 s 核对四轴回读是否真的归零；不归零就明确告警并作废基准。"""
+        bad = []
+        for addr, panel in self.axes.items():
+            counts = getattr(panel, "last_counts", None)
+            if counts is None:
+                bad.append("%s 无回读" % AXIS_LABELS[addr])
+                continue
+            if abs(int(counts)) > 120:          # ±120 counts ≈ ±6 脉冲，容许一点抖动
+                bad.append("%s 回读 %d counts（未归零）" % (AXIS_LABELS[addr], int(counts)))
+                panel.reference_valid = False
+        if bad:
+            self._log("位置清零未完全生效：" + "；".join(bad) + " —— 请先停稳后重试", "warn")
+            messagebox.showwarning(
+                "位置清零未完全生效",
+                "以下轴没有归零（可能清零时仍在运动）：\n" + "\n".join(bad) +
+                "\n\n请停止后确认静止，再点一次「⚠ 位置清零」。")
+        else:
+            self._log("位置清零校验通过：四轴回读均接近 0")
 
     def clear_latch(self) -> None:
         """解除固件的停止锁存：按过停止（或发过 '!'）之后，必须显式解除才能继续跑运动。"""

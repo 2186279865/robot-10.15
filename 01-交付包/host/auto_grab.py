@@ -233,6 +233,19 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     if abs(x_pulse) > 30000 or abs(y_pulse) > 200000:
         raise GrabError('算出的目标超出合理范围（X %+.0f / Y %+.0f 脉冲），先检查标定'
                         % (x_pulse, y_pulse))
+    # 软限位硬夹（limits.json）：目标必须落在该轴允许区间内，否则直接拒绝，
+    # 避免“算出来的抓取点比通道末端还深 27k 脉冲”这类直接撞限位的指令。
+    try:
+        from motion_guard import load_limits as _load_limits, check_absolute as _check_abs
+        _lim = _load_limits()
+        for _ax, _val in ((AXIS_X, x_pulse), (AXIS_Y, y_pulse)):
+            _ok, _msg = _check_abs(_lim, _ax, _val)
+            if not _ok:
+                raise GrabError('抓取点超软限位：%s（先检查抓取点标定/零点）' % _msg)
+    except GrabError:
+        raise
+    except Exception:                                  # noqa: BLE001
+        pass
 
     def say(text: str) -> None:
         log('[自动抓] ' + text)
@@ -374,6 +387,20 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             fn(**kw)
         except Exception:                          # noqa: BLE001
             pass
+
+    # 连续抓前置自检：软位置与编码器回读必须一致（不一致=某个轴被“部分清零”，
+    # 继续跑就会按错位的 counts 算增量 → 跑偏/撞机）。
+    try:
+        from motion_guard import consistency as _consistency, describe_consistency as _describe
+        if pos_source is not None:
+            _soft, _known, _counts = pos_source()
+            _bad = _consistency(_soft, _counts)
+            if _bad:
+                raise GrabError('位置基准不一致（%s）：先手动回 P0，再点「⚠ 位置清零」' % _describe(_bad))
+    except GrabError:
+        raise
+    except Exception:                                  # noqa: BLE001
+        pass
 
     done = 0
     failed = 0
