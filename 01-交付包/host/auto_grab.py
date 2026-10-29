@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
@@ -260,7 +261,8 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
-             drop: bool = True, tray_deg: float = TRAY_DEG) -> Dict[str, object]:
+             drop: bool = True, tray_deg: float = TRAY_DEG,
+             tray_async: bool = False) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
     drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
@@ -391,6 +393,24 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
     time.sleep(SETTLE_GRAB_MS / 1000.0)
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
+
+    # 6b 拿着货就开始转盘：与下面的回程（X/Y 回 P1 → Z 降底 → Y 退 P0）并行，
+    #    省掉原来“到 P0 再慢慢转 4 秒”的时间；松爪前会 join，转不到位绝不松爪。
+    tray_job = None
+    tray_box: Dict[str, object] = {}
+    if drop and abs(tray_deg) >= 1.0 and tray_async:
+        def _tray_work():
+            try:
+                tray_box['res'] = tray_turn(
+                    client, tray_deg, say,
+                    counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
+            except Exception as exc:                    # noqa: BLE001
+                tray_box['err'] = exc
+
+        say('转盘 %+.0f° 后台开始（与回程并行，松爪前等它到位）' % tray_deg)
+        tray_job = threading.Thread(target=_tray_work, daemon=True)
+        tray_job.start()
+
     move_xy({AXIS_X: 0, AXIS_Y: P1_Y})                   # 7 只动 X/Y 回 P1（高位，并行）
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
     move({AXIS_Y: P0_Y}, [AXIS_Y])                      # 9 再退 Y 回 P0
@@ -399,10 +419,17 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         elapsed = time.perf_counter() - t0
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
                 'target': describe(target), 'dropped': False}
-    if abs(tray_deg) >= 1.0:
-        # 10 空盒转到落料位：**纯速度模式**（rpm=TRAY_RPM）。
-        # 不用 goto：goto 的 COARSE 段用 goto_rpm、SETTLE 后 CORRECT 段用 goto_final_rpm(60)，
-        # 停一下再猛补差 → 现场看到“结束时会猛转一下”。速度模式全程恒定。
+    if tray_job is not None:
+        # 10 等后台转盘到位（最多再等 TRAY_TIMEOUT_S+5 s）；失败/超时都不松爪
+        tray_job.join(timeout=TRAY_TIMEOUT_S + 5.0)
+        if tray_job.is_alive():
+            raise GrabError('转盘 %+.0f° 超过 %.0f s 还没转到位，暂不松爪（避免落错盒）'
+                            % (tray_deg, TRAY_TIMEOUT_S + 5.0))
+        if tray_box.get('err') is not None:
+            raise GrabError('转盘没转到位：%s（暂不松爪，避免落错盒）' % tray_box['err'])
+        say('转盘已到位（%+.0f°），可以松爪' % tray_deg)
+    elif abs(tray_deg) >= 1.0:
+        # 10 串行转（单件抓/未开 tray_async 时走这里）
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
     time.sleep(0.35)
@@ -537,9 +564,13 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 log('[连续抓] 分盒失败：%s（可在「连续抓」旁点「分盒清零」重来）' % exc)
                 emit('item_fail', i=i + 1, reason='分盒失败：%s' % exc)
                 break
-            deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
-            log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°）'
-                % (i + 1, key, box, deg))
+            # 最短路径：同类不转；异类转到目标盒；回旧盒走 |k|<=3 的那个方向
+            k = (int(box) - box_now) % BOX_COUNT
+            if k > BOX_COUNT // 2:
+                k -= BOX_COUNT
+            deg = k * BOX_STEP_DEG
+            log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°%s）'
+                % (i + 1, key, box, deg, '，同类不转' if k == 0 else ''))
 
         emit('target', i=i + 1, target=describe(target), key=key, box=box, deg=deg)
 
@@ -563,7 +594,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         one = None
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
-                           drop=drop, tray_deg=deg)
+                           drop=drop, tray_deg=deg, tray_async=True)
         except Exception as exc:                   # noqa: BLE001
             reason = str(exc)
             log('[连续抓] 第 %d 件失败：%s' % (i + 1, reason))
