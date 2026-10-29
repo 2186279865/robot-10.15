@@ -21,6 +21,7 @@
 - Z 抬升方向用负数（向上），与 `limits.json` 的口径一致。
 """
 from __future__ import annotations
+import time
 
 import json
 from pathlib import Path
@@ -435,97 +436,125 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
     return results
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=None,
-                 tol_pulses=8, timeout_s=3.5, acc=0):
-    """X/Y **一步并行**走位（两轴各自 motor_pos 同时下发，再按编码器闭环收口）。
+                 tol_pulses=8, timeout_s=3.5, acc=0, wait=None):
+    """X/Y **一步并行**走位：两轴各发一条 motor_pos（固件独立执行，同时动）。
 
-    与顺序 `move_abs` 的区别：X、Y 同时动，省掉一半时间。
-    安全兜底：
-      * 先放开 `speed_rpm_max`（出厂 300，否则 motor_pos 会回 reason=speed_limit）；
-      * 某轴被拒绝/超时 → 该轴改用顺序 goto 补齐；
-      * 收口用 `counts_fn()` 的**新鲜**读值（每 50 ms 轮询，连续 2 次误差 ≤ tol 才算稳）。
+    收口策略（关键）：GUI 的 telemetry 约 200 ms 一次，运动中按 counts 轮询会被旧值误导，
+    因此这里不靠"运动中实时判到位"，而是：
+      1) 用行程/转速估算运动时间 t_est；
+      2) 等 t_est*0.9 后，用"连续两次读数几乎不变"判断停稳（最多再等 2 s）；
+      3) 用停稳后的读数算残差，只有 > tol_pulses 的轴才顺序 goto 补一次。
     """
     say = log or (lambda _t: None)
     rpm_of = (lambda a: int(rpm.get(int(a), 1600))) if isinstance(rpm, dict) else (lambda a: int(rpm))
-    targets = {int(k): int(v) for k, v in targets.items() if int(v) is not None}
+    targets = {int(k): int(v) for k, v in targets.items() if v is not None}
 
-    # 0) 当前位置（没有 counts 就退回顺序走，保证不会盲走）
-    cur = {}
-    if counts_fn is not None:
+    def _pairs(rep):
+        """从回执里取 pairs（兼容 dict / {'pairs': dict}）。"""
+        if not rep:
+            return {}
+        if isinstance(rep, dict):
+            p = rep.get('pairs')
+            return p if isinstance(p, dict) else rep
+        return {}
+
+    def _snd(name, *args, timeout_ms=1500):
+        """发命令并等回执：优先用传入的 wait()，否则用 client.wait_reply（都没有就只发不等）。"""
+        rid = client.send(name, *args, timeout_ms=timeout_ms)
+        if wait is not None:
+            try:
+                return wait(rid, timeout_ms)
+            except Exception:                       # noqa: BLE001
+                return None
+        wr = getattr(client, 'wait_reply', None)
+        if wr is None:
+            return None
         try:
-            cur = counts_fn() or {}
-        except Exception:                               # noqa: BLE001
-            cur = {}
-    if not all(int(a) in cur for a in targets):
-        say('X/Y 并行：缺少编码器读值，退回顺序走位')
-        return move_abs(client, targets, order=sorted(targets), rpm=rpm, acc=acc,
-                        log=log, counts=counts, prep=False)
+            return wr(rid, timeout_ms=timeout_ms)
+        except Exception:                           # noqa: BLE001
+            return None
 
-    # 1) 放开速度上限
+    def read_counts():
+        if counts_fn is None:
+            return {}
+        try:
+            c = counts_fn() or {}
+        except Exception:                               # noqa: BLE001
+            return {}
+        out = {}
+        for k, v in c.items():
+            try:
+                out[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    cur = read_counts()
+    if not all(a in cur for a in targets):
+        say('X/Y 并行：没有编码器读数，退回顺序走位')
+        _c = dict(counts) if counts else None
+        return move_abs(client, targets, order=sorted(targets), rpm=rpm, acc=acc,
+                        log=log, wait=wait, counts=_c, prep=True)
+
+    # 1) 放开 speed_rpm_max
     old_max = None
     try:
-        rep = _call('param_get', 'speed_rpm_max', timeout_ms=800)
-        pr = _pairs(rep)
-        if pr and pr.get('value') not in (None, ''):
+        pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=800)) or {}
+        if pr.get('value') not in (None, ''):
             old_max = int(float(pr['value']))
-        need = max([rpm_of(a) for a in targets] + [abs(int(old_max or 300))])
+        need = max([rpm_of(a) for a in targets] + [int(old_max or 300)])
         if old_max is None or old_max < need:
-            _call('param_set', 'speed_rpm_max', max(need, 3200), timeout_ms=1200)
+            _snd('param_set', 'speed_rpm_max', max(need, 3200), timeout_ms=1200)
     except Exception:                                   # noqa: BLE001
         pass
 
-    plans, bad = [], []
+    plans, bad, t_est = [], [], 0.0
     try:
-        # 2) 两轴同时下发（每轴一条 motor_pos，固件各自独立执行）
+        # 2) 两轴同时下发
         for axis, tgt in targets.items():
-            now_p = int(round(float(cur[axis]) / COUNTS_PER_PULSE))
+            now_p = int(round(cur[axis] / COUNTS_PER_PULSE))
             delta = tgt - now_p
             if delta == 0:
                 continue
-            dirn = 1 if delta < 0 else 0
-            r = _call('motor_pos', axis, dirn, rpm_of(axis), int(acc), abs(delta), 'rel',
-                      timeout_ms=1500)
-            pr = _pairs(r)
-            reason = str(pr.get('reason') or '') if pr else ''
+            r = _snd('motor_pos', axis, 1 if delta < 0 else 0, rpm_of(axis), int(acc),
+                     abs(delta), 'rel', timeout_ms=1500)
+            pr = _pairs(r) or {}
+            reason = str(pr.get('reason') or '')
             if reason:
                 say('%s 并行：被拒绝 reason=%s' % (AXIS_LABEL.get(axis, axis), reason))
                 bad.append(axis)
-            else:
-                say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
-                plans.append((axis, tgt))
+                continue
+            sec = abs(delta) / max(1.0, rpm_of(axis) * 3200.0 / 60.0)
+            t_est = max(t_est, sec)
+            plans.append((axis, tgt))
+            say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
-        # 3) 闭环收口：两轴都到目标（用新鲜 counts）
-        if plans and counts_fn is not None:
-            tgt_counts = {a: t * COUNTS_PER_PULSE for a, t in plans}
-            deadline = time.monotonic() + float(timeout_s) + 2.0
-            quiet = 0
-            while time.monotonic() < deadline:
+        # 3) 等停稳：先等估算时长的 90%，再要求两次读数几乎不变
+        if plans:
+            t_end = time.monotonic() + min(6.0, t_est * 0.9 + 0.15)
+            while time.monotonic() < t_end:
                 time.sleep(0.05)
-                try:
-                    cur2 = counts_fn() or {}
-                except Exception:                       # noqa: BLE001
-                    cur2 = {}
-                left = []
-                for a in tgt_counts:
-                    c = cur2.get(a)
-                    left.append(999999 if c is None else abs(tgt_counts[a] - float(c)))
-                if max(left) <= 40:
-                    quiet += 1
-                    if quiet >= 2:
-                        break
-                else:
-                    quiet = 0
+            hard = time.monotonic() + 2.0
+            prev = read_counts()
+            while time.monotonic() < hard:
+                time.sleep(0.10)
+                now = read_counts()
+                if now and prev and all(
+                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 40 for a, _ in plans):
+                    prev = now
+                    break
+                prev = now or prev
 
-        # 4) 仍不达标的轴（或多轴被拒）→ 顺序 goto 补齐（闭环可靠）
-        cur3 = {}
-        try:
-            cur3 = counts_fn() or {} if counts_fn is not None else {}
-        except Exception:                               # noqa: BLE001
-            cur3 = {}
+        # 4) 残差 > tol 的轴顺序补一次
+        fin = read_counts()
         for axis, tgt in plans:
-            c = cur3.get(axis)
-            now_p = int(round(float(c) / COUNTS_PER_PULSE)) if c is not None else None
-            if now_p is None or abs(tgt - now_p) > int(tol_pulses):
-                say('%s 并行收口未达标，顺序补走' % AXIS_LABEL.get(axis, axis))
+            c = fin.get(axis)
+            if c is None:
+                continue
+            now_p = int(round(c / COUNTS_PER_PULSE))
+            miss = tgt - now_p
+            if abs(miss) > int(tol_pulses):
+                say('%s 并行残差 %+d 脉冲，顺序补一次' % (AXIS_LABEL.get(axis, axis), miss))
                 try:
                     client.goto(axis, tgt, rpm=rpm_of(axis))
                 except Exception as exc:                # noqa: BLE001
@@ -541,7 +570,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
     finally:
         if old_max is not None:
             try:
-                _call('param_set', 'speed_rpm_max', int(old_max), timeout_ms=800)
+                _snd('param_set', 'speed_rpm_max', int(old_max), timeout_ms=800)
             except Exception:                           # noqa: BLE001
                 pass
 

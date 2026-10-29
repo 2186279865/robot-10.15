@@ -289,11 +289,14 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     # 3 到物块上方：X/Y **一步并行**（两轴各发一条 motor_pos，固件独立执行；
     #   host_goto 只有单槽、并行 goto 会 E09，所以这里用 motor_pos 而不是 goto）。
     #   收口由 move_xy_fast 按新鲜编码器读数轮询，不达标的轴再顺序补一次 goto。
-    _cnt0 = _live_counts()
+    soft0, known0, _cnt0 = pos()
+    _cnt0 = _cnt0 or _live_counts()
     if _cnt0.get(AXIS_X) is not None and _cnt0.get(AXIS_Y) is not None:
         say('X/Y 并行到物块上方（一步走）')
         prep_pose.move_xy_fast(client, {AXIS_X: x_pulse, AXIS_Y: y_pulse},
-                               rpm=RPM, log=say, counts_fn=_live_counts, acc=_ACC_DEFAULT)
+                               rpm=RPM, log=say, counts=_cnt0, wait=wait,
+                               counts_fn=lambda: (pos()[2] or _live_counts()),
+                               acc=_ACC_DEFAULT)
     else:
         move({AXIS_X: x_pulse, AXIS_Y: y_pulse}, [AXIS_X, AXIS_Y])
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 4 Z 降底 = 抓取位
