@@ -59,6 +59,7 @@ _ACC_DEFAULT = 0            # 加速度档：0 = 最快（现场实测 acc=1 约
 TRAY_RPM = 6              # 转盘转速（5 很稳、6 略快且顺；10 会甩货）
 TRAY_BRAKE_S = 0.18        # 速度模式刹车提前量（秒）
 TRAY_TOL_PULSES = 50      # 停车后残差容忍（脉冲）
+TRAY_AUTOSCALE = False        # True 时才按“实测一半”自动 ×2 改 tray_scale（容易被 counts 误导，默认关）
 TRAY_ACC = 1                  # 位置模式加速度档：1 = 驱动器慢斜坡（转盘惯性大，必须用这个）
 TRAY_VERIFY_TOL_PULSES = 40   # 停车后残差超过多少脉冲才补一次
 TRAY_WAIT_EXTRA_S = 1.2       # acc=1 斜坡很慢，估算时长之外再多等这么久
@@ -239,8 +240,8 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
     log('[转盘] 实测 %.0f 脉冲（目标 %.0f，残差 %+.0f ≈ %+.1f°），用时 %.2f s'
         % (moved, target, resid, resid / max(1e-6, scale) / 3200.0 * 360.0, el))
 
-    # 只走到一半 → 比例不对，自动 ×2
-    if 0.35 < moved / max(1.0, target) < 0.65 and target >= 200:
+    # 只走到一半 → 比例不对，自动 ×2（默认关闭：实测表明该判据会被 counts 误导，改成人工定标）
+    if TRAY_AUTOSCALE and 0.35 < moved / max(1.0, target) < 0.65 and target >= 200:
         scale = min(8.0, scale * 2.0)
         _save_scale(scale)
         log('[转盘] 实测只有约一半 → 脉冲比例自动改为 %.3g（已存盘，下次生效）' % scale)
