@@ -673,13 +673,47 @@ class CalibTab(ttk.Frame):
                 time.sleep(0.05)
             return None
 
+        disp = getattr(self.app, 'display', None)
+        _shape = str(target.get('shape') or '—')
+        _color = str(target.get('color') or '')
+        try:
+            import box_map as _BM
+            _key = str(target.get('class_key') or '')
+            if not _key:
+                _key = '%s|%s' % (target.get('shape') or '?', target.get('color') or '?')
+            _box = int(_BM.lookup(_key) or 1)
+        except Exception:                             # noqa: BLE001
+            _box = int(target.get('box') or 1)
+        try:
+            if disp is not None:
+                disp.item(seq=1, name=_shape, color=_color, box=_box,
+                          box_label='%d 号盒' % _box, total_done=0,
+                          last_event='第 1 件：%s %s → %d 号盒' % (_shape, _color, _box))
+                disp.state(done=0, total=1, status='running',
+                           last_event='正在抓第 1 件')
+        except Exception:                             # noqa: BLE001
+            pass
+        _ok = False
         try:
             AG.run_once(client, target, log=lambda t: self.after(0, self.say, t),
                         wait=waiter, pos_source=self._pos_source, drop=drop)
+            _ok = True
         except Exception as exc:                      # noqa: BLE001
             self.after(0, self.say, '自动抓一件失败：%s: %s'
                        % (type(exc).__name__, exc))
         finally:
+            try:
+                if disp is not None:
+                    if _ok:
+                        disp.item_done(seq=1, total_done=1, ok=True,
+                                       last_event='第 1 件已入 %d 号盒' % _box)
+                        disp.state(done=1, total=1, status='running',
+                                   last_event='已完成 1 件')
+                        self.app._disp_done, self.app._disp_total = 1, 1
+                    else:
+                        disp.alarm(text='第 1 件失败')
+            except Exception:                         # noqa: BLE001
+                pass
             self._prep_running = False
             self.after(0, self._refresh_pos)
 

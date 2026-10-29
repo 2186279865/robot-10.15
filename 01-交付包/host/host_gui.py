@@ -1137,20 +1137,36 @@ class App:
         if not m:
             return
         host = m.group(1)
+        if not hasattr(self, '_disp_done'):
+            self._disp_done = 0
+            self._disp_total = 0
+            self._disp_last_event = ''
         self._stop_display()
         try:
             self.display = display_link.DisplayLink(host, verbose=False)
             self.display.start()
 
             def _provider():
+                # 优先用“最近一次推送记下的进度”，否则先用连续抓计数；
+                # 都没有就保持上一次的值（绝不把屏上计数刷回 0/0）
                 done = total = 0
                 try:
-                    done = int(getattr(self.calib_tab, '_many_done', 0) or 0)
-                    total = int(getattr(self.calib_tab, '_many_total', 0) or 0)
+                    done = int(getattr(self, '_disp_done', 0) or 0)
+                    total = int(getattr(self, '_disp_total', 0) or 0)
                 except Exception:                          # noqa: BLE001
                     pass
-                return {'done': done, 'total': total, 'status': 'running',
+                if not total:
+                    try:
+                        done = int(getattr(self.calib_tab, '_many_done', 0) or 0)
+                        total = int(getattr(self.calib_tab, '_many_total', 0) or 0)
+                    except Exception:                      # noqa: BLE001
+                        pass
+                info = {'done': done, 'total': total, 'status': 'running',
                         'elapsed_s': time.monotonic() - self._disp_t0}
+                last = getattr(self, '_disp_last_event', '')
+                if last:
+                    info['last_event'] = last
+                return info
 
             self._disp_t0 = time.monotonic()
             self.display.start_keepalive(5.0, _provider)
