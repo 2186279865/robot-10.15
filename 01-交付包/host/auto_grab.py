@@ -337,26 +337,41 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
             'target': describe(target)}
 
 
+def pick_order(targets: Iterable[dict]) -> List[dict]:
+    """把一次识别的结果按 pick_target 的同一优先级排成队列（置信度→面积→v→u）。"""
+    def key(t: dict):
+        try:
+            conf = float(t.get('confidence') or 0.0)
+        except Exception:                      # noqa: BLE001
+            conf = 0.0
+        try:
+            area = float(t.get('area_px') or 0.0)
+        except Exception:                      # noqa: BLE001
+            area = 0.0
+        try:
+            u, v = t['center_tray']
+        except Exception:                      # noqa: BLE001
+            return (-conf, -area, 9.9, 9.9)
+        return (-conf, -area, float(v), float(u))
+    return sorted([t for t in targets if t.get('center_tray')], key=key)
+
+
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
              stop_flag: Optional[Callable[[], bool]] = None,
              current_box: int = 1,
              on_event: Optional[Callable[[dict], None]] = None,
-             display=None, warp_path=None, total: Optional[int] = None) -> Dict[str, object]:
-    """连续抓 N 件：每件都"重新识别 → 挑目标 → 走一遍 run_once"。
+             display=None, warp_path=None, total: Optional[int] = None,
+             recognize_each: bool = False, retry_once: bool = True) -> Dict[str, object]:
+    """连续抓 N 件——流程与「自动抓一件」完全一致，只是外面套了一层循环。
 
-    recognize() 由 GUI 传入（阻塞式单次识别，返回值得能从中读 latest_targets.json），
-    本函数每轮调用一次，然后重新读 targets 文件挑目标——这样后一件不会去抓
-    已经被拿走的那件（它的 u,v 已经从画面里消失）。
+    与旧版的区别只在“什么时候识别”：
+      * 默认 recognize_each=False：一次识别拿到清单，逐件消费，队列空了再识别；
+      * recognize_each=True：退回旧行为（每件都重新识别一次），现场可随时切。
 
-    drop=True 时每件都会执行"转盘 60° + 松爪"，物块按 6 个盒位轮流落；
-    stop_flag() 返回 True 时在当前件结束后停下（界面的「停止全部」也能中断）。
-
-    display：可选，`display_link.DisplayLink` 实例，用于把"第 N 件/类别/盒号/缩略图"
-    推给派端 1024×600 比赛屏（赛题要求显示序号、名称、图片、总数量）。
+    每件调用一次 run_once()，因此动作序列、护栏、日志格式与单件完全相同。
     """
     def emit(kind, **kw):
-        """给界面/日志用的事件回调（异常一律吞掉，绝不影响抓取）。"""
         if on_event is None:
             return
         try:
@@ -367,11 +382,17 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             pass
 
     def say_display(fn, **kw):
-        """推给派端屏；任何异常都吞掉（屏只是展示，绝不能影响抓取）。"""
         if fn is None:
             return
         try:
             fn(**kw)
+        except Exception:                          # noqa: BLE001
+            pass
+
+    def clear_latch():
+        """失败后清锁存，避免下一件一开始就 E10/E14。"""
+        try:
+            client.send('stop_clear', timeout_ms=1500)
         except Exception:                          # noqa: BLE001
             pass
 
@@ -381,76 +402,132 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     results: List[Dict[str, object]] = []
     box_now = int(current_box) if 1 <= int(current_box) <= BOX_COUNT else 1
     total_n = int(total or count)
-    log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 6 盒，每盒 60°）' % box_now)
+    pending: List[dict] = []
+
+    log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 %d 盒，每盒 %d°）'
+        % (box_now, BOX_COUNT, int(BOX_STEP_DEG)))
+    log('[连续抓] 模式：%s；每件都走与「自动抓一件」相同的 run_once'
+        % ('每件重新识别' if recognize_each else '一次识别→队列逐件'))
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
                 status='running', last_event='开始连续抓 %d 件' % count)
+
     for i in range(max(0, int(count))):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
             emit('stopped', i=i + 1)
             break
-        log('=== 第 %d/%d 件：单次识别 ===' % (i + 1, count))
         emit('item_start', i=i + 1, n=count)
-        try:
-            recognize()
-        except Exception as exc:                       # noqa: BLE001
-            failed += 1
-            log('[连续抓] 第 %d 件识别失败：%s' % (i + 1, exc))
-            emit('item_fail', i=i + 1, reason='识别失败：%s' % exc)
-            break
-        targets = load_targets()
-        if not targets:
-            log('[连续抓] 画面里没有可抓的物块了，结束（已抓 %d 件）' % done)
-            emit('item_fail', i=i + 1, reason='没有可抓的物块')
-            break
-        try:
-            target = pick_target(targets)
-        except GrabError as exc:
-            log('[连续抓] 挑目标失败：%s' % exc)
-            emit('item_fail', i=i + 1, reason='挑目标失败：%s' % exc)
-            break
+
+        # ---- 取下一件：优先用已有清单，空了（或要求每件识别）才识别 ----
+        target = None
+        if pending and not recognize_each:
+            target = pending.pop(0)
+            log('=== 第 %d/%d 件：用已识别清单（剩 %d 件待抓）==='
+                % (i + 1, count, len(pending) + 1))
+        else:
+            log('=== 第 %d/%d 件：单次识别 ===' % (i + 1, count))
+            try:
+                recognize()
+            except Exception as exc:               # noqa: BLE001
+                failed += 1
+                log('[连续抓] 第 %d 件识别失败：%s' % (i + 1, exc))
+                emit('item_fail', i=i + 1, reason='识别失败：%s' % exc)
+                break
+            targets = load_targets()
+            if not targets:
+                log('[连续抓] 画面里没有可抓的物块了，结束（已抓 %d 件）' % done)
+                emit('item_fail', i=i + 1, reason='没有可抓的物块')
+                break
+            ordered = pick_order(targets)
+            if not ordered:
+                log('[连续抓] 识别结果里没有带坐标的目标，结束')
+                break
+            target = ordered.pop(0)
+            pending = ordered
+
         key = class_key(target)
-        try:
-            box = BM.assign(key) if drop else 0
-        except ValueError as exc:
-            failed += 1
-            log('[连续抓] 分盒失败：%s（可在「连续抓」旁点「分盒清零」重来）' % exc)
-            break
+        box = 0
         deg = 0.0
         if drop:
+            try:
+                box = BM.assign(key)
+            except ValueError as exc:
+                failed += 1
+                log('[连续抓] 分盒失败：%s（可在「连续抓」旁点「分盒清零」重来）' % exc)
+                emit('item_fail', i=i + 1, reason='分盒失败：%s' % exc)
+                break
             deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
             log('[连续抓] 第 %d 件类别 %s → %d 号盒（转盘 %+.0f°）'
                 % (i + 1, key, box, deg))
+
         emit('target', i=i + 1, target=describe(target), key=key, box=box, deg=deg)
+
+        # ---- 派端屏：这一件叫什么、进几号盒 ----
         _shape = str(target.get('shape') or '—')
         _color = str(target.get('color') or '')
-        _name = (_shape + ' ' + _color).strip()
         _label = ('%d 号盒' % box) if box else ''
         _thumb = None
         if warp_path is not None and display is not None:
             _bbox = target.get('bbox_warped') or target.get('bbox') or target.get('bbox_orig')
-            _thumb = display_link.DisplayLink.thumb_b64(warp_path, _bbox)
-        say_display(getattr(display, 'item', None), seq=i + 1, name=_shape, color=_color, box=box,
-                    box_label=_label, total_done=done, thumb_b64=_thumb,
-                    last_event='第 %d 件：%s → %s' % (i + 1, _name, _label or '抓取位'))
+            try:
+                _thumb = display_link.DisplayLink.thumb_b64(warp_path, _bbox)
+            except Exception:                      # noqa: BLE001
+                _thumb = None
+        say_display(getattr(display, 'item', None), seq=i + 1, name=_shape, color=_color,
+                    box=box, box_label=_label, total_done=done, thumb_b64=_thumb,
+                    last_event='第 %d 件：%s %s → %s'
+                               % (i + 1, _shape, _color, _label or '抓取位'))
+
+        # ---- 执行：与手动「自动抓一件」同一段代码 ----
+        one = None
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
                            drop=drop, tray_deg=deg)
-        except GrabError as exc:
-            failed += 1
-            log('[连续抓] 第 %d 件失败：%s' % (i + 1, exc))
-            emit('item_fail', i=i + 1, reason=str(exc))
-            say_display(getattr(display, 'alarm', None), text='第 %d 件失败：%s' % (i + 1, exc))
-            break
-        except Exception as exc:                       # noqa: BLE001
-            failed += 1
-            log('[连续抓] 第 %d 件异常：%s: %s' % (i + 1, type(exc).__name__, exc))
-            emit('item_fail', i=i + 1, reason='%s: %s' % (type(exc).__name__, exc))
-            break
+        except Exception as exc:                   # noqa: BLE001
+            reason = str(exc)
+            log('[连续抓] 第 %d 件失败：%s' % (i + 1, reason))
+            if retry_once:
+                # 重试前重新识别一次：失败往往伴随“实际位置与清单不一致”
+                # （抓空、被碰移位），用新坐标重试比死磕旧坐标稳。
+                log('[连续抓] 清锁存 → 重新识别 → 重试这一件（只重试一次）')
+                clear_latch()
+                time.sleep(0.4)
+                try:
+                    recognize()
+                    fresh = load_targets()
+                    if fresh:
+                        pending = pick_order(fresh)
+                        if pending:
+                            target = pending.pop(0)
+                            key = class_key(target)
+                            if drop:
+                                box = BM.assign(key)
+                                deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
+                            log('[连续抓] 重试用新目标：%s' % describe(target))
+                except Exception as exc_r:         # noqa: BLE001
+                    log('[连续抓] 重试前识别失败（沿用旧坐标）：%s' % exc_r)
+                try:
+                    one = run_once(client, target, log=log, wait=wait,
+                                   pos_source=pos_source, drop=drop, tray_deg=deg)
+                    log('[连续抓] 第 %d 件重试成功' % (i + 1))
+                except Exception as exc2:          # noqa: BLE001
+                    failed += 1
+                    log('[连续抓] 第 %d 件重试仍失败：%s' % (i + 1, exc2))
+                    emit('item_fail', i=i + 1, reason='%s（重试：%s）' % (reason, exc2))
+                    say_display(getattr(display, 'alarm', None),
+                                text='第 %d 件失败：%s' % (i + 1, exc2))
+                    break
+            else:
+                failed += 1
+                emit('item_fail', i=i + 1, reason=reason)
+                say_display(getattr(display, 'alarm', None),
+                            text='第 %d 件失败：%s' % (i + 1, reason))
+                break
+
         done += 1
         if drop:
             box_now = int(box)
-        results.append(one)
+        results.append(one or {})
         log('[连续抓] 第 %d 件完成（累计 %d 件）' % (i + 1, done))
         emit('item_ok', i=i + 1, res=one, box=box)
         say_display(getattr(display, 'item_done', None), seq=i + 1, total_done=done, ok=True,
@@ -458,6 +535,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         say_display(getattr(display, 'state', None), done=done, total=total_n,
                     elapsed_s=time.perf_counter() - started, status='running',
                     last_event='已完成 %d 件' % done)
+
     elapsed = time.perf_counter() - started
     log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
         % (done, failed, elapsed, BM.describe()))

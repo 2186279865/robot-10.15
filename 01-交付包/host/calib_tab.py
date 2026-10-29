@@ -719,7 +719,7 @@ class CalibTab(ttk.Frame):
 
     # ------------------------------------------------------- 一键走出固定路线
     def on_auto_many(self):
-        """连续抓 N 件：每件都重新识别，按 drop 勾选决定是否落货。"""
+        """连续抓 N 件：一次识别→队列逐件；每件都走与「自动抓一件」相同的 run_once。"""
         try:
             self._on_auto_many()
         except Exception as exc:                       # noqa: BLE001
@@ -804,12 +804,12 @@ class CalibTab(ttk.Frame):
             self.drop_var.set(True)
             drop = True
             self.say('连续抓必须落货，已自动勾选「抓完落货（转盘60°+松爪）」')
-        self.say('连续抓 %d 件（含转盘 60° + 松爪），每件重新识别，失败即停；'
-                 '急停请点顶部「停止全部」' % count)
+        self.say('连续抓 %d 件（含转盘 60° + 松爪）：一次识别排队逐件，每件流程与「自动抓一件」相同；'
+                 '单件失败会重新识别并重试一次；急停请点顶部「停止全部」' % count)
         self._prep_running = True
         self._many_stop = False
         self._set_many_state(True, '连续抓：启动中…（%d 件）' % count)
-        self.say('▶ 开始连续抓 %d 件（每件重新识别，失败即停）' % count)
+        self.say('▶ 开始连续抓 %d 件（一次识别→队列逐件，失败重试一次）' % count)
         self._many_thread = threading.Thread(
             target=self._many_worker, args=(client, vision, count, drop), daemon=True)
         self._many_thread.start()
