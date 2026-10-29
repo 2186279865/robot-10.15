@@ -251,8 +251,7 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
             except Exception as exc:                  # noqa: BLE001
                 say('%s：软启动失败（%s），改为直接全速' % (label, exc))
         try:
-            req = client.goto(axis, pulses, rpm=rpm_i)
-            rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
+            rep = goto_smooth(client, axis, pulses, rpm_i, acc=acc, say=say, waiter=waiter)
         except Exception as exc:                      # noqa: BLE001
             item['code'] = 'EXC'
             item['text'] = '%s: %s' % (type(exc).__name__, exc)
@@ -607,3 +606,37 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
         if not item['ok']:
             return results
     return results
+
+#: 末段减速：长行程最后 TAIL_PULSES 脉冲改用慢速走，让“停车”不再是急刹。
+#: 代价约 0.2-0.4 s/次；TAIL_RPM_RATIO 越小越柔、越慢。
+TAIL_PULSES = 700
+TAIL_RPM_RATIO = 0.35
+TAIL_MIN_RPM = 300
+
+
+def goto_smooth(client, axis, pulses, rpm, acc=0, say=None, waiter=None):
+    """把一次长行程拆成「全速主体 + 慢速收尾」，减小停车冲击。
+
+    返回最后一次的应答（dict 或 None），与 client.goto 的语义一致：
+    调用方只看 kind/code/pairs。
+    """
+    say = say or (lambda _t: None)
+    waiter = waiter or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
+    n = int(pulses)
+    rpm = int(rpm)
+    if abs(n) < 3000 or rpm < 800:
+        rid = client.goto(axis, n, rpm=rpm)
+        return waiter(rid, estimate_timeout_ms(n, rpm))
+
+    sign = 1 if n > 0 else -1
+    tail = sign * TAIL_PULSES
+    main = n - tail
+    tail_rpm = max(TAIL_MIN_RPM, int(rpm * TAIL_RPM_RATIO))
+    say('%s：全速 %+d 脉冲（%d RPM）→ 收尾 %+d 脉冲（%d RPM）'
+        % (AXIS_LABEL.get(int(axis), axis), main, rpm, tail, tail_rpm))
+    rid = client.goto(axis, main, rpm=rpm)
+    rep = waiter(rid, estimate_timeout_ms(main, rpm))
+    if rep is None or rep.get('code'):
+        return rep
+    rid = client.goto(axis, tail, rpm=tail_rpm)
+    return waiter(rid, estimate_timeout_ms(tail, tail_rpm))

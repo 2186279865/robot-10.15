@@ -114,16 +114,23 @@ class SequenceTest(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertAlmostEqual(result['elapsed'] >= 0, True)
 
-        axes = [c[1][0] for c in client.gotos() if c[1][0] != AG.AXIS_TRAY]  # 转盘单独校验
+        # 末段减速会把一段长行程拆成“主体 + 收尾”两次 goto，
+        # 校验顺序时把收尾段（|pulses| == TAIL_PULSES）忽略。
+        tail = int(AG.prep_pose.TAIL_PULSES)
+        axes = [c[1][0] for c in client.gotos()
+                if c[1][0] != AG.AXIS_TRAY and abs(int(c[1][1])) != tail]  # 转盘单独校验
         # 顺序（固定路线硬规矩：穿通道时 Z 必须在底部）：
         # Y 进通道 → Z 抬顶 → X/Y 对准 → Z 降底 → Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0
         self.assertEqual(axes, [5, 1, 4, 5, 1, 1, 4, 5, 1, 5])
 
-        z_gotos = [c[1][1] for c in client.gotos() if c[1][0] == 1]
+        _tail = int(AG.prep_pose.TAIL_PULSES)
+        z_gotos = [c[1][1] for c in client.gotos()
+                   if c[1][0] == 1 and abs(int(c[1][1])) != _tail]
         # 长行程会先发 200 脉冲“软启动垫片”（motor_pos），所以 goto 的增量少 200
         # 软启动垫片（每段 200 脉冲）会让 goto 增量少 0~400，这里放宽到 ±500
         import prep_pose as _PP
-        tol = _PP.SOFT_PULSES * 3                      # 软启动垫片会让 goto 增量少 0~3x
+        # 软启动垫片（0~3×SOFT_PULSES）与末段减速收尾（TAIL_PULSES）都会让 goto 增量变短
+        tol = _PP.SOFT_PULSES * 3 + int(_PP.TAIL_PULSES)
         self.assertLessEqual(abs(z_gotos[0] - AG.Z_UP), tol)                 # 抬到顶
         self.assertLessEqual(abs(z_gotos[1] - (AG.Z_DOWN - AG.Z_UP)), tol)   # 降到抓取位
         import prep_pose as _PP2
