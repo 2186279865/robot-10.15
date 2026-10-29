@@ -581,6 +581,10 @@ class App:
         ttk.Label(row, text="固定位置：").pack(side="left")
         ttk.Button(row, text="托盘角度清零", width=12,
                    command=self._tray_angle_zero).pack(side="left", padx=(10, 2))
+        ttk.Button(row, text="转盘 +60°", width=10,
+                   command=lambda: self._tray_step(60)).pack(side="left", padx=2)
+        ttk.Button(row, text="转盘 -60°", width=10,
+                   command=lambda: self._tray_step(-60)).pack(side="left", padx=2)
         for key, text in (("p1", "回 P1"), ("z_up", "Z 抬顶"), ("z_down", "Z 降底"),
                           ("to_p1", "走通道(P1)"), ("to_p0", "退通道(P0)")):
             ttk.Button(row, text=text, width=11,
@@ -592,6 +596,30 @@ class App:
         ttk.Checkbutton(row, text="高级（接近段示教 / 回初始位）",
                         variable=self.axes_adv,
                         command=self._toggle_axes_adv).pack(side="right")
+
+    def _tray_step(self, deg: float) -> None:
+        """用 auto_grab.tray_turn（速度模式匀速 + 到点刹车）手动转 deg 度。
+
+        用于现场验证顺滑度与对位：+60° 走一个盒，-60° 退回一个盒。
+        """
+        client = getattr(self, 'client', None)
+        if client is None or not getattr(client, 'online', False):
+            self.note("未连接：先点「连接」")
+            return
+        import auto_grab as _AG
+
+        panel = (getattr(self, 'axes', None) or {}).get(_AG.AXIS_TRAY)
+
+        def _cnt():
+            c = None if panel is None else panel.last_counts
+            return None if c is None else {_AG.AXIS_TRAY: c}
+
+        try:
+            self.note("转盘 %+.0f°（速度模式）开始" % deg)
+            res = _AG.tray_turn(client, deg, log=self.note, counts_get=_cnt)
+            self.note("转盘 %+.0f° 完成：%s" % (deg, res))
+        except Exception as exc:                       # noqa: BLE001
+            self.note("转盘转动失败：%s" % (exc,))
 
     def _tray_angle_zero(self) -> None:
         """把转盘当前位置定义为角度 0°（motor_angle_zero，仅供角度模式调试用）。"""
