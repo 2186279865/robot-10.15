@@ -286,9 +286,16 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     # 不能在初始位先把 Z 抬起来（会顶到托盘/横梁）。
     move({AXIS_Y: P1_Y}, [AXIS_Y])                      # 1 Y 进通道（Z 仍在底）
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 2 在通道末端抬到顶
-    # 3 到物块上方：X/Y 顺序走（回到 07:15 的做法——固件 host_goto 只有单槽，
-    #   并行会 E09；move() 内部会做一次基准预置再逐轴闭环 goto，误差 <=goto_tol_counts。
-    move({AXIS_X: x_pulse, AXIS_Y: y_pulse}, [AXIS_X, AXIS_Y])
+    # 3 到物块上方：X/Y **一步并行**（两轴各发一条 motor_pos，固件独立执行；
+    #   host_goto 只有单槽、并行 goto 会 E09，所以这里用 motor_pos 而不是 goto）。
+    #   收口由 move_xy_fast 按新鲜编码器读数轮询，不达标的轴再顺序补一次 goto。
+    _cnt0 = _live_counts()
+    if _cnt0.get(AXIS_X) is not None and _cnt0.get(AXIS_Y) is not None:
+        say('X/Y 并行到物块上方（一步走）')
+        prep_pose.move_xy_fast(client, {AXIS_X: x_pulse, AXIS_Y: y_pulse},
+                               rpm=RPM, log=say, counts_fn=_live_counts, acc=_ACC_DEFAULT)
+    else:
+        move({AXIS_X: x_pulse, AXIS_Y: y_pulse}, [AXIS_X, AXIS_Y])
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 4 Z 降底 = 抓取位
     say('夹紧 135°')
     client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
