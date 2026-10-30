@@ -219,6 +219,13 @@ class RunTab(ttk.Frame):
             return None, vis
 
     def _tick(self) -> None:
+        # 连续抓线程结束后复位 _busy，否则第二次点「一键启动」会误报“正在执行”
+        if self._busy:
+            _c = (getattr(self.app, "calib_tab", None) or getattr(self.app, "calib", None))
+            _th = getattr(_c, "_many_thread", None) if _c is not None else None
+            if _c is not None and not getattr(_c, "_prep_running", False) \
+                    and (_th is None or not _th.is_alive()):
+                self._busy = False
         try:
             frame, vis = self._frames()
             if frame is None:
