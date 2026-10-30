@@ -42,6 +42,9 @@ class RunTab(ttk.Frame):
         self.btn_start = ttk.Button(bar, text="▶ 一键启动（抓到空为止）",
                                     command=self.on_start, width=26)
         self.btn_start.pack(side="left")
+        self.btn_stop = ttk.Button(bar, text="■ 停止抓取",
+                                   command=self.on_stop, width=12)
+        self.btn_stop.pack(side="left", padx=(8, 0))
         self.btn_home = ttk.Button(bar, text="⏏ 一键回 P0",
                                    command=self.on_home, width=14)
         self.btn_home.pack(side="left", padx=(8, 0))
@@ -123,6 +126,21 @@ class RunTab(ttk.Frame):
             self._busy = False
             self.status("启动失败：%s" % exc)
             messagebox.showerror("一键启动失败", str(exc))
+
+    def on_stop(self) -> None:
+        """停止「连续抓」：当前这件做完后停在原地，不再抓下一件。"""
+        calib = (getattr(self.app, "calib_tab", None)
+                 or getattr(self.app, "calib", None))
+        if calib is None:
+            self.status("找不到连续抓页，无法停止")
+            return
+        try:
+            calib._many_stop = True
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.status("⛔ 已请求停止：当前这件做完就停在原地（不再抓下一件）")
+        self.item_log("⛔ 停止抓取（已请求，等这件结束）")
+        self._maybe_clear_busy()
 
     def on_home(self) -> None:
         client = getattr(self.app, "client", None)

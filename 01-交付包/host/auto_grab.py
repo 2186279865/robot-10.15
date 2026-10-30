@@ -532,7 +532,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
              on_event: Optional[Callable[[dict], None]] = None,
              display=None, warp_path=None, total: Optional[int] = None,
              recognize_each: bool = False, retry_once: bool = True,
-             home_start: bool = True, home_end: bool = True) -> Dict[str, object]:
+             home_end: bool = True) -> Dict[str, object]:
     """连续抓 N 件——流程与「自动抓一件」完全一致，只是外面套了一层循环。
 
     与旧版的区别只在“什么时候识别”：
@@ -583,15 +583,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
                 status='running', last_event='开始连续抓 %s 件' % cnt_txt)
 
-    # 出发前先回 P0（新流程：P0 出发 → 每件抓完在 P1 落货 → 件间不回位）。
-    # 已经在 P0 时四段都会因为 |Δ|≤2 被跳过，基本上零开销。
-    if home_start:
-        try:
-            log('[连续抓] 出发前回 P0（已在 P0 会自动跳过）')
-            goto_p0(client, log=log, wait=wait, pos_source=pos_source)
-        except Exception as exc:                   # noqa: BLE001
-            # 拿不到位置来源 / 机械已卡死 → 只警告不中断，让现场决定是否继续
-            log('[连续抓] 出发前回 P0 失败（不中断，继续尝试抓取）：%s' % exc)
+    # 出发位置由现场保证：点一键启动时必须已在 P0（此处不再自动回位）。
 
     for i in range(count_i if count_i > 0 else 10 ** 6):
         if stop_flag is not None and stop_flag():
