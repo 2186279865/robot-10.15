@@ -3,9 +3,9 @@
 与 v7 的区别（见 docs/派端屏改造说明.md）：
   1) **就地刷新**：所有控件只在启动时创建一次（`_build`），之后只改文本/图片/位置，
      不再 `destroy()` 重建 → 屏幕不闪。
-  2) **照片实时**：物块照片不再是上位机识别时的旧缩略图，而是收到 item 的那一刻
-     从本机 `pi_agent` 的**只读预览口 5060** 取“最新缓存帧”，按 item 里的 bbox
-     裁剪 → 得到“放入瞬间”的真实照片。取不到时回退到上位机推的 thumb_b64。
+  2) **照片用预设图**：货物图显示 `presets/` 下按「形状|颜色」预生成的 52/56/96/160 四档图（按屏上实际像素取用）
+     （现场 2026-10-31 要求：稳定、不随光照变化）。旧版是收到 item 时从 5060 预览口
+     抓实时帧按 bbox 裁剪——已默认关闭，要恢复就带 `PI_DISPLAY_LIVE_PHOTO=1` 启动。
   3) 视觉版式、协议字段与 v7 等价，旧上位机不需改动即可使用（只是照片用旧图）。
 
 赛题要求（原文，02-资料库/01-赛题/newpdftext.txt）：
@@ -127,6 +127,13 @@ def parse_line(raw):
 
 
 # ---------------------------------------------------------------- 实时照片
+# 现场要求（2026-10-31）：屏上的货物图一律用 `presets/` 里的预设照片，
+# **不再实时截取相机画面**（实时截图每件都要多拉一次帧、样子还随光照变）。
+# 需要恢复"抓拍放入瞬间"的老行为时，带环境变量启动即可：
+#     PI_DISPLAY_LIVE_PHOTO=1 python3 pi_display.py
+_USE_LIVE_PHOTO = os.environ.get('PI_DISPLAY_LIVE_PHOTO', '').strip().lower() in (
+    '1', 'true', 'yes', 'on')
+
 IMG_MAGIC = b'IM'
 ERR_MAGIC = b'ER'
 
@@ -288,32 +295,95 @@ def _load_preset_index():
     return idx
 
 
+def _shape_family(name):
+    """形状 → 预设文件名里的族关键字（cone / pyramid / cylinder / cuboid）。"""
+    if '圆锥' in name:
+        return 'cone'
+    if '棱锥' in name or '棱' in name:
+        return 'pyramid'
+    if '柱' in name:
+        return 'cylinder'
+    if '长方' in name or '正方' in name or '菱' in name or '矩形' in name:
+        return 'cuboid'
+    return ''
+
+
+def _preset_sizes():
+    """扫一遍 presets/ 里有哪些 `<基名>_<边长>.png`，返回 {基名: [边长...]}。"""
+    out = {}
+    try:
+        for n in os.listdir(_PRESET_DIR):
+            low = n.lower()
+            if not low.endswith('.png') or '_' not in n:
+                continue
+            base, _, tail = n[:-4].rpartition('_')
+            if not tail.isdigit():
+                continue
+            out.setdefault(base, []).append(int(tail))
+    except OSError:
+        return {}
+    for base in out:
+        out[base].sort()
+    return out
+
+
+def _pick_preset_size(sizes, want):
+    """挑最接近 want 的已有尺寸；优先 >= want（宁大不小，裁掉几像素比糊好）。"""
+    if not sizes:
+        return None
+    up = [s for s in sizes if s >= want]
+    if up:
+        return up[0]
+    return sizes[-1]
+
+
 def preset_photo(name, color, size=96):
-    """按「形状|颜色」取预设图；取不到返回 None。同一文件只加载一次。"""
+    """按「形状|颜色」取预设图；取不到返回 None。同一（图, 尺寸）只加载一次。
+
+    查找顺序（现场实测的类别名有「椭圆柱|红」「长方体|紫」这类只差颜色的写法，
+    所以必须能退到"形状对得上"）：
+      1) 精确 key「形状|颜色」；
+      2) 同颜色 + 同形状族（长方体/正方体/菱形 都算长方体）；
+      3) 只按形状族（颜色不同也认，屏上同时有大字颜色，不会误认）。
+
+    尺寸：屏是 1024×600，列内缩略图只有 f(52) px、底栏大图 f(56) px。预设图按
+    52/56/96/160 四档生成；want 不在档里时取"相近且不小于"的那档，再用
+    `PhotoImage.subsample(k)` 整数倍缩小（Tk 只支持整数倍，余下几像素由 Label 裁）。
+    这样做的好处：换屏/窗口化导致尺寸变化也不会把图缩成"一角"。
+    """
     idx = _load_preset_index()
     if not idx:
         return None
     name = (name or '').strip()
     color = (color or '').strip()
     base = idx.get('%s|%s' % (name, color))
-    if base is None and color:
-        # 退一步：同颜色下按形状族模糊匹配（长方体/正方体/菱形 都算长方体）
-        fam = ('cone' if '圆锥' in name else
-               'pyramid' if '棱锥' in name or '棱' in name else
-               'cylinder' if '柱' in name and '棱' not in name else
-               'cuboid' if ('长方' in name or '正方' in name or '菱' in name or '矩形' in name) else '')
-        if fam:
-            for k, v in idx.items():
-                if k.endswith('|' + color) and fam in v:
-                    base = v
-                    break
+    fam = _shape_family(name)
+    if base is None and color and fam:
+        for k, v in idx.items():
+            if k.endswith('|' + color) and fam in v:
+                base = v
+                break
+    if base is None and fam:
+        # 最后一次机会：同形状族（不管颜色）
+        for k, v in idx.items():
+            if fam in v:
+                base = v
+                break
     if not base:
         return None
-    key = (base, int(size))
+    want = max(8, int(size))
+    avail = _preset_sizes().get(base) or []
+    pick = _pick_preset_size(avail, want) or want
+    subsample = 1
+    if pick > want and want > 0:
+        subsample = max(1, int(round(float(pick) / float(want))))
+    key = (base, pick, subsample)
     if key in _preset_cache:
         return _preset_cache[key]
     try:
-        photo = tk.PhotoImage(file=os.path.join(_PRESET_DIR, '%s_%d.png' % (base, int(size))))
+        photo = tk.PhotoImage(file=os.path.join(_PRESET_DIR, '%s_%d.png' % (base, int(pick))))
+        if subsample > 1:
+            photo = photo.subsample(subsample, subsample)
     except Exception:                                   # noqa: BLE001
         photo = None
     _preset_cache[key] = photo
@@ -619,12 +689,15 @@ class Screen:
             box = int(msg.get('box') or 0)
             cls_label = ('%s %s' % (name, color)).strip()
             label = cls_label or str(msg.get('box_label') or '')
-            _thumb = self._thumb_from_b64(msg.get('thumb_b64'))
+            # 现场要求：货物图用 presets/ 里的预设照片（每类一张，稳定好看），
+            # 不再实时截取；只有预设里完全没有这个形状时才退回上位机推来的缩略图。
+            _thumb = preset_photo(name, color, self.f(52))
+            _preset_ok = _thumb is not None
             if _thumb is None:
-                _thumb = preset_photo(name, color, 96)
+                _thumb = self._thumb_from_b64(msg.get('thumb_b64'))
             item = {'seq': seq, 'name': name, 'color': color,
                     'thumb': _thumb,
-                    'preset': bool(_thumb is not None and msg.get('thumb_b64') is None),
+                    'preset': _preset_ok,
                     'key': '%d/%d' % (box, seq),
                     'bbox': msg.get('bbox'), 'cam': msg.get('cam')}
             if 1 <= box <= 6:
@@ -641,7 +714,7 @@ class Screen:
                         if it.get('seq') == seq:
                             it.update(item)
                 slot['items'] = items
-            _big = item['thumb'] or preset_photo(name, color, 160)
+            _big = preset_photo(name, color, self.f(56)) or item['thumb']
             self.latest = {'seq': seq, 'name': label or name, 'box': box,
                            'thumb': _big, 'color': color}
             if msg.get('total_done') is not None:
@@ -649,7 +722,8 @@ class Screen:
             self.last_event = str(msg.get('last_event') or
                                   ('第 %d 件 → %d 号盒' % (seq, box)))
             self._dirty = True
-            self._fetch_photo_later(item, msg)
+            if _USE_LIVE_PHOTO:
+                self._fetch_photo_later(item, msg)
             return
         if kind == 'item_done':
             if msg.get('total_done') is not None:
@@ -679,6 +753,7 @@ class Screen:
             return None
 
     # ---------- 实时照片（后台线程取帧，主线程上图） ----------
+    # 只在 PI_DISPLAY_LIVE_PHOTO=1 时才会被调用；默认走 presets/ 预设图。
     def _fetch_photo_later(self, item, msg):
         if not self.preview_port:
             return

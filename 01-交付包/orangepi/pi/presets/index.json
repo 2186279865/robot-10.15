@@ -14,5 +14,7 @@
  "菱形|红": "red_cuboid",
  "菱体|红": "red_cuboid",
  "椭圆柱|粉": "pink_ellipse_cylinder",
- "圆柱|粉": "pink_ellipse_cylinder"
+ "椭圆柱|红": "pink_ellipse_cylinder",
+ "圆柱|粉": "pink_ellipse_cylinder",
+ "圆柱|红": "pink_ellipse_cylinder"
 }

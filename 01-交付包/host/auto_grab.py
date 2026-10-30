@@ -1022,10 +1022,13 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         _bbox_n = None
         if warp_path is not None and display is not None:
             _bbox = target.get('bbox_warped') or target.get('bbox') or target.get('bbox_orig')
-            try:
-                _thumb = display_link.DisplayLink.thumb_b64(warp_path, _bbox)
-            except Exception:                      # noqa: BLE001
-                _thumb = None
+            # 派端屏已改用 presets/ 预设照片（display_link.SEND_THUMB=False），
+            # 不再需要每件解码顶视图裁剪压图；开关打开时才做。
+            if getattr(display_link, 'SEND_THUMB', False):
+                try:
+                    _thumb = display_link.DisplayLink.thumb_b64(warp_path, _bbox)
+                except Exception:                  # noqa: BLE001
+                    _thumb = None
             try:                                   # 派端屏自己按 bbox 裁实时帧（0~1 归一化，分辨率无关）
                 _bo = target.get('bbox_orig') or None
                 _bw = target.get('bbox_warped') or None

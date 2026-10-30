@@ -19,6 +19,12 @@ import time
 
 DEFAULT_PORT = 5059
 
+# 派端屏现在只用 `orangepi/pi/presets/` 里的预设照片（现场 2026-10-31 要求：
+# 用「图片/presets」那 6 张照片，不再实时截取），所以上位机不用再每件
+# 解码顶视图 → 裁剪 → 压 JPEG → base64（白费 CPU，还占 TCP）。
+# 需要恢复"给派端推实时裁剪缩略图"的老行为时，把这里改回 True 即可。
+SEND_THUMB = False
+
 
 class DisplayLink:
     def __init__(self, host, port=DEFAULT_PORT, timeout=1.5, verbose=False):
@@ -124,7 +130,7 @@ class DisplayLink:
             msg['total_done'] = int(total_done)
         if last_event:
             msg['last_event'] = str(last_event)[:80]
-        if thumb_b64:
+        if thumb_b64 and SEND_THUMB:
             msg['thumb_b64'] = thumb_b64
         # 派端屏自己抓“放入瞬间”的实时帧时用：bbox 是 700×700 校正图里的归一化框
         if bbox is not None:

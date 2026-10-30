@@ -590,14 +590,15 @@ class CalibTab(ttk.Frame):
             self.app.disp_run_start()
         except Exception:                             # noqa: BLE001
             pass
-        # 先把“识别时的裁剪图”作为占位图推过去（立刻有图），
-        # 派端屏再异步用 5060 的实时帧替换成“放入瞬间”的裁图。
+        # 派端屏已改用 presets/ 预设照片（display_link.SEND_THUMB=False）：
+        # 这里不再裁图推过去，只在开关打开时才生成 thumb_b64。
         _thumb = None
         _bbox = target.get('bbox') or target.get('bbox_warped')
         try:
-            _warp = Path(getattr(self.app.vision, 'runtime_dir', '') or '') / 'last_top_warp.jpg'
-            if _bbox and _warp.exists():
-                _thumb = display_link.DisplayLink.thumb_b64(_warp, _bbox)
+            if getattr(display_link, 'SEND_THUMB', False) and _bbox:
+                _warp = Path(getattr(self.app.vision, 'runtime_dir', '') or '') / 'last_top_warp.jpg'
+                if _warp.exists():
+                    _thumb = display_link.DisplayLink.thumb_b64(_warp, _bbox)
         except Exception:                             # noqa: BLE001
             _thumb = None
         try:
