@@ -21,6 +21,7 @@ from tkinter import messagebox, simpledialog, ttk
 from PIL import Image, ImageTk
 
 import auto_grab as AG
+import display_link
 import calib_wizard as W
 import grasp_calib as GC
 import prep_pose as PP
@@ -688,10 +689,23 @@ class CalibTab(ttk.Frame):
             self.app.disp_run_start()
         except Exception:                             # noqa: BLE001
             pass
+        # 先把“识别时的裁剪图”作为占位图推过去（立刻有图），
+        # 派端屏再异步用 5060 的实时帧替换成“放入瞬间”的裁图。
+        _thumb = None
+        _bbox = target.get('bbox') or target.get('bbox_warped')
+        try:
+            _warp = Path(getattr(self.app.vision, 'runtime_dir', '') or '') / 'last_top_warp.jpg'
+            if _bbox and _warp.exists():
+                _thumb = display_link.DisplayLink.thumb_b64(_warp, _bbox)
+        except Exception:                             # noqa: BLE001
+            _thumb = None
         try:
             if disp is not None:
                 disp.item(seq=1, name=_shape, color=_color, box=_box,
                           box_label='%d 号盒' % _box, total_done=0,
+                          thumb_b64=_thumb,
+                          bbox=target.get('bbox_orig') or target.get('bbox'),
+                          cam=0,
                           last_event='第 1 件：%s %s → %d 号盒' % (_shape, _color, _box))
                 disp.state(done=0, total=1, status='running',
                            last_event='正在抓第 1 件')

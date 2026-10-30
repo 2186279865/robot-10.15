@@ -290,7 +290,7 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
              drop: bool = True, tray_deg: float = TRAY_DEG,
-             tray_async: bool = False) -> Dict[str, object]:
+             tray_async: bool = True) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
     drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
@@ -420,10 +420,9 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     say('夹紧 135°')
     client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
     time.sleep(SETTLE_GRAB_MS / 1000.0)
-    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
 
-    # 6b 拿着货就开始转盘：与下面的回程（X/Y 回 P1 → Z 降底 → Y 退 P0）并行，
-    #    省掉原来“到 P0 再慢慢转 4 秒”的时间；松爪前会 join，转不到位绝不松爪。
+    # 5b 货已夹住、类别早已知：**立刻**后台开始转盘，与 ⑥抬起→⑦回P1→⑧降底→⑨退P0
+    #    这几段（约 6 s）并行，走到 P0 时转盘基本已到位，可以立即松爪接下一件。
     tray_job = None
     tray_box: Dict[str, object] = {}
     if drop and abs(tray_deg) >= 1.0 and tray_async:
@@ -438,6 +437,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         say('转盘 %+.0f° 后台开始（与回程并行，松爪前等它到位）' % tray_deg)
         tray_job = threading.Thread(target=_tray_work, daemon=True)
         tray_job.start()
+
+    move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
 
     move_xy({AXIS_X: 0, AXIS_Y: P1_Y})                   # 7 只动 X/Y 回 P1（高位，并行）
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
