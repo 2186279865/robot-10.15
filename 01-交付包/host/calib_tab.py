@@ -13,12 +13,8 @@ from __future__ import annotations
 import threading
 import time
 
-import cv2
-import numpy as np
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
-
-from PIL import Image, ImageTk
 
 import auto_grab as AG
 import display_link
@@ -47,9 +43,6 @@ def _travel_limits():
         return out or None
     except Exception:
         return None
-
-
-PREVIEW_W, PREVIEW_H = 336, 189     # 顶视预览尺寸（16:9）
 
 
 class CalibTab(ttk.Frame):
@@ -131,20 +124,11 @@ class CalibTab(ttk.Frame):
 
         ttk.Label(self, text='标注点（P 编号 = new_eye 里点的顺序；X/Y 是记录的爪位脉冲）'
                   ).pack(anchor='w', pady=(8, 0))
-        # 顶视小预览：放在列表上方，点动 X/Y 时不用来回切页
-        pv = ttk.LabelFrame(self, text='顶视预览（0.25 s 刷新）', padding=(6, 4))
-        pv.pack(fill='x', pady=(6, 4))
-        blank = Image.new('RGB', (PREVIEW_W, PREVIEW_H), (32, 33, 36))
-        self._pv_photo = ImageTk.PhotoImage(blank)      # 占位图，同时定住控件尺寸
-        self._pv_label = tk.Label(pv, image=self._pv_photo, relief='solid', bd=1)
-        self._pv_label.pack(side='left')
-        self._pv_note = ttk.Label(pv, text='（点动 X/Y 时这里看顶视图）', foreground='#666')
-        self._pv_note.pack(side='left', padx=(10, 0), anchor='n')
 
         box = ttk.Frame(self)
         box.pack(fill='both', expand=True)
 
-        # 用 grid 固定三列：标注点列表 | 滚动条 | 顶视小预览（pack 的 expand 会把预览挤没）
+        # 两列：标注点列表 | 滚动条（2026-10-31 删掉了原来的顶视小预览）
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         self.listbox = tk.Listbox(box, height=8, width=64, font=('Consolas', 10),
@@ -153,8 +137,6 @@ class CalibTab(ttk.Frame):
         self.listbox.configure(yscrollcommand=sb.set)
         self.listbox.grid(row=0, column=0, sticky='nsew')
         sb.grid(row=0, column=1, sticky='ns')
-
-        self.after(400, self._preview_tick)
 
         jog = ttk.LabelFrame(self, text='XY 点动（脉冲为非负；方向用按钮/取反）', padding=8)
         jog.pack(fill='x', pady=(8, 0))
@@ -326,88 +308,6 @@ class CalibTab(ttk.Frame):
             self.after(0, self.say, '%s：不需要动（已在目标位）' % title)
         else:
             self.after(0, self.say, '%s：没走完，看上面的失败原因' % title)
-
-    # ----------------------------------------------------------- 视觉预览
-    def _preview_stream(self):
-        app = self.app
-        vision = getattr(app, 'vision', None) or getattr(app, 'vision_app', None)
-        if vision is None:
-            return None
-        return getattr(vision, 'a', None)          # 顶视 Stream
-
-    def _preview_update(self):
-        stream = self._preview_stream()
-        get = getattr(stream, 'get', None)
-        frame = get() if callable(get) else None
-        if frame is None:
-            self._pv_note.configure(text='视觉还没开（先在「视觉」页开双画面）')
-            return
-        h, w = frame.shape[:2]
-        scale = min(PREVIEW_W / float(w), PREVIEW_H / float(h))
-        nw = max(1, int(w * scale))
-        nh = max(1, int(h * scale))
-        small = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        self._preview_overlay(rgb, w, h, nw, nh)
-        photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-        self._pv_photo = photo                     # 必须保住引用，否则图会变白
-        self._pv_label.configure(image=photo, text='')
-        self._pv_note.configure(text='%dx%d' % (w, h))
-
-    def _preview_overlay(self, rgb, w, h, nw, nh):
-        """在预览图上画四点框 + 标注点（P1..Pn），方便边看边对准。"""
-        vision = getattr(self.app, 'vision', None) or getattr(self.app, 'vision_app', None)
-        if vision is None:
-            return
-        sx, sy = nw / float(w), nh / float(h)
-        pts = list(getattr(vision, 'points', None) or [])
-        if len(pts) == 4:
-            try:
-                poly = np.array([[int(round(float(x) * sx)), int(round(float(y) * sy))]
-                                 for x, y in pts], np.int32)
-                cv2.polylines(rgb, [poly], True, (0, 230, 120), 2)
-                for i, (x, y) in enumerate(pts, 1):
-                    cx, cy = int(round(float(x) * sx)), int(round(float(y) * sy))
-                    cv2.circle(rgb, (cx, cy), 4, (0, 230, 120), -1)
-                    cv2.putText(rgb, str(i), (cx + 6, cy - 6), cv2.FONT_HERSHEY_SIMPLEX,
-                                0.45, (0, 230, 120), 1, cv2.LINE_AA)
-            except Exception:                      # noqa: BLE001
-                pass
-        marks = list(getattr(vision, 'marks', None) or [])
-        if not marks or len(pts) != 4:
-            return
-        try:                                       # 托盘坐标(0..700) -> 原图 -> 预览
-            p = np.array(pts, dtype=np.float32)
-            dst = np.array([[0, 0], [700, 0], [700, 700], [0, 700]], dtype=np.float32)
-            inv = np.linalg.inv(cv2.getPerspectiveTransform(p, dst))
-        except Exception:                          # noqa: BLE001
-            return
-        for i, m in enumerate(marks, 1):
-            try:
-                v = inv @ np.array([float(m['x']), float(m['y']), 1.0])
-                if abs(v[2]) < 1e-9:
-                    continue
-                px = int(round(v[0] / v[2] * sx))
-                py = int(round(v[1] / v[2] * sy))
-            except Exception:                      # noqa: BLE001
-                continue
-            if not (0 <= px < nw and 0 <= py < nh):
-                continue
-            cv2.drawMarker(rgb, (px, py), (0, 229, 255), cv2.MARKER_CROSS, 14, 2)
-            cv2.putText(rgb, 'P%d' % i, (px + 7, py - 7), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.45, (0, 229, 255), 1, cv2.LINE_AA)
-
-    def _preview_tick(self):
-        # 本页没显示时不做任何绘制（省 CPU，也避免切页时和视觉页抢主线程）
-        if self.winfo_ismapped() and self.app.notebook.tab('current', 'text').strip() == 'X/Y 标定':
-            try:
-                self._preview_update()
-            except Exception as exc:               # noqa: BLE001
-                try:
-                    self._pv_note.configure(text='预览出错：%s' % exc)
-                except Exception:                  # noqa: BLE001
-                    pass
-        self.after(400, self._preview_tick)
 
     # ------------------------------------------------------- 抓取点标定
     def _current_xy_pulses(self):
