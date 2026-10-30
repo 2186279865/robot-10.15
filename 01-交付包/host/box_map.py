@@ -113,6 +113,26 @@ def reset(path=None) -> None:
     save({}, path)
 
 
+def auto_reset(path=None, log=None) -> str:
+    """每批开始前自动清零登记（"一键启动 / 连续抓"入口调它）。
+
+    **为什么必须自动清**：`box_map.json` 是掉电不丢的长期文件，上一批/上一天的
+    登记会一直留着。6 个盒子各占一类，旧类别白占盒子 → 新一批第 7 件就报
+    「6 个盒子都已分配给其它类别」直接停机（2026-10-31 现场踩了两次）。
+    每批重新分盒本来就等价（计分只看"同形同色同盒"），所以开批即清零最省事。
+
+    返回清零前的描述（写进日志留痕，方便回看上一批是怎么分的）。
+    """
+    before = describe(path)
+    reset(path)
+    if callable(log):
+        try:
+            log('分盒已自动清零（每批重新分配盒子）：%s → %s' % (before, describe(path)))
+        except Exception:                            # noqa: BLE001 —— 日志失败不影响清零
+            pass
+    return before
+
+
 def describe(path=None) -> str:
     mapping = load(path)
     if not mapping:

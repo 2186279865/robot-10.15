@@ -192,10 +192,10 @@ class RunManyEventTest(unittest.TestCase):
 
 
 class PrefetchTest(unittest.TestCase):
-    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 走掉（Z 不提前抬，必须抬到位置才横移）。
+    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 → ②Z 抬顶 走掉。
 
     预走是安全敏感的（Z 不在底时绝不能动 Y 进通道），所以两个方向都要测：
-    在底 → 走一步；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
+    在底 → 走两步（先 Y 后 Z）；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
     """
 
     def setUp(self):
@@ -224,28 +224,30 @@ class PrefetchTest(unittest.TestCase):
         logs = []
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
-        self.assertTrue(any('[预走] 完成' in t for t in logs), logs)
-        # 预走**只走 ①Y 进通道**：Z 必须抬到位置才允许横移，所以抬顶留在正式流程里
         pre = [t for t in logs if t.startswith('[预走]')]
-        self.assertTrue(any('①Y 进通道 开始' in t for t in pre), pre)
-        self.assertFalse(any('②Z 抬顶' in t for t in pre), pre)
-        self.assertTrue(any('Z 仍在底' in t for t in pre), pre)
-        # Z 抬顶（正式流程的 goto -152000）依旧发生，且在识别完成之后
+        self.assertTrue(any('[预走] 完成' in t for t in pre), pre)
+        # 预走两步：①Y 进通道 → ②Z 抬顶，顺序不能反（穿通道时 Z 必须在底）
+        iy = next(i for i, t in enumerate(pre) if '①Y 进通道 开始' in t)
+        iz = next(i for i, t in enumerate(pre) if '②Z 抬顶 开始' in t)
+        self.assertLess(iy, iz, pre)
+        self.assertIn('已在通道末端抬到顶', ''.join(pre))
+        # Z 抬顶是在识别还没回来时就走掉的（这就是点完立刻动的原因）
         full = '\n'.join(logs)
         self.assertIn('识别完成：', full)
-        z_gotos = [c for c in client.gotos() if int(c[1][0]) == AG.AXIS_Z]
-        self.assertTrue(z_gotos)
-        self.assertEqual(int(z_gotos[0][1][1]), AG.Z_UP)
+        self.assertLess(full.index('②Z 抬顶 开始'), full.index('识别完成：'), full)
 
-    def test_prefetch_moves_y_only_before_recognition(self):
-        """识别期间只允许 Y 动；Z 抬顶的 goto 必须在识别回来之后。"""
+    def test_prefetch_y_first_then_z_during_recognition(self):
+        """预走先 Y（相对 -13144 脉冲进通道），再 Z 抬到顶；两趟都发生在识别期间。"""
         logs = []
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
-        y_gotos = [c for c in client.gotos() if c[1][0] == AG.AXIS_Y]
+        gotos = client.gotos()
+        y_gotos = [c for c in gotos if int(c[1][0]) == AG.AXIS_Y]
         self.assertTrue(y_gotos)
-        # 预走用的是相对口径：Y 目标 -13144 脉冲（从 0 往通道里走）
-        self.assertEqual(int(y_gotos[0][1][1]), AG.P1_Y)
+        self.assertEqual(int(y_gotos[0][1][1]), AG.P1_Y)      # 从 0 往通道里走
+        z_gotos = [c for c in gotos if int(c[1][0]) == AG.AXIS_Z]
+        self.assertTrue(z_gotos)
+        self.assertEqual(int(z_gotos[0][1][1]), AG.Z_UP)      # 抬到顶（不是减高度）
 
     def test_skipped_when_z_not_at_bottom(self):
         logs = []
@@ -311,6 +313,60 @@ class GotoP0Test(unittest.TestCase):
         self.assertTrue(any(int(g[1][0]) == AG.AXIS_Z for g in gotos), gotos)
         self.assertTrue(all(int(g[1][0]) != AG.AXIS_X for g in gotos), gotos)  # X 不许单独 goto
         self.assertTrue(any('X/Y 回 P1' in t for t in logs), logs)
+
+
+class BoxResetTest(unittest.TestCase):
+    """每次「一键启动 / 连续抓」开批都要先清「类别→盒号」登记。
+
+    现场 2026-10-31 踩过两次：`runtime/box_map.json` 是掉电保留的长期文件，
+    上一批的登记白占盒子，新一批第 7 件直接「分盒失败」停机。
+    """
+
+    def setUp(self):
+        import box_map
+        self._bm = box_map
+        self._old_path = box_map.DEFAULT_PATH
+        tmp = Path(__file__).resolve().parent / '_tmp'
+        tmp.mkdir(parents=True, exist_ok=True)
+        box_map.DEFAULT_PATH = tmp / ('box_reset_%d.json' % int(time.time() * 1000))
+        self._orig = (AG.load_targets, AG.pick_target)
+        AG.load_targets = lambda *a, **k: []
+        AG.pick_target = lambda targets, **k: targets[0] if targets else None
+
+    def tearDown(self):
+        AG.load_targets, AG.pick_target = self._orig
+        try:
+            self._bm.DEFAULT_PATH.unlink()      # 只删临时文件，绝不碰现场 runtime/box_map.json
+        except Exception:                       # noqa: BLE001
+            pass
+        self._bm.DEFAULT_PATH = self._old_path
+
+    def _run(self, reset_boxes, logs):
+        client = FakeClient()
+        # count=0 → 抓到空为止；stop_flag 立刻 True → 第 1 件前就结束，不发任何动作。
+        AG.run_many(client, 0, lambda: None, log=logs.append,
+                    wait=lambda rid, ms: client.done_of(rid),
+                    pos_source=lambda: ({}, {}, dict(client.counts)),
+                    drop=False, stop_flag=lambda: True,
+                    reset_boxes=reset_boxes)
+        return client
+
+    def test_reset_boxes_true_clears_stale_entries(self):
+        self._bm.assign('圆柱/圆形')
+        self._bm.assign('五棱体')
+        self.assertEqual(len(self._bm.load()), 2)
+        logs = []
+        client = self._run(True, logs)
+        self.assertEqual(self._bm.load(), {}, '开批必须先清零，否则旧登记白占盒子')
+        self.assertTrue(any('分盒已自动清零' in t for t in logs), logs)
+        self.assertEqual(client.gotos(), [], '只清登记，不动机械臂')
+
+    def test_reset_boxes_false_keeps_entries(self):
+        self._bm.assign('圆柱/圆形')
+        logs = []
+        self._run(False, logs)
+        self.assertEqual(len(self._bm.load()), 1, '默认不清零，避免单件/旧调用被悄悄改行为')
+        self.assertFalse(any('分盒已自动清零' in t for t in logs), logs)
 
 
 if __name__ == '__main__':

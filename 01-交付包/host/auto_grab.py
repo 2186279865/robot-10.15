@@ -50,14 +50,16 @@ SETTLE_READY_MS = 0        # 回预备位不再单独等（下一段运动期间
 #: 在位判定：|残差| ≤ 60 脉冲（≈0.6 mm）就当已经在位，不再为 10 脉冲跑一趟往返。
 IN_PLACE_TOL_PULSES = 60.0
 
-#: 编码器读数"够新"门槛（ms）：超了就再取一次（最多 ~0.15 s），
+#: 编码器读数"够新"门槛（ms）：超了就再取一次（最多 ~0.06 s），
 #: 不再像以前那样死等 0.6 s 稳定才肯发下一条（现场每件白等 4~5 s）。
-COUNTS_MAX_AGE_MS = 400.0
+#: 现场实测拥塞时遥测 age 常到 400~800 ms（02:22 那批「读数不够新」42 次），
+#: 门槛放到 800 ms、重取只 2 次：老一点也照走，精度由并行残差复核兜住。
+COUNTS_MAX_AGE_MS = 800.0
 
-#: 「预走」只走 ①Y 进通道（0.45 s），**不提前抬 Z**：
-#: 识别 3~4 s 期间 Y 早就走完了，提前抬 Z 对第一件没有加速；
-#: 而抓空时提前抬顶会白抬 1.6 s + 回 P0 再降 1.6 s。
-#: 「预走」只允许在 Z 确实到底时才敢做（穿通道时通道净高不够）。
+#: 「预走」= ①Y 进通道 → ②Z 抬顶（与识别并行，2~6 s 空档正好走完）。
+#: 仍必须先 Y 后 Z：穿通道时 Z 必须在底，抬顶只能在 Y 到位之后；抓空时
+#: 预走多抬的 1.6 s 由回 P0 的分支吞掉（Z 在顶 → 先降底再退 Y），不会再"高位回 P0"。
+#: 只在 Z 确实到底时才敢做（穿通道时通道净高不够）。
 #: 400 脉冲 ≈ 0.24 mm（1658 脉冲/mm），比"在底部"更宽松一点点也不会顶到横梁。
 PREFETCH_Z_TOL_PULSES = 400
 
@@ -405,15 +407,15 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         return True
 
     def _fresh_counts_for(axes) -> Dict[int, float]:
-        """取一份能用的 counts：最多重取 5 次（30 ms 一次，上限约 0.15 s）。
+        """取一份能用的 counts：最多重取 2 次（30 ms 一次，上限约 0.06 s）。
 
         以前是"等 10×60 ms 且连续两次几乎不变"才肯放行 —— 现场读数噪声 + 遥测节流
         基本次次跑满 0.6 s，一件白等 4~5 s（现场要求：多余的等待都不要）。
-        现在只要求"够新"，老一点也照走，由后面的残差复核兜住。
+        现在只要求"够新（≤800 ms）"，老一点也照走，由后面的残差复核兜住。
         """
         axes = [int(a) for a in axes]
         cnt = _live_counts()
-        for _i in range(5):
+        for _i in range(2):
             if _counts_ok(cnt, axes):
                 return cnt
             time.sleep(0.03)
@@ -724,7 +726,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
              on_event: Optional[Callable[[dict], None]] = None,
              display=None, warp_path=None, total: Optional[int] = None,
              recognize_each: bool = False, retry_once: bool = True,
-             prefetch: bool = False) -> Dict[str, object]:
+             prefetch: bool = False, reset_boxes: bool = False) -> Dict[str, object]:
     """连续抓 N 件——流程与「自动抓一件」完全一致，只是外面套了一层循环。
 
     与旧版的区别只在“什么时候识别”：
@@ -734,6 +736,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     每件调用一次 run_once()，因此动作序列、护栏、日志格式与单件完全相同。
     prefetch=True（一键启动用）：识别期间先把固定路线的前两步走掉，点完就动，
     见 _prefetch_channel()；默认关，单件/测试行为不变。
+    reset_boxes=True（一键启动/连续抓用）：开批先 `box_map.auto_reset()` 把
+    「类别→盒号」清零——旧登记是掉电保留的长期文件，不清就会白占盒子，
+    新一批第 7 件直接「分盒失败」停机（2026-10-31 现场踩两次）。
     """
     def emit(kind, **kw):
         if on_event is None:
@@ -788,12 +793,12 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 and abs(vals[1] - vals[0]) <= 24.0)
 
     def _prefetch_channel():
-        """把固定路线的**第一步「①Y 进通道」**放到后台先走（只走这一步）。
+        """把固定路线的**前两步「①Y 进通道 → ②Z 抬顶」**放到后台先走。
 
-        识别要 2~4 s（慢时十几秒），这段时间机械臂本来只能干等；
-        「Y 进通道」与识别结果无关（任何物块都得先穿通道），可以并行。
-        **不提前抬 Z**：现场要求 Z 必须始终抬到位置才允许横移，提前抬反而多一趟；
-        Z 抬顶留在识别回来后的正式流程里（run_once ②）。
+        识别要 2~6 s（慢时十几秒），这段时间机械臂本来只能干等；
+        「Y 进通道 → Z 抬顶」与识别结果无关（任何物块都得先穿通道再抬顶），可以并行。
+        顺序仍是「先 Y 后 Z」：穿通道时 Z 必须在底（通道净高不够），抬顶只能在
+        Y 到位之后做 —— 这两步走完，识别一回来就直接走 X/Y。
         返回后台线程（可能被 join），跳过时返回 None。
         """
         if not prefetch or pos_source is None:
@@ -806,34 +811,36 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         def work():
             first = {'v': True}
-            tg, order, what = {AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'
-            if stop_flag is not None and stop_flag():
-                log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
-                return
-            try:
-                _s, _k, cnt = pos_source() if pos_source else (None, None, None)
-            except Exception:                  # noqa: BLE001
-                _s, _k, cnt = None, None, None
-            try:
-                log('[预走] %s 开始' % what)
-                res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
-                                         acc=_ACC_DEFAULT,
-                                         log=lambda t: log('[预走] ' + t),
-                                         wait=wait, soft=_s, known=_k, counts=cnt,
-                                         prep=first['v'])
-                first['v'] = False
-                bad = [r for r in res if not r.get('ok')]
-                if bad:
-                    log('[预走] %s 没走到位（%s），交给正式流程重走'
-                        % (what, bad[0].get('code') or bad[0].get('text') or ''))
+            steps = (({AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'),
+                     ({AXIS_Z: Z_UP}, [AXIS_Z], '②Z 抬顶'))
+            for tg, order, what in steps:
+                if stop_flag is not None and stop_flag():
+                    log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
                     return
-            except Exception as exc:           # noqa: BLE001
-                log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
-                return
-            log('[预走] 完成：已在通道末端（Z 仍在底），识别一回来就抬顶走 X/Y')
+                try:
+                    _s, _k, cnt = pos_source() if pos_source else (None, None, None)
+                except Exception:                  # noqa: BLE001
+                    _s, _k, cnt = None, None, None
+                try:
+                    log('[预走] %s 开始' % what)
+                    res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
+                                             acc=_ACC_DEFAULT,
+                                             log=lambda t: log('[预走] ' + t),
+                                             wait=wait, soft=_s, known=_k, counts=cnt,
+                                             prep=first['v'])
+                    first['v'] = False
+                    bad = [r for r in res if not r.get('ok')]
+                    if bad:
+                        log('[预走] %s 没走到位（%s），交给正式流程重走'
+                            % (what, bad[0].get('code') or bad[0].get('text') or ''))
+                        return
+                except Exception as exc:           # noqa: BLE001
+                    log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
+                    return
+            log('[预走] 完成：已在通道末端抬到顶，识别一回来就直接走 X/Y')
 
         th = threading.Thread(target=work, name='grab-prefetch', daemon=True)
-        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道」（Z 保持到底）')
+        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道 → ②Z 抬顶」')
         th.start()
         return th
 
@@ -846,6 +853,14 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     cnt_txt = '∞' if count_i <= 0 else str(count_i)   # count<=0 = 抓到托盘空为止
     total_n = int(total or (count_i if count_i > 0 else 0))
     pending: List[dict] = []
+
+    # 开批先清分盒登记：旧登记是掉电保留的长期文件，不清就会白占盒子 →
+    # 新一批第 7 件直接「分盒失败」停机（现场 2026-10-31 踩过两次）。
+    if reset_boxes:
+        try:
+            BM.auto_reset(log=log)
+        except Exception as exc:                   # noqa: BLE001 —— 清零失败不拦启动
+            log('[连续抓] 分盒自动清零失败（继续启动）：%s: %s' % (type(exc).__name__, exc))
 
     log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 %d 盒，每盒 %d°）'
         % (box_now, BOX_COUNT, int(BOX_STEP_DEG)))
@@ -921,7 +936,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 box = BM.assign(key)
             except ValueError as exc:
                 failed += 1
-                log('[连续抓] 分盒失败：%s（可在「连续抓」旁点「分盒清零」重来）' % exc)
+                log('[连续抓] 分盒失败：%s（每批「一键启动」已自动清零；出现这条说明本批'
+                '已登记满 6 类，或有人中途手动改了 runtime/box_map.json）' % exc)
                 emit('item_fail', i=i + 1, reason='分盒失败：%s' % exc)
                 break
             # 最短路径：同类不转；异类转到目标盒；回旧盒走 |k|<=3 的那个方向

@@ -880,6 +880,8 @@ class CalibTab(ttk.Frame):
                 # 一键启动/连续抓：识别期间先把「①Y 进通道 → ②Z 抬顶」走掉，
                 # 点完按钮 1 s 内机械臂就动（以前要干等识别十几秒）。
                 prefetch=True,
+                # 每次开批先清零「类别→盒号」：旧登记白占盒子会让第 7 件「分盒失败」停机。
+                reset_boxes=True,
             )
             self.after(0, self.say, '连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
                        % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))

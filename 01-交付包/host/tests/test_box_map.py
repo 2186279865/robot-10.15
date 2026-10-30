@@ -57,6 +57,29 @@ class BoxMapTests(unittest.TestCase):
         box_map.reset()
         self.assertEqual(box_map.load(), {})
 
+    def test_auto_reset_clears_and_reports_before(self):
+        """每批「一键启动」入口：auto_reset 清空登记，并把清零前的分配写进日志。"""
+        box_map.assign('五棱柱|蓝')          # 上一批/上一天留下的脏登记
+        box_map.assign('球|红')
+        lines = []
+        before = box_map.auto_reset(log=lines.append)
+        self.assertEqual(box_map.load(), {})
+        self.assertIn('五棱柱|蓝', before)     # 返回值带清零前的快照
+        self.assertEqual(len(lines), 1)
+        self.assertIn('分盒已自动清零', lines[0])
+        self.assertIn('五棱柱|蓝', lines[0])
+        self.assertIn('0 类', lines[0])
+
+    def test_auto_reset_log_failure_does_not_break(self):
+        """日志回调抛异常也不能影响清零（现场日志文件被占用时可能发生）。"""
+        box_map.assign('A')
+
+        def boom(_msg):
+            raise OSError('disk full')
+
+        box_map.auto_reset(log=boom)
+        self.assertEqual(box_map.load(), {})
+
     def test_describe_empty(self):
         self.assertIn('0 类', box_map.describe())
 
