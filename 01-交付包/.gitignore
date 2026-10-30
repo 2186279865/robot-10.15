@@ -4,6 +4,8 @@ runtime/*.jpg
 runtime/*.json
 runtime/*.jsonl
 runtime/*.log
+# 模板要入库：这是现场可以调的 Z 行程覆盖值（详见 02-资料库/交接文档-20261031.md §5.1.1）
+!runtime/auto_grab.json
 runtime/*.log.*
 runtime/*.pid
 runtime/*.err
