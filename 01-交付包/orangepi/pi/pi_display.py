@@ -215,6 +215,9 @@ def crop_square(jpeg, bbox=None, cam=0):
     if bbox and len(bbox) == 4:
         try:
             x0, y0, bw, bh = (float(v) for v in bbox)
+            # 兼容两种约定：归一化 [0~1] 与 像素框（旧版上位机会直接发像素）
+            if max(abs(x0), abs(y0), abs(bw), abs(bh)) > 1.5:
+                x0, y0, bw, bh = x0 / w, y0 / h, bw / w, bh / h
             bw, bh = max(1e-3, bw), max(1e-3, bh)
             cx = int(round((x0 + bw / 2.0) * w))
             cy = int(round((y0 + bh / 2.0) * h))
@@ -338,6 +341,8 @@ class Screen:
 
         self.state = 'idle'
         self.elapsed = 0.0
+        self.finished = False       # 本轮抓取是否已结束（结束时显示“总用时”）
+        self.total_s = 0.0
         self.done = 0
         self.total = 0
         self.alerts = []
@@ -474,6 +479,8 @@ class Screen:
                             anchor='w')
         self.lb_alert = self.lab(bot, '', fg=BAD, size=17, bg=BG, anchor='e')
         self.lb_alert.place(x=W - self.x(140), y=self.y(18), width=self.x(128))
+        self.lb_total = self.lab(bot, '', fg=ACCENT, size=18, bg=BG, anchor='e')
+        self.lb_total.place(x=W - self.x(150), y=self.y(44), width=self.x(140))
 
     # ---------- 消息处理（只改模型 + 标脏，不碰控件） ----------
     def apply(self, msg):
@@ -507,8 +514,18 @@ class Screen:
             self.state = str(msg.get('state') or self.state)
             # 计时口径：只有 host 明确 running=True（已开始抓取）才走表；
             # 未开始/待机时每收到一次 state 都把读数钉在 0，避免本地 _tick 数出“0→4 再归零”的锯齿
+            if msg.get('running') is True:
+                self.finished = False
+                self.total_s = 0.0
+            if msg.get('finished'):
+                # 任务结束：把当前读数冻结成“总用时”
+                self.finished = True
+                self.total_s = float(msg.get('total_s') or self.elapsed or msg.get('elapsed_s') or 0.0)
+                self._tick_anchor = None
+                self.elapsed = self.total_s
             if msg.get('running') is False:
-                self.elapsed = 0.0
+                if not self.finished:
+                    self.elapsed = 0.0
                 self._tick_anchor = None
             elif msg.get('elapsed_s') is not None:
                 try:
@@ -758,6 +775,10 @@ class Screen:
         self._set(self.lb_event, self.last_event or '', DIM)
         self._set(self.lb_alert, ('⚠ ' + self.alerts[-1]) if self.alerts else '',
                   BAD)
+        # 任务结束后显示“总用时”，新一轮开始自动清掉
+        self._set(self.lb_total,
+                  ('总用时 %02d:%02d' % (int(self.total_s) // 60, int(self.total_s) % 60))
+                  if self.finished else '', ACCENT)
 
     def _solid_thumb(self, color, size):
         try:

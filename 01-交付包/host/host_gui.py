@@ -1228,7 +1228,8 @@ class App:
             try:
                 d.state(done=getattr(self, '_disp_done', 0),
                         total=getattr(self, '_disp_total', 0),
-                        elapsed_s=0.0, status='running', running=True)
+                        elapsed_s=0.0, status='running', running=True,
+                        finished=False, total_s=0.0)
             except Exception:                          # noqa: BLE001
                 pass
 
@@ -1238,9 +1239,11 @@ class App:
         d = getattr(self, 'display', None)
         if d is not None:
             try:
+                elapsed = (time.monotonic() - self._disp_t0) if getattr(self, '_disp_t0', None) else 0.0
                 d.state(done=getattr(self, '_disp_done', 0),
                         total=getattr(self, '_disp_total', 0),
-                        status='running', running=False)
+                        elapsed_s=elapsed, status='running', running=False,
+                        finished=True, total_s=elapsed)
             except Exception:                          # noqa: BLE001
                 pass
 

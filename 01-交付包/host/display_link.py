@@ -66,10 +66,14 @@ class DisplayLink:
 
     def state(self, done=None, total=None, elapsed_s=None, status='running',
               last_event=None, current_box=None, current_label=None,
-              running=None):
+              running=None, finished=None, total_s=None):
         msg = {'kind': 'state', 'state': status}
         if running is not None:
             msg['running'] = bool(running)
+        if finished is not None:
+            msg['finished'] = bool(finished)
+        if total_s is not None:
+            msg['total_s'] = round(float(total_s), 1)
         if done is not None:
             msg['done'] = int(done)
         if total is not None:
