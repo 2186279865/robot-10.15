@@ -94,29 +94,28 @@
     "timeout_s": 10.0,
     "model": "deepseek-flash",
     "ambiguous": [
-      "菱体/菱形",
-      "三棱体/三角形",
-      "五棱体",
-      "六棱体/多棱",
+      "四棱锥",
+      "六棱锥",
+      "椭圆柱",
       "圆锥",
-      "棱锥",
       "其他几何体"
     ],
     "candidates": [
-      "正方体/正方形",
-      "长方体/长方形",
-      "菱体/菱形",
-      "三棱体/三角形",
-      "五棱体",
-      "六棱体/多棱",
-      "圆柱/圆形",
-      "球",
       "圆锥",
-      "棱锥",
+      "四棱锥",
+      "六棱锥",
+      "椭圆柱",
+      "长方体",
       "其他几何体"
     ],
     "_note": "云端 DeepSeek 视觉复核：mode=auto_when_unsure 时只在几何低置信/易混类调用；断网自动跳过",
     "views": "two",
-    "color_from_mask": false
+    "color_from_mask": false,
+    "expect": {
+      "total": 12,
+      "per_class": 2,
+      "mode": "max",
+      "note": "6 类×2=12；mode=max 表示“最多”，实际可少于该数量"
+    }
   }
 }

@@ -1320,6 +1320,20 @@ class App:
                               timeout=_tmo, model=cc.get('model'))
                 objs = [o for o in (r or {}).get('objects', []) if o.get('shape')]
                 self._vlm_ms = (r or {}).get('ms')
+                # 条数一致性校验：VLM 数数能力弱，以本地分割为准，不一致只告警不阻断
+                try:
+                    _n_local = len(tops)
+                    _n_vlm = len(objs)
+                    _exp = (cc.get('expect') or {})
+                    _cap = int(_exp.get('total') or 0)
+                    if _n_vlm and _n_vlm != _n_local:
+                        self.note('[vlm] 返回 %d 个 / 本地分割 %d 个 → 以本地分割为准'
+                                  % (_n_vlm, _n_local))
+                    if _cap and _n_vlm > _cap:
+                        self.note('[vlm] 返回 %d 个 > 场景上限 %d 个（可能凑数），已按本地分割裁剪'
+                                  % (_n_vlm, _cap))
+                except Exception:              # noqa: BLE001
+                    pass
         except Exception:                                  # noqa: BLE001
             objs = []
         # DeepSeek 主分类模式：SAM 负责分割/定位/面积，DeepSeek 负责类别与颜色

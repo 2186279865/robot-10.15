@@ -453,6 +453,7 @@ def vlm_targets(objs, half=0.055, min_conf=0.40, margin=0.05):
         x0, y0 = int(max(0.0, (u - half)) * 700), int(max(0.0, (v - half)) * 700)
         x1, y1 = int(min(1.0, (u + half)) * 700), int(min(1.0, (v + half)) * 700)
         w, h = max(1, x1 - x0), max(1, y1 - y0)
+        shape = six_class(shape)
         item = {
             'mask': None, 'contour': None,
             'bbox': [x0, y0, w, h], 'bbox_warped': [x0, y0, w, h], 'bbox_orig': [x0, y0, w, h],
@@ -472,6 +473,36 @@ def vlm_targets(objs, half=0.055, min_conf=0.40, margin=0.05):
                     'confidence': round(conf, 3), 'color_mismatch': False})
     return out
 
+
+
+#: 赛题 6 类（与 cloud_vlm.SHAPES 一致）：形状裸名，class_key = 颜色|形状
+SIX_CLASSES = ['圆锥', '四棱锥', '六棱锥', '椭圆柱', '长方体', '其他几何体']
+
+
+def six_class(shape: str) -> str:
+    """把任意来源的形状名收敛到赛题 6 类；认不出返回“其他几何体”。"""
+    s = str(shape or '').strip()
+    if not s:
+        return '其他几何体'
+    if s in SIX_CLASSES:
+        return s
+    if '圆锥' in s:
+        return '圆锥'
+    if '六棱锥' in s or ('六' in s and '锥' in s):
+        return '六棱锥'
+    if '四棱锥' in s or '方锥' in s or ('四' in s and '锥' in s):
+        return '四棱锥'
+    if '锥' in s or '金字塔' in s:
+        return '四棱锥'
+    if '椭' in s:
+        return '椭圆柱'
+    if '圆柱' in s or '圆' in s:
+        return '椭圆柱'
+    if '长方' in s or '正方' in s or '方形' in s or '矩形' in s or '菱' in s:
+        return '长方体'
+    if '六棱' in s or '多棱' in s or '八棱' in s:
+        return '六棱锥'
+    return '其他几何体'
 
 
 def refine_vlm_targets(warp, vt, items, max_dist=0.07, cone_circ=0.78, cone_solid=0.965):

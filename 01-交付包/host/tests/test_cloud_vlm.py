@@ -13,23 +13,24 @@ import cloud_vlm as CV  # noqa: E402
 
 class NormalizeShapeTest(unittest.TestCase):
     def test_canonical(self):
-        self.assertEqual(CV.normalize_shape('正方体/正方形'), '正方体/正方形')
-        self.assertEqual(CV.normalize_shape('棱锥'), '棱锥')
+        self.assertEqual(CV.normalize_shape('正方体/正方形'), '长方体')
+        self.assertEqual(CV.normalize_shape('棱锥'), '四棱锥')
 
     def test_cone_before_cylinder(self):
         # “圆锥”里也含“圆”，必须优先判成圆锥，不能落到圆柱
         self.assertEqual(CV.normalize_shape('圆锥'), '圆锥')
-        self.assertEqual(CV.normalize_shape('圆形金字塔'), '棱锥')
-        self.assertEqual(CV.normalize_shape('圆柱'), '圆柱/圆形')
+        self.assertEqual(CV.normalize_shape('圆形金字塔'), '四棱锥')
+        self.assertEqual(CV.normalize_shape('圆柱'), '椭圆柱')
 
     def test_keywords(self):
-        self.assertEqual(CV.normalize_shape('三棱柱'), '三棱体/三角形')
-        self.assertEqual(CV.normalize_shape('三棱体'), '三棱体/三角形')
-        self.assertEqual(CV.normalize_shape('六棱柱'), '六棱体/多棱')
-        self.assertEqual(CV.normalize_shape('正方形'), '正方体/正方形')
-        self.assertEqual(CV.normalize_shape('长方形'), '长方体/长方形')
-        self.assertEqual(CV.normalize_shape('菱形'), '菱体/菱形')
-        self.assertEqual(CV.normalize_shape('球体'), '球')
+        # 赛题只有 6 类：三棱柱/球不在其中 → 归“其他几何体”；六棱柱 → 六棱锥分支
+        self.assertEqual(CV.normalize_shape('三棱柱'), '其他几何体')
+        self.assertEqual(CV.normalize_shape('三棱体'), '其他几何体')
+        self.assertEqual(CV.normalize_shape('六棱柱'), '六棱锥')
+        self.assertEqual(CV.normalize_shape('正方形'), '长方体')
+        self.assertEqual(CV.normalize_shape('长方形'), '长方体')
+        self.assertEqual(CV.normalize_shape('菱形'), '长方体')
+        self.assertEqual(CV.normalize_shape('球体'), '其他几何体')
 
     def test_unknown(self):
         self.assertEqual(CV.normalize_shape(''), '其他几何体')

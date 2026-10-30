@@ -33,10 +33,10 @@ DEFAULT_MODEL = 'deepseek-flash'
 DEFAULT_TIMEOUT = 12.0
 
 # 与视觉主流程一致的类别名（含新增的圆锥/棱锥）
-SHAPES = [
-    '正方体/正方形', '长方体/长方形', '菱体/菱形', '三棱体/三角形',
-    '五棱体', '六棱体/多棱', '圆柱/圆形', '球', '圆锥', '棱锥', '其他几何体',
-]
+# 赛题 6 类（形状裸名；颜色单独由 color 字段给出，class_key = 颜色|形状）
+SHAPES = ['圆锥', '四棱锥', '六棱锥', '椭圆柱', '长方体', '其他几何体']
+#: 允许的颜色（闭集）；蓝色物块在暖光下会偏紫，故保留“蓝/紫”双写提示
+COLORS = ['黄', '紫', '蓝', '红', '白', '粉']
 
 _CACHE: Dict[str, tuple] = {}
 _CACHE_TTL = 10.0
@@ -148,40 +148,32 @@ def normalize_color(raw):
 
 
 def normalize_shape(raw: str) -> str:
-    """把模型给的形状名归一到主流程的类别名；认不出就返回 '其他几何体'。"""
+    """把模型给的形状名归一到赛题 6 类（裸名）；认不出返回“其他几何体”。"""
     s = (raw or '').strip()
     if not s:
         return '其他几何体'
     for name in SHAPES:
         if s == name:
             return name
-    # 关键词优先（注意“圆锥”要先于“圆柱/圆”判断）
+    # 先判“锥”，再判“柱”，最后判“方/长”
     if '圆锥' in s:
         return '圆锥'
-    if '棱锥' in s or '金字塔' in s or '锥' in s:
-        return '棱锥'
-    if '球' in s:
-        return '球'
-    if '圆柱' in s or ('柱' in s and '圆' in s):
-        return '圆柱/圆形'
-    if '菱' in s:
-        return '菱体/菱形'
-    if '三棱' in s or '三角' in s:
-        return '三棱体/三角形'
-    if '五棱' in s:
-        return '五棱体'
+    if '六棱锥' in s or ('六' in s and '锥' in s):
+        return '六棱锥'
+    if '四棱锥' in s or '方锥' in s or ('四' in s and '锥' in s) or s == '棱锥':
+        return '四棱锥'
+    if '锥' in s or '金字塔' in s:
+        return '四棱锥'
+    if '椭' in s:
+        return '椭圆柱'
+    if '圆柱' in s or '圆形' in s or s == '圆':
+        return '椭圆柱'
+    if any(k in s for k in ('长方体', '正方形', '正方体', '长方形', '矩形', '菱形', '方体', '立方')):
+        return '长方体'
+    # 赛题只有“六棱锥”，几何侧可能给出“六棱柱/多棱柱”的轮廓 → 归入六棱锥
     if '六棱' in s or '多棱' in s or '八棱' in s:
-        return '六棱体/多棱'
-    if '正方' in s or ('方形' in s and '长' not in s):
-        return '正方体/正方形'
-    if '长方' in s:
-        return '长方体/长方形'
-    if '圆' in s:
-        return '圆柱/圆形'
+        return '六棱锥'
     return '其他几何体'
-
-
-# ---------------------------------------------------------------- 请求
 def _post(body: dict, key: str, timeout: float) -> dict:
     data = json.dumps(body, ensure_ascii=False).encode('utf-8')
     req = urllib.request.Request(
@@ -191,18 +183,67 @@ def _post(body: dict, key: str, timeout: float) -> dict:
         return json.loads(resp.read().decode('utf-8', 'ignore'))
 
 
+_RULE = (
+    '【判别步骤（严格按顺序，先答“顶面内部有没有棱线”）】\n'
+    '第 0 步｜顶面内部：是一整片均匀平面，还是被棱线/明暗切成 2~6 块？\n'
+    '  · 整片均匀、内部无分界线 → 柱体（椭圆柱 / 长方体）\n'
+    '  · 内部有 1 条以上棱线、越靠中心越尖 → 锥体（圆锥 / 四棱锥 / 六棱锥）\n'
+    '第 1 步｜柱体：看顶面外轮廓\n'
+    '  · 边缘全圆滑、无尖角（椭圆） → 椭圆柱\n'
+    '  · 有 4 个尖角、两组近似平行的边（矩形/平行四边形，朝向任意） → 长方体\n'
+    '  · 60° 俯视会把高度压扁，“看起来矮”不代表不是长方体，以顶面形状为准\n'
+    '第 2 步｜锥体：看外轮廓边数 + 内部斜棱\n'
+    '  · 外轮廓是圆、中心收成一点 → 圆锥\n'
+    '  · 外轮廓四边形（4 边），内部有 1~4 条斜棱把顶面分成三角面 → 四棱锥\n'
+    '  · 外轮廓六边形（6 边），内部有 6 条斜棱汇聚到中心 → 六棱锥\n'
+    '第 3 步｜顶/侧交界（侧面窄带只做辅助）：\n'
+    '  · 柱体：顶面与侧面之间是一条“直棱”，侧面上下等宽\n'
+    '  · 锥体：顶面与侧面之间是“从顶点向外的多条斜棱”，侧面从边缘向外张开\n'
+)
+
+_SCENE = (
+    '【场景与数量】这是机械臂分拣台（灰色托盘，俯视约 60°）。本赛题只有 6 种物品，'
+    '每种最多 2 个、合计最多 12 个；允许更少（少件/空盘请如实返回）。'
+    '严禁为凑数编造、严禁把两个物块合并成一条、严禁同一物块输出两次。\n'
+    '【类别白名单】shape 只能取（写裸形状名，颜色单独写在 color）：'
+    '圆锥 / 四棱锥 / 六棱锥 / 椭圆柱 / 长方体；明显不符则填“其他几何体”。\n'
+    '【颜色】color 只能取：黄、紫、蓝、红、白、粉。'
+    '蓝=冷色、B 明显强于 R；紫=带明显品红味（R 与 B 都不低）——蓝色在暖光下会偏紫，'
+    '若介于两者之间请报“蓝”并给 confidence ≤0.6 且 reason 写“偏紫”；'
+    '白=低饱和高亮（别把反光当白）；粉=浅红偏灰（别判成白或红）；红=R 明显最高。\n'
+)
+
+_JSON_SPEC = (
+    '只输出 JSON，不要多余文字：'
+    '{"objects":[{"id":1,"shape":"圆锥/四棱锥/六棱锥/椭圆柱/长方体/其他几何体",'
+    '"color":"黄/紫/蓝/红/白/粉","confidence":0.0,'
+    '"inner_edges":0,"outline_corners":0,"edge_style":"straight","apex":0,'
+    '"top_aspect":1.00,"reason":"≤20字","center":[x,y]}]}\n'
+    '字段含义：inner_edges=顶面内部棱线条数(0/1/2/4/6，0=整片均匀)；'
+    'outline_corners=顶面外轮廓尖角数(0=圆/椭圆)；edge_style=顶/侧交界“straight(直棱)”或“radial(辐射斜棱)”；'
+    'apex=顶面中心是否尖点(0/1)；center 是物块中心归一化坐标 0~1。'
+)
+
+
 def _prompt_objects(candidates: List[str]) -> str:
-    cand = '/'.join(candidates or SHAPES)
     return (
-        '这是一个从上方约 60 度俯视拍摄的灰色托盘。请逐个识别托盘里的每个物块，'
-        '**只回答落在灰色托盘内部的物块**；托盘外面的东西（桌面、杯子、白色圆球等）一律不要回答。\n'
-        '判断它的几何形状与颜色。\n'
-        f'形状只能从这个列表里选：{cand}。\n'
-        '注意：60 度俯视会让纵深压缩，正方体可能看起来像略扁的长方形，不要因此判成长方体；'
-        '顶面是圆但有中心尖点的通常是圆锥；方底尖顶的是棱锥。\n'
-        '只输出 JSON，不要多余文字，格式：'
-        '{"objects":[{"shape":"...","color":"...","confidence":0.0,"reason":"...",'
-        '"center":[x,y]}]}；center 是物块中心的归一化坐标 0~1（左上为原点，x 右 y 下）。'
+        '这是一张从上方约 60° 俯视拍的灰色托盘照片，物块用彩色轮廓+数字标注。\n'
+        '只回答落在灰色托盘内部的物块；托盘外的桌面、杯子、白色圆球一律不要回答。\n'
+        + _SCENE + _RULE + _JSON_SPEC
+    )
+
+
+def _prompt_two_views(candidates: List[str]) -> str:
+    return (
+        '你收到两张图，拍的是同一个灰色托盘、同一时刻（物块用彩色轮廓+数字标注，编号一致）：\n'
+        '图1 = 主摄（俯视约 60°，顶面正对镜头，只带出一条很窄的侧面）；\n'
+        '图2 = 副摄（另一个方位，同样约 60° 俯视，带出的是另一侧的窄侧面）。\n'
+        '两图的顶面都被压扁，侧面信息很少 → **以两图的顶面为唯一主判据**，侧面只用于确认“顶/侧之间是直棱还是辐射斜棱”。\n'
+        '只回答落在灰色托盘内部的物块；托盘外的桌面、杯子、白色圆球一律不要回答。\n'
+        + _SCENE + _RULE +
+        '若两张图判断冲突，在 reason 里写明，并给较低 confidence。\n'
+        + _JSON_SPEC.replace('"center":[x,y]', '"center":[x,y]') +
+        '\ncenter 必须给 **图1（顶视）** 中的位置，每个物块都要给，不能省略/为 null。'
     )
 
 
@@ -282,27 +323,14 @@ def ask_objects_cached(img, candidates: Optional[List[str]] = None,
 
 
 def _prompt_numbered(n: int, candidates) -> str:
-    names = '、'.join(candidates)
     return (
-        f'图中有 {n} 个物体，已用彩色轮廓和数字 1..{n} 标出编号。\n'
-        f'请对每个编号判断“形状”和“颜色”。形状只能从：{names}。\n'
-        '注意：这是 60° 左右俯视拍摄，纵深会被压缩（正方体可能看起来略扁，不要因此判成长方体）；'
-        '顶面是圆且中心收成一个尖 = 圆锥；底面是方/多边形而顶部收成尖 = 棱锥；'
-        '看不到关键面时给低置信。\n'
-        '只输出 JSON：{"objects":[{"id":1,"shape":"...","color":"...","confidence":0.0,"reason":"..."}]}'
+        f'这是一张拼图，共 {n} 个编号格子（每格左上角有数字 1..{n}），每格是一个物块的放大裁剪。\n'
+        + _SCENE + _RULE + _JSON_SPEC
     )
 
 
 def _prompt_crops(n: int, candidates) -> str:
-    names = '、'.join(candidates)
-    return (
-        f'这是一张拼图，共 {n} 个编号格子（左上角有数字 1..{n}），每个格子是一个物块的放大裁剪。\n'
-        f'请对每个编号判断“形状”和“颜色”。形状只能从：{names}。\n'
-        '注意：拍摄角约 60° 俯视（能看到顶面 + 一小部分侧面），纵深被压缩；'
-        '顶面是圆、往上收成一个尖 = 圆锥；底面是多边形、往上收成尖 = 棱锥；'
-        '圆面但侧壁竖直 = 圆柱；看不到关键面时给低置信。颜色写主色（红/黄/蓝/绿/浅蓝/黑/白）。\n'
-        '只输出 JSON：{"objects":[{"id":1,"shape":"...","color":"...","confidence":0.0,"reason":"..."}]}'
-    )
+    return _prompt_numbered(n, candidates)
 
 
 _CROP_CACHE = {}
@@ -543,26 +571,6 @@ def describe(res: Optional[Dict[str, Any]]) -> str:
 # --------------------------------------------------------------------------
 # 两视角联合识别：图1=顶视，图2=副摄（可选）。两图一起请求，让模型交叉校验。
 # --------------------------------------------------------------------------
-def _prompt_two_views(candidates: List[str]) -> str:
-    cand = '/'.join(candidates or SHAPES)
-    return (
-        '你收到两张图，拍的是**同一个灰色托盘**：\n'
-        '图1 = 顶视相机（从上方约 60° 俯视）；图2 = 副摄（另一个方位，同样约 60° 俯视，能看到物块的另一个侧面）。\n'
-        '请结合两张图，逐个判断托盘里每个物块的几何形状与颜色。'
-        '**只回答落在灰色托盘内部的物块**；托盘外的桌面、杯子、白色圆球一律不要回答。\n'
-        f'形状只能从这个列表里选：{cand}。\n'
-        '两图互相校验的要点：\n'
-        '- 正方体：两图顶面都接近正方形，且侧高约等于边长；长方体：某一方向明显更长。\n'
-        '- 菱体/菱形：顶面是菱形或平行四边形（四边接近等长但角不是 90°），侧面是斜的。\n'
-        '- 六棱体：顶面六边形；三棱体：顶面三角形；五棱体：顶面五边形。\n'
-        '- 圆柱：顶面圆、侧面竖直；球：两图轮廓都圆、看不到平面；棱锥/圆锥：顶面有中心尖点、侧面收成三角。\n'
-        '若两张图给你的判断冲突，请在 reason 里说明，并给较低的 confidence。'
-        '只输出 JSON，不要多余文字，格式：'
-        '{"objects":[{"shape":"...","color":"...","confidence":0.0,"reason":"...","center":[x,y]}]}；'
-        'center 是**图1（顶视）**中的归一化中心坐标 0~1（左上为原点，x 向右 y 向下），**每个物体都必须给出 center，即使不确定也要给最接近的估计值，不能省略、不能为 null**。'
-    )
-
-
 def ask_objects2(top_img, side_img=None, candidates: Optional[List[str]] = None,
                  timeout: float = DEFAULT_TIMEOUT, model: Optional[str] = None,
                  detail: str = 'high') -> Optional[Dict[str, Any]]:
