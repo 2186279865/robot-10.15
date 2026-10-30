@@ -499,7 +499,11 @@ def pick_order(targets: Iterable[dict]) -> List[dict]:
 
 def goto_p0(client, log=print, wait=None,
             pos_source: Optional[Callable[[], tuple]] = None) -> None:
-    """把爪子退回 P0（初始位/落料位）：Z 抬顶 → X/Y 回 P1 → Z 降到底 → Y 退 P0。
+    """把爪子退回 P0（初始位/落料位）。
+
+    规则（现场确认）：
+      * 若此刻已在「P1 且 Z 已降到底」→ **直接 Y 回 0**（一步，不抬 Z）；
+      * 否则 → 先「Z 降到底」，再把 X/Y 回 (0, P0_Y)。
 
     只在「整批抓完」时调用（点一键启动时不再自动归位，现场保证已在 P0）；
     用户叫停时不调用，避免中途把货压在通道里。
@@ -515,20 +519,41 @@ def goto_p0(client, log=print, wait=None,
         except Exception:                              # noqa: BLE001
             return None, None, None
 
-    prep = True
-    plan = (
-        ({AXIS_Z: Z_UP}, [AXIS_Z], 'Z 抬顶（先抬，避免通道内刮碰）'),
-        ({AXIS_X: 0.0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y], 'X/Y 回 P1（通道末端）'),
-        ({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底'),
-        ({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0'),
-    )
-    for targets, order, title in plan:
+    def pulse_of(axis, soft, known, counts):
+        """当前轴位置（脉冲）；软位置优先，其次 counts 换算，都没有返回 None。"""
+        try:
+            if known and axis in known and soft and soft.get(axis) is not None:
+                return float(soft[axis])
+            if counts and counts.get(axis) is not None:
+                return float(counts[axis]) / prep_pose.COUNTS_PER_PULSE
+        except Exception:                              # noqa: BLE001
+            pass
+        return None
+
+    def move(targets, order, title, prep):
         say(title)
         soft, known, counts = pos()
         prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
                            log=say, wait=wait, soft=soft, known=known,
                            counts=counts, prep=prep)
-        prep = False
+
+    soft, known, counts = pos()
+    x = pulse_of(AXIS_X, soft, known, counts)
+    y = pulse_of(AXIS_Y, soft, known, counts)
+    z = pulse_of(AXIS_Z, soft, known, counts)
+    tol = 60.0                                        # ≈0.6 mm，够判“就在这个位”
+    at_p1_z_down = (None not in (x, y, z)
+                    and abs(x) <= tol
+                    and abs(y - P1_Y) <= tol
+                    and abs(z - Z_DOWN) <= tol)
+    if at_p1_z_down:
+        say('已在 P1 且 Z 已到底 → 直接 Y 回 P0（不抬 Z）')
+        move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0', True)
+        return
+
+    say('不在「P1 + Z 到底」→ 先 Z 降到底，再回 P0')
+    move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 先降到底', True)
+    move({AXIS_X: 0.0, AXIS_Y: P0_Y}, [AXIS_X, AXIS_Y], 'X/Y 回 P0', False)
 
 
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
