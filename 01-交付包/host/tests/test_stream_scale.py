@@ -1,15 +1,16 @@
-"""图传降负载（2026-10-31 现场问题）的回归测试。
+"""图传 / 标定坐标系的回归测试（2026-10-31 现场问题）。
 
 现场症状：Z 降到底之后要停顿很久才开始夹紧/抬升。
 根因不是轴慢，而是**图传把派端 CPU 和无线挤满**，导致运动回执迟到 2~15 s
 （固件自报只花 1.0~1.6 s，`host_client` 的迟到统计能点名）。
 
-修法三处，这里测前两处的静态部分：
-  1. 取帧降到派端相机原生 1280×720 + JPEG 质量 60（原来请求 1920×1080，
-     派端还要用 INTER_LINEAR 放大，白花 2.25 倍像素/码流）；
-  2. 标定点是按 1920×1080 量的 → `App.detect_targets` 按实际帧尺寸**按比例缩放**源点，
-     下游 `center_tray` 仍是 0~1 归一化坐标，所以**不用重新标定**；
-  3. 预览节流 `preview_fps`（识别时 `_ramp_streams` 临时拉满）。
+当时的修法有三处，实际留下的是：
+  1. **回执不阻塞运动**（`prep_pose.await_goto` + `host_client.extend_deadline`）——保留；
+  2. **降图传分辨率/质量/限帧**——试过 1280×720 + 质量 60 + 预览 4 fps，链路确实变松，
+     但画面标注（校正点 P1~P4、目标框、`_vlm_crop_now` 裁剪、运行台叠加框）都按
+     1920×1080 标定坐标画，降分辨率后整体错位 → 已回退。
+     本文件因此守住「取帧尺寸 == 标定基准」这条，防止下次又单方面降分辨率；
+  3. `Stream.max_fps` 节流的算术边界（代码保留，配置里 `preview_fps=0` 即不限帧）。
 """
 from __future__ import annotations
 
@@ -94,18 +95,21 @@ class ShippedConfigTest(unittest.TestCase):
     def setUp(self):
         self.cfg = json.loads((VISION / 'config.json').read_text(encoding='utf-8'))
 
-    def test_requests_native_resolution(self):
-        self.assertEqual((int(self.cfg['width']), int(self.cfg['height'])), (1280, 720),
-                         '派端相机原生是 1280×720，请求更大只会让派端放大（白烧 CPU）')
+    def test_requests_calibration_resolution(self):
+        """取帧分辨率必须等于标定基准：显示路径（校正点/目标框/裁剪）都按这个坐标系画。
 
-    def test_keeps_calibration_reference_size(self):
+        2026-10-31 曾把请求降到派端原生 1280×720 来降链路负载，但标注整体错位（现场当场发现），
+        已回退。要再降分辨率，得同时给 gui 的 points 绘制、`_vlm_crop_now`、run_tab 叠加框加缩放。
+        """
+        self.assertEqual((int(self.cfg['width']), int(self.cfg['height'])), (1920, 1080))
         self.assertEqual((int(self.cfg['calib_width']), int(self.cfg['calib_height'])),
-                         (1920, 1080), '标定点是按 1920×1080 量的，改这里等于要求重新标定')
+                         (int(self.cfg['width']), int(self.cfg['height'])),
+                         '取帧尺寸和标定基准不一致 → 画面标注会错位')
 
-    def test_preview_is_throttled_and_quality_reduced(self):
-        self.assertGreater(float(self.cfg['preview_fps']), 0.0)
-        self.assertLessEqual(float(self.cfg['preview_fps']), 6.0)
-        self.assertLessEqual(int(self.cfg['img_quality']), 75)
+    def test_stream_uses_pi_defaults(self):
+        """预览不限帧、JPEG 质量交给派端配置（0）；回退后不该再带限帧/降质。"""
+        self.assertEqual(float(self.cfg.get('preview_fps') or 0), 0.0)
+        self.assertEqual(int(self.cfg.get('img_quality') or 0), 0)
 
     def test_empty_background_still_configured(self):
         # 白块/灰度差分都靠它；别在改分辨率时把它删了
