@@ -160,6 +160,44 @@ class SequenceTest(unittest.TestCase):
                         calib=calib, pos_source=lambda: ({}, {}, {}))
 
 
+class TrayEarlyTest(unittest.TestCase):
+    """转盘要**提前**转：盒号在 run_many 里早定了，没必要等夹紧。
+
+    现场实测（2026-10-31 04:02 那件）：-120° 要转 7.42 s，回程只要 ~6 s，
+    旧顺序「夹紧后才转」在松爪前白等 1.5 s（日志「join 只等了 1.51 s」）。
+    转盘只动 3 轴，与 Y/Z/X 电机独立，货块也不在转盘上，所以并行是安全的。
+    """
+
+    def _run(self, tray_early):
+        client = FakeClient()
+        target = {'center_tray': [0.5, 0.5], 'confidence': 1.0}
+        state = {}
+        res = AG.run_once(client, target, log=lambda _t: None,
+                          wait=lambda rid, ms: client.done_of(rid),
+                          calib=_calib(), pos_source=lambda: ({}, {}, dict(client.counts)),
+                          tray_deg=60.0, tray_early=tray_early, state=state)
+        return client, res, state
+
+    def test_tray_starts_before_the_first_lift(self):
+        client, res, state = self._run(True)
+        idx_tray = [i for i, c in enumerate(client.calls)
+                    if c[0] == 'motor_pos' and int(c[1][0]) == AG.AXIS_TRAY]
+        idx_first_goto = [i for i, c in enumerate(client.calls) if c[0] == 'goto']
+        self.assertTrue(idx_tray and idx_first_goto)
+        self.assertLess(idx_tray[0], idx_first_goto[0],
+                        '转盘应该在 ①Y/②Z 抬顶之前就开始转，而不是等夹紧')
+        self.assertAlmostEqual(float(res['tray_applied']), 60.0)
+
+    def test_tray_early_false_keeps_old_order(self):
+        client, _res, _state = self._run(False)
+        idx_tray = [i for i, c in enumerate(client.calls)
+                    if c[0] == 'motor_pos' and int(c[1][0]) == AG.AXIS_TRAY]
+        idx_grab = [i for i, c in enumerate(client.calls)
+                    if c[0] == 'gripper' and c[1][0] == 'grab']
+        self.assertTrue(idx_tray and idx_grab)
+        self.assertGreater(idx_tray[0], idx_grab[0], '旧顺序：夹紧之后才转')
+
+
 class RunManyEventTest(unittest.TestCase):
     """run_many 必须走同一套 run_once，并把事件回调给界面用。"""
 

@@ -333,13 +333,19 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
              drop: bool = True, tray_deg: float = TRAY_DEG,
-             tray_async: bool = True, prep: bool = True) -> Dict[str, object]:
+             tray_async: bool = True, prep: bool = True,
+             tray_early: bool = True,
+             state: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
     drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
     drop=False 抓完停在 P0（手里还夹着），交给人工决定要不要放。
     prep=False 表示「本批的前置准备（stop_clear + goto_max_ms + acc）已经做过」，
                后续件不再重复发这 3 条命令（连抓时每件省 ~0.4 s）。
+    tray_early=True（默认）在本件一开始就让转盘后台转（盒号在 run_many 里早定了），
+               不用等夹紧；转盘只动 3 轴，与 Y/Z/X 电机独立。现场 -120° 要转 7.4 s、
+               回程只要 ~6 s，提前转能把原来白等的 1.5 s 吃掉。
+    state 里回写 'tray_applied'（本件已经把转盘转过去的度数），供重试时避免转两次。
     pos_source() 返回 (soft, known, counts) 三个 dict，给 move_abs 判断当前位置；
     缺省时从 client 的软位置里取（GUI 应传入自己的面板数据，能拿到回读 counts）。
     """
@@ -488,6 +494,38 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                                first.get('code') or '', first.get('text') or ''))
 
     t0 = time.perf_counter()
+
+    # 5b 转盘**提前**后台转：类别→盒号在 run_many 里早就定了，没必要等夹紧。
+    #    转盘只动 3 轴，与 Y/Z/X 的电机独立，和 ①~⑤ 并行是安全的（货块不在转盘上）。
+    #    现场 -120° 要转 7.4 s、回程只要 ~6 s，提前起步后松爪前就不用再等。
+    tray_box: Dict[str, object] = {}
+    tray_applied = {'deg': 0.0}
+    tray_job_box: Dict[str, object] = {'job': None, 'started': False}
+
+    def start_tray() -> None:
+        if tray_job_box['started']:
+            return
+        tray_job_box['started'] = True
+        if not (drop and abs(tray_deg) >= 1.0 and tray_async):
+            return
+
+        def _tray_work():
+            try:
+                tray_box['res'] = tray_turn(
+                    client, tray_deg, say,
+                    counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
+                tray_applied['deg'] = float(tray_deg)   # 转到位了才算"这件已经转过"
+            except Exception as exc:                    # noqa: BLE001
+                tray_box['err'] = exc
+
+        say('转盘 %+.0f° 后台开始（与抓取/回程并行，松爪前等它到位）' % tray_deg)
+        job = threading.Thread(target=_tray_work, daemon=True, name='grab-tray')
+        job.start()
+        tray_job_box['job'] = job
+
+    if tray_early:
+        start_tray()
+
     # 固定路线的硬规矩：**穿通道时 Z 必须在底部**（通道净高不够），
     # 所以出去是"先 Y 后 Z"、回来是"先 Z 后 Y"。这里第一下必须是 Y，
     # 不能在初始位先把 Z 抬起来（会顶到托盘/横梁）。
@@ -502,22 +540,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
     time.sleep(SETTLE_GRAB_MS / 1000.0)
 
-    # 5b 货已夹住、类别早已知：**立刻**后台开始转盘，与 ⑥抬起→⑦回P1→⑧降底→⑨退P0
-    #    这几段（约 6 s）并行，走到 P0 时转盘基本已到位，可以立即松爪接下一件。
-    tray_job = None
-    tray_box: Dict[str, object] = {}
-    if drop and abs(tray_deg) >= 1.0 and tray_async:
-        def _tray_work():
-            try:
-                tray_box['res'] = tray_turn(
-                    client, tray_deg, say,
-                    counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
-            except Exception as exc:                    # noqa: BLE001
-                tray_box['err'] = exc
-
-        say('转盘 %+.0f° 后台开始（与回程并行，松爪前等它到位）' % tray_deg)
-        tray_job = threading.Thread(target=_tray_work, daemon=True)
-        tray_job.start()
+    start_tray()                       # 旧顺序（tray_early=False）在这里才开始转
+    tray_job = tray_job_box['job']
 
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
 
@@ -528,8 +552,11 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         move({AXIS_Y: P0_Y}, [AXIS_Y])                  # 9 退 Y 回 P0
         say('已回到 P0，物块还在爪里（按要求不落货）')
         elapsed = time.perf_counter() - t0
+        if state is not None:
+            state['tray_applied'] = tray_applied['deg']
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
-                'target': describe(target), 'dropped': False}
+                'target': describe(target), 'dropped': False,
+                'tray_applied': tray_applied['deg']}
     say('已在 P1 降到底（P0/P1 下方都是盒子）→ 直接松爪，不再退回 P0')
     if tray_job is not None:
         # 10 等后台转盘到位（最多再等 TRAY_JOIN_TIMEOUT_S=8 s）；失败/超时都不松爪
@@ -558,8 +585,10 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
     elapsed = time.perf_counter() - t0
     say('完成，用时 %.1f s' % elapsed)
+    if state is not None:
+        state['tray_applied'] = tray_applied['deg']
     return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
-            'target': describe(target)}
+            'target': describe(target), 'tray_applied': tray_applied['deg']}
 
 
 def pick_order(targets: Iterable[dict]) -> List[dict]:
@@ -997,10 +1026,11 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         # ---- 执行：与手动「自动抓一件」同一段代码 ----
         one = None
+        _state: Dict[str, object] = {}
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
                            drop=drop, tray_deg=deg, tray_async=True,
-                           prep=_prep_batch['v'])
+                           prep=_prep_batch['v'], state=_state)
             _prep_batch['v'] = False
         except Exception as exc:                   # noqa: BLE001
             reason = str(exc)
@@ -1025,10 +1055,16 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                             log('[连续抓] 重试用新目标：%s' % describe(target))
                 except Exception as exc_r:         # noqa: BLE001
                     log('[连续抓] 重试前识别失败（沿用旧坐标）：%s' % exc_r)
+                _applied = float(_state.get('tray_applied') or 0.0)
+                if _applied:
+                    # 上一轮已经把转盘转过去了（提前转的结果），重试不能再转一次
+                    deg = ((deg - _applied + 180.0) % 360.0) - 180.0
+                    log('[连续抓] 重试不再转盘（上一轮已转 %+.0f°，剩 %+.0f°）'
+                        % (_applied, deg))
                 try:
                     one = run_once(client, target, log=log, wait=wait,
                                    pos_source=pos_source, drop=drop, tray_deg=deg,
-                                   prep=False)
+                                   prep=False, state=_state)
                     _prep_batch['v'] = False
                     log('[连续抓] 第 %d 件重试成功' % (i + 1))
                 except Exception as exc2:          # noqa: BLE001
