@@ -199,7 +199,7 @@ CROP_PAD = 1.0
 
 
 def crop_square(jpeg, bbox=None, cam=0):
-    """把整帧 JPEG 按 bbox（托盘归一化坐标）裁成正方形，返回 PNG base64；失败返回 None。"""
+    """按 bbox（归一化 [x,y,w,h]）严格裁出这块画面，保持宽高比补成正方形后返回 PNG base64。"""
     try:
         import numpy as np
         import cv2
@@ -213,32 +213,38 @@ def crop_square(jpeg, bbox=None, cam=0):
     if img is None or not getattr(img, 'size', 0):
         return None
     h, w = img.shape[:2]
-    side = int(min(h, w) * 0.42)
-    cx, cy = w // 2, h // 2
-    # bbox 约定：整帧归一化 [x, y, w, h]（0~1）。没有就裁画面中心，仍然给实时照片。
+
+    bx, by, bw, bh = 0.37 * w, 0.37 * h, 0.26 * w, 0.26 * h   # 没框时的兜底（画面中心）
     if bbox and len(bbox) == 4:
         try:
-            x0, y0, bw, bh = (float(v) for v in bbox)
-            # 兼容两种约定：归一化 [0~1] 与 像素框（旧版上位机会直接发像素）
-            if max(abs(x0), abs(y0), abs(bw), abs(bh)) > 1.5:
-                x0, y0, bw, bh = x0 / w, y0 / h, bw / w, bh / h
-            bw, bh = max(1e-3, bw), max(1e-3, bh)
-            cx = int(round((x0 + bw / 2.0) * w))
-            cy = int(round((y0 + bh / 2.0) * h))
-            # 取景 = 识别框（默认 1.0 = 严格框内）；下限 72px、上限画面 42%
-            side = int(round(max(bw * w, bh * h) * CROP_PAD))
-            side = max(72, min(side, int(min(w, h) * 0.42)))
+            x0, y0, bw_, bh_ = (float(v) for v in bbox)
+            if max(abs(x0), abs(y0), abs(bw_), abs(bh_)) > 1.5:   # 兼容像素框
+                x0, y0, bw_, bh_ = x0 / w, y0 / h, bw_ / w, bh_ / h
+            bw_, bh_ = max(1e-3, bw_), max(1e-3, bh_)
+            bx, by, bw, bh = x0 * w, y0 * h, bw_ * w, bh_ * h
         except (TypeError, ValueError):
             pass
-    side = max(64, min(side, int(min(h, w) * 0.9)))
-    x1, y1 = max(0, cx - side // 2), max(0, cy - side // 2)
-    x2, y2 = min(w, x1 + side), min(h, y1 + side)
-    if x2 - x1 < 24 or y2 - y1 < 24:
+
+    if CROP_PAD != 1.0:                              # 需要留边时按中心外扩
+        cx, cy = bx + bw / 2.0, by + bh / 2.0
+        bw, bh = bw * CROP_PAD, bh * CROP_PAD
+        bx, by = cx - bw / 2.0, cy - bh / 2.0
+
+    x1, y1 = int(round(max(0, bx))), int(round(max(0, by)))
+    x2 = int(round(min(w, bx + bw))); y2 = int(round(min(h, by + bh)))
+    if x2 - x1 < 16 or y2 - y1 < 16:
         return None
     crop = img[y1:y2, x1:x2]
+
+    # 保持宽高比：补成正方形（补边用托盘色灰，避免黑边太突），再缩到 96×96
+    side = max(crop.shape[1], crop.shape[0])
+    canvas = np.full((side, side, 3), 150, dtype=np.uint8)
+    ox = (side - crop.shape[1]) // 2
+    oy = (side - crop.shape[0]) // 2
+    canvas[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
     try:
-        crop = cv2.resize(crop, (96, 96), interpolation=cv2.INTER_AREA)   # 卡片缩略统一 96×96
-        ok, enc = cv2.imencode('.png', crop)          # imencode 要 BGR，保持原样
+        out = cv2.resize(canvas, (96, 96), interpolation=cv2.INTER_AREA)
+        ok, enc = cv2.imencode('.png', out)           # imencode 要 BGR，保持原样
     except Exception:                                # noqa: BLE001
         return None
     if not ok:

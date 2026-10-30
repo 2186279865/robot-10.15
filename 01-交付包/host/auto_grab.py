@@ -632,7 +632,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 _bbox_n = None
         say_display(getattr(display, 'item', None), seq=i + 1, name=_shape, color=_color,
                     box=box, box_label=_label, total_done=done, thumb_b64=_thumb,
-                    bbox=_bbox_n, cam=0,
+                    bbox=_bbox_n, cam=1,   # 顶视相机槽位 = 1（vision/config.json 的 cam_map: 顶视1 / 副摄0）
                     last_event='第 %d 件：%s %s → %s'
                                % (i + 1, _shape, _color, _label or '抓取位'))
 
