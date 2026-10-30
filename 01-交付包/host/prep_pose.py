@@ -27,6 +27,8 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import protocol as P
+
 PKG_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PATH = PKG_ROOT / 'runtime' / 'prep_pose.json'
 
@@ -257,7 +259,8 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
                 'code': '', 'text': '', 'pairs': {}}
         try:
-            req = client.goto(axis, pulses, rpm=rpm_i)
+            req = client.goto(axis, pulses, rpm=rpm_i,
+                              tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
             rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
         except Exception as exc:                      # noqa: BLE001
             item['code'] = 'EXC'
@@ -329,7 +332,9 @@ def move_two(client, targets, rpm=50, acc=0, log=None, wait=None,
 
     reqs = []
     for axis, pulses, rpm_i in plans:
-        reqs.append((axis, client.goto(axis, pulses, rpm=rpm_i), pulses, rpm_i))
+        reqs.append((axis, client.goto(axis, pulses, rpm=rpm_i,
+                                       tol=P.GOTO_TOL_BY_AXIS.get(int(axis))),
+                     pulses, rpm_i))
     results = []
     for axis, rid, pulses, rpm_i in reqs:
         item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
@@ -437,7 +442,8 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
         item: Dict[str, object] = {'key': key, 'axis': axis, 'pulses': pulses, 'rpm': rpm,
                                    'ok': False, 'code': '', 'text': '', 'pairs': {}}
         try:
-            req = client.goto(axis, pulses, rpm=rpm)
+            req = client.goto(axis, pulses, rpm=rpm,
+                              tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
             rep = waiter(req, estimate_timeout_ms(pulses, rpm))
         except Exception as exc:                      # noqa: BLE001
             item['code'] = 'EXC'
@@ -509,7 +515,8 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
     def _goto_wait(axis, tgt, rpm_i):
         """闭环补走并**等它跑完**。client.goto() 只发不等，必须自己等回执。"""
         try:
-            rid = client.goto(axis, tgt, rpm=rpm_i)
+            rid = client.goto(axis, tgt, rpm=rpm_i,
+                              tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
         except Exception as exc:                    # noqa: BLE001
             say('%s 补走下发异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
             return False

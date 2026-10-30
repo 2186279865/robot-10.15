@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 import prep_pose as PP
+import protocol as P
 
 
 class FakeClient:
@@ -314,6 +315,35 @@ class ParallelResidualTests(unittest.TestCase):
         self.assertIn('超出回读滞后可解释范围', str(ctx.exception))
         self.assertEqual(client.gotos(), [])
 
+
+class GotoTolTests(unittest.TestCase):
+    """Z 轴闭环容差必须走 GOTO_TOL_BY_AXIS（提速时「抬转速 + 放宽容差」是成对的）。
+
+    2026-10-31：只抬转速不放宽容差 → 固件用 60 圈/分补一趟，Z 单趟反而从 1494 ms
+    变成 1848/2182 ms（见交接文档 §8 第 21 条）。这条用例守住「容差真的传下去了」。
+    """
+
+    def test_move_abs_passes_per_axis_tol(self):
+        seen = {}
+
+        class _C:
+            latched = False
+
+            def send(self, *a, **k):
+                return 1
+
+            def goto(self, axis, pulses, rpm=None, tol=None, **kw):
+                seen[int(axis)] = tol
+                return len(seen)
+
+            def wait_reply(self, rid, timeout_ms=8000):
+                return {'kind': 'reply', 'code': '', 'text': '', 'pairs': {'ok': '1'}}
+
+        PP.move_abs(_C(), {PP.AXIS_Z: -1000, PP.AXIS_Y: -500},
+                    order=[PP.AXIS_Z, PP.AXIS_Y], counts={PP.AXIS_Z: 0.0, PP.AXIS_Y: 0.0})
+        self.assertEqual(seen[PP.AXIS_Z], P.GOTO_TOL_BY_AXIS[PP.AXIS_Z])
+        self.assertEqual(seen[PP.AXIS_Y], P.GOTO_TOL_BY_AXIS[PP.AXIS_Y])
+        self.assertGreater(P.GOTO_TOL_BY_AXIS[PP.AXIS_Z], P.GOTO_TOL_BY_AXIS[PP.AXIS_Y])
 
 if __name__ == '__main__':
     unittest.main()

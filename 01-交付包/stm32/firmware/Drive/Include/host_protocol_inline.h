@@ -910,7 +910,10 @@ static void host_query_sweep(uint32_t now)
 
 #define HOST_GOTO_FRESH_MS      3000U   /* counts 超过这么久没更新就不敢用它算误差 */
 #define HOST_GOTO_STABLE_COUNTS 40      /* 两个新样本差多少算"没动" */
-#define HOST_GOTO_STABLE_NEED   2U      /* 连续几次"没动"算停稳 */
+#define HOST_GOTO_STABLE_NEED   1U      /* 连续几次"没动"算停稳；
+                                         * 2026-10-31 提速：遥测 100 ms 一份，
+                                         * 2 次 = 白等一份；delta<=40 counts 本身
+                                         * 已等价于"停住"，1 次足够。 */
 #define HOST_GOTO_GAP_MS        20U     /* 离最后一份回读样本至少空这么久再发 */
 
 typedef struct
@@ -1000,7 +1003,10 @@ static uint32_t host_goto_estimate_ms(int32_t pulses, uint32_t rpm)
     }
     ms = (uint32_t)(((uint64_t)abs_pulses * 60000ULL) /
                     ((uint64_t)rpm * (uint64_t)host_goto_pulses_per_rev()));
-    return ms + 250U;
+    /* 2026-10-31 提速：原来 +250 ms 只是"等它走完"的保险，而后面 SETTLE 阶段
+     * 本来就会等 counts 停稳，这个余量等于每趟白等 ~190 ms（Z 四趟/件 ≈0.76 s）。
+     * 留 60 ms 覆盖最后一拍加减速即可。 */
+    return ms + 60U;
 }
 
 static void host_goto_finish(void)
