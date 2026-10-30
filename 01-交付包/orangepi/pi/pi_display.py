@@ -147,8 +147,8 @@ def fetch_frame(host, port, cam=0, timeout=0.9):
                 return None
             if head != IMG_MAGIC:
                 return None
-            rest = _recv_exact(sock, 22)              # IMG_HDR_LEN = 24
-            _m, _cam, _w, _h, _seq = struct.unpack('<2sHHII', head + rest)
+            rest = _recv_exact(sock, 10)              # magic2+cam2+w2+h2+seq4 = 12 字节
+            _m, _cam, _w, _h, _seq = struct.unpack('<2sHHHI', head + rest)
             ts_us, n = struct.unpack('<QI', _recv_exact(sock, 12))
             if n <= 0 or n > 8 * 1024 * 1024:
                 return None
@@ -211,19 +211,15 @@ def crop_square(jpeg, bbox=None, cam=0):
     h, w = img.shape[:2]
     side = int(min(h, w) * 0.42)
     cx, cy = w // 2, h // 2
-    pts = _load_top_points()
-    if bbox and len(bbox) == 4 and pts:
+    # bbox 约定：整帧归一化 [x, y, w, h]（0~1）。没有就裁画面中心，仍然给实时照片。
+    if bbox and len(bbox) == 4:
         try:
             x0, y0, bw, bh = (float(v) for v in bbox)
-            uc, vc = x0 + bw / 2.0, y0 + bh / 2.0
-            src = np.float32(pts)
-            dst = np.float32([[0, 0], [699, 0], [699, 699], [0, 699]])
-            # 用 (u,v) 在四点上做双线性插值 → 相机像素（够用且不依赖 H 的逆）
-            px = _bilinear(src, uc, vc)
-            if px is not None:
-                cx, cy = int(px[0]), int(px[1])
-                side = int(max(bw, bh) * w * 2.2)
-        except Exception:                            # noqa: BLE001
+            bw, bh = max(1e-3, bw), max(1e-3, bh)
+            cx = int(round((x0 + bw / 2.0) * w))
+            cy = int(round((y0 + bh / 2.0) * h))
+            side = int(round(max(bw * w, bh * h) * 2.2))
+        except (TypeError, ValueError):
             pass
     side = max(64, min(side, int(min(h, w) * 0.9)))
     x1, y1 = max(0, cx - side // 2), max(0, cy - side // 2)
@@ -232,8 +228,8 @@ def crop_square(jpeg, bbox=None, cam=0):
         return None
     crop = img[y1:y2, x1:x2]
     try:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        ok, enc = cv2.imencode('.png', crop)
+        crop = cv2.resize(crop, (96, 96), interpolation=cv2.INTER_AREA)   # 卡片缩略统一 96×96
+        ok, enc = cv2.imencode('.png', crop)          # imencode 要 BGR，保持原样
     except Exception:                                # noqa: BLE001
         return None
     if not ok:
@@ -457,7 +453,8 @@ class Screen:
                 nm.place(x=self.x(6) + thumb_side + self.x(8), y=self.y(34))
                 self._card_slots[i].append({'frame': slot, 'img': img,
                                             'seq': seq, 'name': nm,
-                                            'key': None, 'side': thumb_side})
+                                            'key': None, 'thumb': None,
+                                            'side': thumb_side})
             self.lb_col[i] = {'frame': frame, 'no': no, 'cnt': cnt,
                               'name': name, 'hint': hint, 'w': colw}
 
@@ -724,16 +721,20 @@ class Screen:
                     pass
                 if cs['key'] != it.get('key'):
                     cs['key'] = it.get('key')
-                    thumb = it.get('thumb')
-                    if thumb is None:
-                        thumb = self._solid_thumb(color_hex(it.get('color')), cs['side'])
+                    cs['thumb'] = None                   # 换了一件：强制重新上图
+                    self._set(cs['seq'], '#%d' % int(it.get('seq') or 0), FG)
+                    self._set(cs['name'], str(it.get('name') or ''), DIM)
+                # 照片是异步取回的：即使 key 没变，只要 thumb 换了也要重画
+                thumb = it.get('thumb')
+                if thumb is None and cs.get('thumb') is None:
+                    thumb = self._solid_thumb(color_hex(it.get('color')), cs['side'])
+                if thumb is not None and cs.get('thumb') is not thumb:
+                    cs['thumb'] = thumb
                     try:
                         cs['img'].configure(image=thumb, bg=PANEL)
                         cs['img'].image = thumb
                     except tk.TclError:
                         pass
-                    self._set(cs['seq'], '#%d' % int(it.get('seq') or 0), FG)
-                    self._set(cs['name'], str(it.get('name') or ''), DIM)
 
         latest = self.latest or {}
         if latest:
