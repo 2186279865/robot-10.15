@@ -127,10 +127,14 @@ def _snap(root, name):
     try:
         from PIL import ImageGrab
         root.update()
+        try:
+            root.attributes("-topmost", True)   # 防别的窗口压在上面把截图挡掉
+        except Exception:
+            pass
         root.lift()
         root.focus_force()
         root.update()
-        time.sleep(0.05)
+        time.sleep(0.25)
         x, y = root.winfo_rootx(), root.winfo_rooty()
         w, h = root.winfo_width(), root.winfo_height()
         out = HERE / 'runtime' / name

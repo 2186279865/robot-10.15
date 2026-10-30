@@ -55,28 +55,30 @@ class RunTab(ttk.Frame):
         self.lb_fps = ttk.Label(bar, text="")
         self.lb_fps.pack(side="right")
 
-        body = ttk.Frame(self)
-        body.pack(side="top", fill="both", expand=True)
-
-        # Tk 的 pack 按顺序分配空间：先把底部日志区 pack 好，再 pack 可扩展的画布
-        # 右侧固定宽度日志栏（先 pack，才能保住宽度），左侧画布再 expand
-        right = ttk.Frame(body, width=430)
-        right.pack(side="right", fill="y", padx=(4, 8), pady=(0, 8))
-        right.pack_propagate(False)
-
-        ttk.Label(right, text="运行状态").pack(anchor="w")
-        self.txt_state = tk.Text(right, height=8, wrap="none",
-                                 bg="#0b0d10", fg="#d7dde5", font=("Consolas", 10))
-        self.txt_state.pack(fill="both", expand=True)
-
-        ttk.Label(right, text="识别结果").pack(anchor="w", pady=(6, 0))
-        self.txt_items = tk.Text(right, height=10, wrap="none",
-                                 bg="#0b0d10", fg="#b8e0a8", font=("Consolas", 10))
-        self.txt_items.pack(fill="both", expand=True)
-
-        self.canvas = tk.Canvas(body, width=CANVAS_W, height=CANVAS_H,
+        # 上方：固定尺寸主摄画面（单独一帧，保证永远有位置）
+        vid = ttk.Frame(self, height=CANVAS_H + 10)
+        vid.pack(side="top", fill="x", padx=8, pady=(0, 6))
+        vid.pack_propagate(False)
+        self.canvas = tk.Canvas(vid, width=CANVAS_W, height=CANVAS_H,
                                 bg="#111", highlightthickness=1)
-        self.canvas.pack(side="left", fill="both", expand=True, padx=(8, 4), pady=(0, 8))
+        self.canvas.pack(side="left")
+
+        # 下方：运行状态 / 识别结果 两栏日志，占满剩余空间
+        logs = ttk.Frame(self)
+        logs.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
+        logs.columnconfigure(0, weight=1)
+        logs.columnconfigure(1, weight=1)
+        logs.rowconfigure(0, minsize=20)
+        logs.rowconfigure(1, weight=1)
+
+        ttk.Label(logs, text="运行状态").grid(row=0, column=0, sticky="w")
+        ttk.Label(logs, text="识别结果").grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.txt_state = tk.Text(logs, height=10, wrap="none",
+                                 bg="#0b0d10", fg="#d7dde5", font=("Consolas", 10))
+        self.txt_state.grid(row=1, column=0, sticky="nsew")
+        self.txt_items = tk.Text(logs, height=10, wrap="none",
+                                 bg="#0b0d10", fg="#b8e0a8", font=("Consolas", 10))
+        self.txt_items.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
 
         self.status("运行台就绪：连上派端后点「▶ 一键启动」")
 
