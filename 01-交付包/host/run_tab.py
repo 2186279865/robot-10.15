@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """运行台：正式比赛用的操作页（第一页签）。
 
-- 左：主摄实时画面（可 0/90/180/270 旋转显示）+ 识别框/编号叠加
-- 右：上面「运行状态」、下面「识别结果」两个日志窗
-- 底部大按钮：「▶ 一键启动」= 连续抓取（抓到托盘空为止、抓完落货）
-              「⏏ 一键回 P0」= Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 0
+- 上：三个大按钮 ——「▶ 一键启动」= 连续抓取（抓到托盘空为止、抓完落货）
+                   「⏏ 一键回 P0」= Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 0
+- 下：左「运行状态」、右「识别结果」两个日志窗
+
+2026-10-31 用户要求**删掉预览画面**：运行台原来左上角复刻一份主摄画面（640×360），
+每 120 ms 取帧 + 画识别框 + 转成 Tk 图片，既占地方又白耗 CPU（图传已经吃过一次亏），
+现场看视觉结果直接去「视觉」页就行。现在这里只保留日志，识别结果从
+`vision_app.fused` 列表刷新（不再需要图像，也不再需要旋转/缩放开销）。
 """
 from __future__ import annotations
 
@@ -13,27 +17,19 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from PIL import Image, ImageDraw, ImageTk
-
 import auto_grab as AG
 import prep_pose as PP
-
-CANVAS_W, CANVAS_H = 640, 360
-IMG_W, IMG_H = 1920.0, 1080.0          # 主摄原始分辨率（画框用）
 
 
 class RunTab(ttk.Frame):
     def __init__(self, parent, app, **kw):
         super().__init__(parent, **kw)
         self.app = app
-        self.rot = 0
-        self._photo = None
         self._tick_id = None
         self._last_sig = None
         self._busy = False
         self._build()
         self._schedule()
-        import os as _os
 
     # ------------------------------------------------------------------ UI
     def _build(self) -> None:
@@ -46,24 +42,10 @@ class RunTab(ttk.Frame):
                                    command=self.on_home, width=14)
         self.btn_home.pack(side="left", padx=(8, 0))
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
-        ttk.Button(bar, text="↺ 左旋90", width=9,
-                   command=lambda: self.rotate(-90)).pack(side="left")
-        ttk.Button(bar, text="↻ 右旋90", width=9,
-                   command=lambda: self.rotate(90)).pack(side="left", padx=(6, 0))
-        self.lb_rot = ttk.Label(bar, text="0°")
-        self.lb_rot.pack(side="left", padx=(6, 0))
-        self.lb_fps = ttk.Label(bar, text="")
-        self.lb_fps.pack(side="right")
+        ttk.Label(bar, text="画面请到「视觉」页看（本页不再显示预览）",
+                  foreground="#667").pack(side="left")
 
-        # 上方：固定尺寸主摄画面（单独一帧，保证永远有位置）
-        vid = ttk.Frame(self, height=CANVAS_H + 10)
-        vid.pack(side="top", fill="x", padx=8, pady=(0, 6))
-        vid.pack_propagate(False)
-        self.canvas = tk.Canvas(vid, width=CANVAS_W, height=CANVAS_H,
-                                bg="#111", highlightthickness=1)
-        self.canvas.pack(side="left")
-
-        # 下方：运行状态 / 识别结果 两栏日志，占满剩余空间
+        # 下方：运行状态 / 识别结果 两栏日志，占满整页
         logs = ttk.Frame(self)
         logs.pack(side="top", fill="both", expand=True, padx=8, pady=(0, 8))
         logs.columnconfigure(0, weight=1)
@@ -201,22 +183,9 @@ class RunTab(ttk.Frame):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def rotate(self, delta: int) -> None:
-        self.rot = (self.rot + delta) % 360
-        self.lb_rot.config(text="%d°" % self.rot)
-
-    # -------------------------------------------------------------- render
+    # -------------------------------------------------------------- 轮询
     def _schedule(self) -> None:
         self._tick_id = self.after(120, self._tick)
-
-    def _frames(self):
-        vis = getattr(self.app, "vision", None) or getattr(self.app, "vision_app", None)
-        if vis is None or getattr(vis, "a", None) is None:
-            return None, vis
-        try:
-            return vis.a.get(), vis
-        except Exception:                                 # noqa: BLE001
-            return None, vis
 
     def _tick(self) -> None:
         # 连续抓线程结束后复位 _busy，否则第二次点「一键启动」会误报“正在执行”
@@ -227,61 +196,32 @@ class RunTab(ttk.Frame):
                     and (_th is None or not _th.is_alive()):
                 self._busy = False
         try:
-            frame, vis = self._frames()
-            if frame is None:
-                self.canvas.delete("all")
-                self.canvas.create_text(CANVAS_W // 2, CANVAS_H // 2, fill="#667",
-                                        text="主摄未打开（先到「视觉」页点「打开双画面」）")
-            else:
-                self._draw(frame, vis)
+            self._refresh_items()
         except Exception:                                 # noqa: BLE001
             pass
         finally:
             self._schedule()
 
-    def _draw(self, bgr, vis) -> None:
-        img = Image.fromarray(bgr[:, :, ::-1])            # BGR→RGB
-        if self.rot:
-            img = img.rotate(-self.rot, expand=True)      # 顺时针为正
-        w, h = img.size
-        boxes = []
-        for idx, it in enumerate(getattr(vis, "fused", []) or [], start=1):
+    def _vision(self):
+        return getattr(self.app, "vision", None) or getattr(self.app, "vision_app", None)
+
+    def _refresh_items(self) -> None:
+        """把视觉模块最近一次识别的目标列到「识别结果」（不再画图，只查 fused 列表）。"""
+        vis = self._vision()
+        items = getattr(vis, "fused", None) or []
+        sig = []
+        for idx, it in enumerate(items, start=1):
             top = it.get("top") or {}
-            bb = top.get("bbox") or top.get("bbox_orig") or it.get("bbox")
-            if not bb or len(bb) != 4:
+            if not (top.get("bbox") or top.get("bbox_orig") or it.get("bbox")):
                 continue
-            boxes.append((idx, bb, "%s%s" % (
+            sig.append((idx, "%s%s" % (
                 (it.get("class_name") or it.get("shape") or "待登记"),
                 (" " + it["color"]) if it.get("color") else "")))
-        draw = ImageDraw.Draw(img)
-        for idx, bb, label in boxes:
-            if self.rot in (90, 270):
-                k = w / IMG_H
-                x = float(bb[1]) * k
-                y = (IMG_W - float(bb[0]) - float(bb[2])) * k
-                bw, bh = float(bb[3]) * k, float(bb[2]) * k
-            else:
-                k = w / IMG_W
-                x, y = float(bb[0]) * k, float(bb[1]) * k
-                bw, bh = float(bb[2]) * k, float(bb[3]) * k
-            draw.rectangle([x, y, x + bw, y + bh], outline=(80, 220, 120), width=3)
-            draw.text((x + 4, max(0, y - 14)), "#%d %s" % (idx, label), fill=(255, 235, 120))
-        sig = tuple((i, label) for i, _, label in boxes)
-        if sig != self._last_sig:
-            self._last_sig = sig
-            if not sig:
-                self.item_log("（画面里没有识别到目标）")
-            for i, label in sig:
-                self.item_log("#%d %s" % (i, label))
-        scale = min(CANVAS_W / float(img.size[0]), CANVAS_H / float(img.size[1]))
-        disp = img.resize((max(1, int(img.size[0] * scale)),
-                           max(1, int(img.size[1] * scale))), Image.BILINEAR)
-        self._photo = ImageTk.PhotoImage(disp)
-        self.canvas.delete("all")
-        self.canvas.create_image(CANVAS_W // 2, CANVAS_H // 2,
-                                 image=self._photo, anchor="center")
-        try:
-            if vis is not None and getattr(vis, "a", None) is not None:
-                self.lb_fps.config(text="顶视 %.1f fps" % vis.a.fps())
-        except Exception:                                 # noqa: BLE001
-            pass
+        sig = tuple(sig)
+        if sig == self._last_sig:
+            return
+        self._last_sig = sig
+        if not sig:
+            self.item_log("（画面里没有识别到目标）")
+        for i, label in sig:
+            self.item_log("#%d %s" % (i, label))
