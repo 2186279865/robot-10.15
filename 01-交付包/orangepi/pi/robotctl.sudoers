@@ -1,0 +1,2 @@
+# 给「重启派端」按钮用：只放开两条运维命令，不要给整机 root
+orangepi ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart robotpi, /usr/bin/systemctl reboot

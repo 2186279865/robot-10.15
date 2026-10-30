@@ -486,6 +486,8 @@ class App:
         self.stop_button.pack(side="right", padx=6)
         self.clear_latch_button = ttk.Button(bar, text="清除停止锁存", command=self.clear_latch)
         self.clear_latch_button.pack(side="right", padx=4)
+        self.restart_pi_button = ttk.Button(bar, text="重启派端", command=self.restart_pi)
+        self.restart_pi_button.pack(side="right", padx=4)
         self.zero_button = tk.Button(
             bar, text="⚠ 位置清零", command=self.zero_all_axes,
             bg="#fff3e0", fg="#b23c00", activebackground="#ffe0b2",
@@ -1464,6 +1466,46 @@ class App:
         self._log("位置清零已下发（4 轴）：X/Y/Z/托盘 当前位置 = 0")
         self._log("如当前不在 P0，请用 tools\\calib_shift.py 平移标定，否则自动抓会走偏", "warn")
         self.root.after(800, self._init_report)
+
+    def _pi_host_from_ui(self):
+        """从「串口」下拉框里抠出派端 IP（tcp://IP:5058 / 「派 robot-pi IP…」两种写法）。"""
+        import re
+        text = str(self.port_text.get() or '')
+        m = re.search(r'(\d{1,3}(?:\.\d{1,3}){3})', text)
+        return m.group(1) if m else None
+
+    def restart_pi(self) -> None:
+        """重启派端（屏幕 + 图传/串口桥服务）。不动机器人自身状态。"""
+        import threading
+
+        host = self._pi_host_from_ui()
+        if not host:
+            self.note("没在下拉框里识别到派端 IP（要选 tcp://<派IP>:5058 这一项）")
+            return
+        if not messagebox.askyesno(
+                "重启派端",
+                "会重启派端上的：\n"
+                "  • 屏幕程序（pi_display）\n"
+                "  • 图传/串口桥服务（robotpi）\n\n"
+                "期间上位机会短暂断开（几秒），机械臂不会自己动。\n"
+                "确认重启 %s ？" % host):
+            return
+        self.note("正在重启派端 %s …" % host)
+
+        def work():
+            import pi_ctl
+            msgs = []
+            try:
+                msgs.append('显示：' + pi_ctl.send(host, 'restart_display'))
+            except OSError as exc:
+                msgs.append('显示失败：%s' % exc)
+            try:
+                msgs.append('服务：' + pi_ctl.send(host, 'restart_agent'))
+            except OSError as exc:
+                msgs.append('服务失败：%s' % exc)
+            self.root.after(0, lambda: self.note('重启派端结果：' + '；'.join(msgs)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def clear_latch(self) -> None:
         """解除固件的停止锁存：按过停止（或发过 '!'）之后，必须显式解除才能继续跑运动。"""
