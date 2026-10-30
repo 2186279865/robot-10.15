@@ -172,6 +172,79 @@ def describe(cfg: Dict[str, object]) -> str:
 
 AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
+#: 「按遥测判到位」的容差下限（counts）。每轴再和该轴闭环容差 `GOTO_TOL_BY_AXIS` 取较大者 ×2：
+#: Z 1500 counts（≈0.044 mm）→ 3000 counts ≈0.09 mm；Y 350 → 800 counts ≈0.4 mm。
+ARRIVE_COUNTS_MIN = 800.0
+#: 判到位需要连续这么多次遥测都对得上（间隔 `ARRIVE_GAP_S`），防止“正好路过”被当成到位。
+ARRIVE_NEED = 2
+ARRIVE_GAP_S = 0.08
+
+
+def arrive_tol_counts(axis: int) -> float:
+    """该轴「遥测判到位」的容差（counts）。"""
+    try:
+        base = float(P.GOTO_TOL_BY_AXIS.get(int(axis), 350))
+    except Exception:                                 # noqa: BLE001
+        base = 350.0
+    return max(ARRIVE_COUNTS_MIN, base * 2.0)
+
+
+def tele_counts(client, axis: int):
+    """从客户端最新遥测里取某轴 counts；没有就 None（离线/未订阅时返回 None）。"""
+    last = getattr(client, 'last_counts', None)
+    if not isinstance(last, dict):
+        return None
+    ent = last.get(int(axis))
+    if isinstance(ent, dict):
+        try:
+            v = float(ent.get('counts'))
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v                      # 过滤 NaN
+    try:
+        return float(ent)
+    except (TypeError, ValueError):
+        return None
+
+
+def await_goto(client, req, axis: int, want_counts: int, timeout_ms: int,
+               waiter, log=None, poll_ms: int = 60) -> tuple:
+    """等一条 `motor_goto` 结算：**回执优先，回执迟到时按遥测 counts 判到位**。
+
+    为什么需要：现场（2026-10-31 04:38~04:55）固件 1.0~1.6 s 就走完、并把 counts 停到
+    目标点，但回执要 2~15 s 才回来（图传把派端/无线挤满，串口桥的应答积压）。
+    旧代码死等回执 → 表现为「Z 降到底后停顿很久才开始夹紧/抬升」。
+    这里改成：一边等回执，一边看遥测 counts —— 连续两次都在容差内就认定到位、
+    先继续动作；迟到的回执照常结算（调用方已经用 `extend_deadline` 把它的截止时间推后）。
+
+    返回 `(rep, how)`：`how='reply'` 正常回执；`how='counts'` 遥测判到位；`how='timeout'` 超时。
+    """
+    say = log or (lambda _t: None)
+    tol = arrive_tol_counts(axis)
+    t0 = time.monotonic()
+    deadline = t0 + max(1.0, float(timeout_ms) / 1000.0)
+    first_hit_at = None
+    hits = 0
+    while True:
+        rep = waiter(req, poll_ms)
+        if rep is not None:
+            return rep, 'reply'
+        now = time.monotonic()
+        cur = tele_counts(client, axis)
+        if cur is not None and abs(cur - float(want_counts)) <= tol:
+            if first_hit_at is None:
+                first_hit_at = now
+            hits += 1
+            if hits >= ARRIVE_NEED and (now - first_hit_at) >= ARRIVE_GAP_S:
+                return {}, 'counts'                 # 连续若干次都对得上 → 到位
+        else:
+            first_hit_at = None
+            hits = 0
+        if now >= deadline:
+            return None, 'timeout'
+        time.sleep(0.02)                        # waiter 立刻返回时别空转烧 CPU
+
+
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
              soft=None, known=None, counts=None,
@@ -261,13 +334,24 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         try:
             req = client.goto(axis, pulses, rpm=rpm_i,
                               tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
-            rep = waiter(req, estimate_timeout_ms(pulses, rpm_i))
+            rep, how = await_goto(client, req, axis, counts_of(target),
+                                  estimate_timeout_ms(pulses, rpm_i), waiter, say)
         except Exception as exc:                      # noqa: BLE001
             item['code'] = 'EXC'
             item['text'] = '%s: %s' % (type(exc).__name__, exc)
             results.append(item)
             say('%s：异常 %s' % (label, item['text']))
             return results
+        if how == 'counts':
+            # 回执还在路上：把它的截止时间推后，迟到的回执照常结算（不再刷「结果未知」）。
+            try:
+                client.extend_deadline(req, extra_ms=30000)
+            except Exception:                         # noqa: BLE001
+                pass
+            item['arrived_by'] = 'counts'
+            say('%s：回执还没到，但遥测 counts 已到位（%d），先按到位继续'
+                % (label, counts_of(target)))
+            rep = {'kind': 'reply', 'code': '', 'text': '', 'pairs': {'arrived_by': 'counts'}}
         if rep is None:
             item['code'] = 'TIMEOUT'
             item['text'] = '客户端等待超时'
@@ -512,8 +596,12 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         except Exception:                           # noqa: BLE001
             return None
 
-    def _goto_wait(axis, tgt, rpm_i):
-        """闭环补走并**等它跑完**。client.goto() 只发不等，必须自己等回执。"""
+    def _goto_wait(axis, tgt, rpm_i, want_pulses=None):
+        """闭环补走并**等它跑完**。client.goto() 只发不等，必须自己等回执。
+
+        用 `await_goto`：回执迟到时按遥测 counts 判到位先继续（并把迟到回执的
+        截止时间推后），不再因为链路拥塞把整件卡住十几秒。
+        """
         try:
             rid = client.goto(axis, tgt, rpm=rpm_i,
                               tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
@@ -525,11 +613,19 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             say('%s 补走已下发（无回执可等）' % AXIS_LABEL.get(axis, axis))
             return False
         tmo = estimate_timeout_ms(tgt, rpm_i)
+        want = counts_of(want_pulses if want_pulses is not None else tgt)
         try:
-            rep = wf(rid, timeout_ms=tmo)
+            rep, how = await_goto(client, rid, axis, want, tmo, wf, say)
         except Exception as exc:                    # noqa: BLE001
             say('%s 补走等待异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
             return False
+        if how == 'counts':
+            try:
+                client.extend_deadline(rid, extra_ms=30000)
+            except Exception:                       # noqa: BLE001
+                pass
+            say('%s 补走：回执还没到，遥测 counts 已到位，先继续' % AXIS_LABEL.get(axis, axis))
+            return True
         pr = _pairs(rep) or {}
         code = str(rep.get('code') or '') if isinstance(rep, dict) else ''
         if not pr and not code:
@@ -716,11 +812,11 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                         % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_SKIP_PULSES))
                     continue
                 say('%s 并行残差 %+d 脉冲，顺序补一次（相对量，等回执）' % (AXIS_LABEL.get(axis, axis), miss))
-                if not _goto_wait(axis, miss, rpm_of(axis)):
+                if not _goto_wait(axis, miss, rpm_of(axis), tgt):
                     raise RuntimeError('%s 补走未完成（锁存/超时），中止本件' % AXIS_LABEL.get(axis, axis))
         for axis in bad:
             rel = targets[axis] - int(round((cur.get(axis) or 0) / COUNTS_PER_PULSE))
-            if not _goto_wait(axis, rel, rpm_of(axis)):
+            if not _goto_wait(axis, rel, rpm_of(axis), targets[axis]):
                 raise RuntimeError('%s 并行被拒后补走失败' % AXIS_LABEL.get(axis, axis))
 
         return [{'axis': a, 'pulses': targets[a], 'ok': True, 'code': '', 'text': '', 'pairs': {}}

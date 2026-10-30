@@ -345,5 +345,87 @@ class GotoTolTests(unittest.TestCase):
         self.assertEqual(seen[PP.AXIS_Y], P.GOTO_TOL_BY_AXIS[PP.AXIS_Y])
         self.assertGreater(P.GOTO_TOL_BY_AXIS[PP.AXIS_Z], P.GOTO_TOL_BY_AXIS[PP.AXIS_Y])
 
+
+class _TeleClient:
+    """只有遥测 counts 的假 client：验证「回执迟到时按 counts 判到位」。
+
+    现场 2026-10-31 04:38~04:55：固件 1.0~1.6 s 走完并把 counts 停在目标点，
+    回执却迟到 2~15 s（图传挤满链路）→ 旧代码死等回执，表现为「Z 降底后停顿很久」。
+    """
+
+    def __init__(self, counts=None, move_fraction=1.0):
+        self.counts = {int(k): float(v) for k, v in (counts or {}).items()}
+        self.last_counts = {int(k): {'counts': v, 'ts': 0} for k, v in self.counts.items()}
+        self.move_fraction = float(move_fraction)
+        self.extended = []
+        self.sent = []
+        self._n = 0
+
+    def _set(self, axis, counts):
+        self.counts[int(axis)] = float(counts)
+        self.last_counts[int(axis)] = {'counts': float(counts), 'ts': 0}
+
+    def send(self, cmd, *args, **kw):
+        self._n += 1
+        self.sent.append((cmd, args))
+        return self._n
+
+    def goto(self, axis, pulses, rpm=None, tol=None, **kw):
+        self._n += 1
+        self.sent.append(('goto', (int(axis), int(pulses))))
+        cur = self.counts.get(int(axis), 0.0)
+        self._set(axis, cur + float(pulses) * PP.COUNTS_PER_PULSE * self.move_fraction)
+        return self._n
+
+    def extend_deadline(self, req_id, extra_ms=30000):
+        self.extended.append((int(req_id), int(extra_ms)))
+        return True
+
+
+class AwaitGotoTests(unittest.TestCase):
+    """`await_goto`：回执优先，回执迟到时按遥测 counts 判到位先继续。"""
+
+    def test_reply_wins_when_it_arrives(self):
+        client = _TeleClient({PP.AXIS_Z: 0.0})
+        rep, how = PP.await_goto(
+            client, 7, PP.AXIS_Z, PP.counts_of(-152000), 2000,
+            lambda rid, ms: {'kind': 'reply', 'code': '', 'pairs': {'err': '0'}},
+        )
+        self.assertEqual(how, 'reply')
+        self.assertEqual(rep['pairs']['err'], '0')
+
+    def test_counts_win_when_ack_is_late(self):
+        want = PP.counts_of(-152000)
+        client = _TeleClient({PP.AXIS_Z: want + 500.0})   # 已在容差内
+        t0 = PP.time.monotonic()
+        rep, how = PP.await_goto(client, 8, PP.AXIS_Z, want, 5000, lambda rid, ms: None)
+        cost = PP.time.monotonic() - t0
+        self.assertEqual(how, 'counts')
+        self.assertEqual(rep, {})
+        self.assertLess(cost, 2.0, '判到位不该等满超时')
+
+    def test_times_out_when_counts_are_far_and_no_ack(self):
+        client = _TeleClient({PP.AXIS_Z: 0.0})
+        rep, how = PP.await_goto(client, 9, PP.AXIS_Z, PP.counts_of(-152000), 300,
+                                 lambda rid, ms: None)
+        self.assertIsNone(rep)
+        self.assertEqual(how, 'timeout')
+
+    def test_move_abs_continues_and_extends_deadline(self):
+        # 回执永不回来 → move_abs 应靠遥测 counts 判到位、继续下一步，而不是报 TIMEOUT
+        client = _TeleClient({PP.AXIS_Y: 0.0})
+        results = PP.move_abs(client, {PP.AXIS_Y: -13144}, order=[PP.AXIS_Y], rpm=2000,
+                              counts={PP.AXIS_Y: 0.0}, wait=lambda rid, ms: None)
+        self.assertTrue(results[0]['ok'], results)
+        self.assertEqual(results[0].get('arrived_by'), 'counts')
+        self.assertTrue(client.extended, '迟到的回执要 extend_deadline，避免被当成「结果未知」')
+
+    def test_arrive_tolerance_is_per_axis(self):
+        # Z 容差比 Y 大（Z 行程长、闭环容差本来就宽），但都至少 800 counts
+        self.assertGreaterEqual(PP.arrive_tol_counts(PP.AXIS_Z), 800.0)
+        self.assertGreaterEqual(PP.arrive_tol_counts(PP.AXIS_Y), 800.0)
+        self.assertGreater(PP.arrive_tol_counts(PP.AXIS_Z), PP.arrive_tol_counts(PP.AXIS_Y) / 2)
+
+
 if __name__ == '__main__':
     unittest.main()

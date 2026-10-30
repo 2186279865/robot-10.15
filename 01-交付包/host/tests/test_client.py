@@ -385,5 +385,46 @@ class TestReadbackMask(ClientTestBase):
         self.assertEqual(self.device.readback_list(), "1/3/4/5")
 
 
+class TestLateReplyAndDeadline(ClientTestBase):
+    """回执迟到（图传挤满链路）时的两条护栏。
+
+    现场 2026-10-31 04:38~04:55：固件 1.0~1.6 s 走完，回执迟到 2~15 s。
+    - `extend_deadline()`：上位机已按遥测 counts 判到位，就不要再把这条请求判成「结果未知」；
+    - `_note_late_reply()`：迟到的回执要能按名字在日志里点名，方便现场判断链路通不通。
+    """
+
+    def test_extend_deadline_keeps_request_alive(self):
+        self.connect()
+        rid = self.client.send("status", timeout_ms=500)
+        self.clock.advance(400)                       # 还没超时
+        self.assertTrue(self.client.extend_deadline(rid, extra_ms=5000))
+        self.clock.advance(1000)                      # 本来早该超时了
+        self.client.tick()
+        self.assertIn(rid, self.client.pending)
+        self.assertEqual(self.client.pending[rid].result, HC.RESULT_WAITING)
+        self.pump()                                   # 迟到的回执终于到了
+        self.assertEqual(self.client.done_of(rid)["kind"], "reply")
+
+    def test_extend_deadline_is_noop_for_unknown_id(self):
+        self.connect()
+        self.assertFalse(self.client.extend_deadline(999999))
+
+    def test_late_reply_is_reported_by_name(self):
+        self.connect()
+        self.client.send("status", timeout_ms=20000)
+        self.clock.advance(3000)                      # 搁 3 s 才让回执到（> LATE_REPLY_MS）
+        self.pump()
+        notes = [e.text for e in self.polled("note") if "回执迟到" in e.text]
+        self.assertTrue(notes, "迟到的回执应该点名告警")
+        self.assertIn("status", notes[0])
+
+    def test_fast_reply_has_no_late_warning(self):
+        self.connect()
+        self.client.send("status", timeout_ms=20000)
+        self.pump()
+        notes = [e.text for e in self.polled("note") if "回执迟到" in e.text]
+        self.assertEqual(notes, [])
+
+
 if __name__ == "__main__":
     unittest.main()

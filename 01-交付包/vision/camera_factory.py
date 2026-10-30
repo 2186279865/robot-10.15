@@ -140,14 +140,19 @@ def make_remote(index, width, height, fps, host=None, img_port=None, cam_map_=No
     return RemoteCamera(cam_id, width, height, fps, host, port)
 
 
-def make_camera(index, width, height, fps):
-    """GUI 唯一入口：有远程配置就用 RemoteCamera，否则用本地 Camera。"""
+def make_camera(index, width, height, fps, quality=0):
+    """GUI 唯一入口：有远程配置就用 RemoteCamera，否则用本地 Camera。
+
+    `quality`（JPEG 质量，0=用派端配置）只对远程相机有意义：派端每帧现编码，
+    质量越低越省 CPU/带宽（现场图传曾把链路挤到运动回执迟到 15 s）。
+    """
     settings = remote_settings()
     host = settings['host']
     if host:
         from remote_camera import RemoteCamera
         cam_id = int(cam_map().get(int(index), index))
-        return RemoteCamera(cam_id, width, height, fps, host, settings['img_port'])
+        return RemoteCamera(cam_id, width, height, fps, host, settings['img_port'],
+                            quality=quality)
     return Camera(index, width, height, fps)
 
 

@@ -1,8 +1,8 @@
 {
   "top_camera_index": 0,
   "side_camera_index": 1,
-  "width": 1920,
-  "height": 1080,
+  "width": 1280,
+  "height": 720,
   "fps": 8,
   "remote": {
     "host": "",
@@ -123,5 +123,9 @@
   "white_sat_max": 55,
   "white_val_min": 80,
   "white_min_area": 5000,
-  "white_min_fill": 0.35
+  "white_min_fill": 0.35,
+  "img_quality": 60,
+  "preview_fps": 4,
+  "calib_width": 1920,
+  "calib_height": 1080
 }
