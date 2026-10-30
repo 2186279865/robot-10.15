@@ -877,6 +877,9 @@ class CalibTab(ttk.Frame):
                 on_event=lambda ev: self.after(0, self._many_event, ev),
                 display=_disp,
                 warp_path=_warp,
+                # 一键启动/连续抓：识别期间先把「①Y 进通道 → ②Z 抬顶」走掉，
+                # 点完按钮 1 s 内机械臂就动（以前要干等识别十几秒）。
+                prefetch=True,
             )
             self.after(0, self.say, '连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
                        % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))

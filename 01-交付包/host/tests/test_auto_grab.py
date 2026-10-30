@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -188,6 +189,63 @@ class RunManyEventTest(unittest.TestCase):
         self.assertIn('item_ok', kinds)
         self.assertEqual(kinds[-1], 'finished')
         self.assertEqual(events[0]['n'], 1)
+
+
+class PrefetchTest(unittest.TestCase):
+    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 ②Z 抬顶 走掉。
+
+    预走是安全敏感的（Z 不在底时绝不能动 Y 进通道），所以两个方向都要测：
+    在底 → 走两步；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
+    """
+
+    def setUp(self):
+        self._orig = (AG.load_targets, AG.pick_target)
+        AG.load_targets = lambda *a, **k: [{'center_tray': [0.5, 0.5],
+                                            'confidence': 1.0,
+                                            'shape': '正方体/正方形',
+                                            'color': '绿'}]
+        AG.pick_target = lambda targets, **k: targets[0]
+
+    def tearDown(self):
+        AG.load_targets, AG.pick_target = self._orig
+
+    def _run(self, counts, logs, recognize=None):
+        client = FakeClient()
+        client.counts.update(counts)
+        pos_source = lambda: ({}, {}, dict(client.counts))   # noqa: E731
+        # 识别故意慢 0.3 s，给预走线程留出真并发的时间窗口（假 client 动作是瞬时的）
+        rec = recognize or (lambda: time.sleep(0.30))
+        res = AG.run_many(client, 1, rec, log=logs.append,
+                          wait=lambda rid, ms: client.done_of(rid),
+                          pos_source=pos_source, drop=False, prefetch=True)
+        return client, res
+
+    def test_walks_channel_steps_while_recognizing(self):
+        logs = []
+        client, res = self._run({}, logs)
+        self.assertEqual(res['done'], 1)
+        self.assertTrue(any('[预走] 完成' in t for t in logs), logs)
+        # 预走顺序：Y 进通道（goto 到 P1_Y）在前，Z 抬顶在后
+        pre = [t for t in logs if t.startswith('[预走]')]
+        self.assertTrue(any('①Y 进通道 开始' in t for t in pre), pre)
+        self.assertTrue(any('②Z 抬顶 开始' in t for t in pre), pre)
+        y_i = next(i for i, t in enumerate(pre) if '①Y' in t)
+        z_i = next(i for i, t in enumerate(pre) if '②Z' in t)
+        self.assertLess(y_i, z_i)
+
+    def test_skipped_when_z_not_at_bottom(self):
+        logs = []
+        client, res = self._run({AG.AXIS_Z: AG.Z_UP * 20.48}, logs)
+        self.assertEqual(res['done'], 1)
+        self.assertTrue(any('预走跳过' in t for t in logs), logs)
+        self.assertFalse(any('[预走] 完成' in t for t in logs), logs)
+
+    def test_recognize_timing_message_goes_to_log(self):
+        logs = []
+        self._run({}, logs,
+                  recognize=lambda: (None, '单次识别完成：3 个目标（用时 2.10s）'))
+        self.assertTrue(any('识别完成：' in t for t in logs), logs)
+        self.assertTrue(any('视觉：单次识别完成' in t for t in logs), logs)
 
 
 if __name__ == '__main__':

@@ -871,15 +871,19 @@ class App:
             self.bstream.start()
             self.running = True
             self.note('双画面运行中')
-            # 后台预热 SAM：第一次识别要加载 ~5 s 模型，若不预热，
-            # 用户第一次点「连续抓」会以为界面卡死（首帧加载占满 CPU/GIL）
+            # 后台预热 SAM：既要加载权重（~5 s），也要跑一次真实推理。
+            # 只加载不推理没用——现场实测 ultralytics 的**首帧 predict 还要再花 ~8 s**
+            # （建算子/传权重），用户点「连续抓」时这 8 s 就变成"点了半天不动"。
             try:
                 import threading as _th
                 def _prewarm():
                     try:
                         ok = self.ensure_segmenter()
+                        if ok:
+                            ok = bool(self.segmenter.warmup(self.cfg))
                         self.r.after(0, self.note,
-                                     '分割模型预热完成' if ok else '分割模型预热失败（首次识别会慢）')
+                                     '分割模型预热完成（含首帧推理）' if ok
+                                     else '分割模型预热失败（首次识别会慢）')
                     except Exception as exc:            # noqa: BLE001
                         self.r.after(0, self.note, '分割模型预热异常：%s' % exc)
                 _th.Thread(target=_prewarm, daemon=True).start()
@@ -2042,7 +2046,10 @@ class App:
         if len(self.points) != 4:
             raise RuntimeError('请先完成顶视四点定位')
         n = int(self.cfg.get('frames_for_vote', 3) or 3)
-        n = max(2, min(5, n))
+        # 尊重配置：允许 1 帧（与 _recognize_precheck 保持一致）。
+        # 一帧要跑 顶视SAM + 副摄SAM + 云端分类 ≈ 2~5 s，以前这里写死 max(2, …) 硬凑 2 帧，
+        # 等于每次识别白等一倍时间（用户配置里本来就是 1 帧投票）。
+        n = max(1, min(5, n))
         return self._recognize_core(n)
 
     def _recognize_core(self, n):

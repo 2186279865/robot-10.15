@@ -47,6 +47,10 @@ SETTLE_GRAB_MS = 450       # 夹紧后等舵机走完
 SETTLE_OPEN_MS = 500       # 松爪后等货物落盒
 SETTLE_READY_MS = 250      # 回预备位
 
+#: 「预走」只允许在 Z 确实到底时才敢做（穿通道时通道净高不够）。
+#: 400 脉冲 ≈ 0.24 mm（1658 脉冲/mm），比"在底部"更宽松一点点也不会顶到横梁。
+PREFETCH_Z_TOL_PULSES = 400
+
 # 转速统一由 host/protocol.py 的 GOTO_RPM_BY_AXIS 决定（这里原来写死 1500/120/300，
 # 导致改 protocol 完全无效——日志里一直显示旧转速就是这个原因）
 try:
@@ -589,7 +593,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
              current_box: int = 1,
              on_event: Optional[Callable[[dict], None]] = None,
              display=None, warp_path=None, total: Optional[int] = None,
-             recognize_each: bool = False, retry_once: bool = True) -> Dict[str, object]:
+             recognize_each: bool = False, retry_once: bool = True,
+             prefetch: bool = False) -> Dict[str, object]:
     """连续抓 N 件——流程与「自动抓一件」完全一致，只是外面套了一层循环。
 
     与旧版的区别只在“什么时候识别”：
@@ -597,6 +602,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
       * recognize_each=True：退回旧行为（每件都重新识别一次），现场可随时切。
 
     每件调用一次 run_once()，因此动作序列、护栏、日志格式与单件完全相同。
+    prefetch=True（一键启动用）：识别期间先把固定路线的前两步走掉，点完就动，
+    见 _prefetch_channel()；默认关，单件/测试行为不变。
     """
     def emit(kind, **kw):
         if on_event is None:
@@ -622,6 +629,82 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             client.send('stop_clear', timeout_ms=1500)
         except Exception:                          # noqa: BLE001
             pass
+
+    # ---- 首件「预走」：点完「一键启动」马上动，别让机械臂干等识别 ----
+    def _z_at_bottom(tol_pulses: float = PREFETCH_Z_TOL_PULSES) -> bool:
+        """Z 是否确实在底部：连续两次回读都在容差内、且几乎没动。
+
+        穿通道时 Z 必须在底（通道净高不够），所以预走只在"确认在底"时才敢做；
+        读数缺失 / 两次差太多一律当"不知道"，直接跳过（按常规顺序走，安全第一）。
+        """
+        if pos_source is None:
+            return False
+        vals: List[float] = []
+        for _i in range(2):
+            try:
+                _s, _k, cnt = pos_source()
+            except Exception:                      # noqa: BLE001
+                return False
+            z = (cnt or {}).get(AXIS_Z)
+            if z is None:
+                return False
+            try:
+                vals.append(float(z))
+            except (TypeError, ValueError):
+                return False
+            time.sleep(0.15)
+        tol_counts = float(tol_pulses) * float(prep_pose.COUNTS_PER_PULSE)
+        return (abs(vals[0]) <= tol_counts and abs(vals[1]) <= tol_counts
+                and abs(vals[1] - vals[0]) <= 24.0)
+
+    def _prefetch_channel():
+        """把固定路线的前两步（①Y 进通道 → ②Z 抬顶）放到后台先走。
+
+        识别要 2~4 s（慢时十几秒），这段时间机械臂本来只能干等；
+        而这两步与识别结果无关（任何物块都得先穿通道再抬顶），可以并行。
+        返回后台线程（可能被 join），跳过时返回 None。
+        """
+        if not prefetch or pos_source is None:
+            return None
+        if stop_flag is not None and stop_flag():
+            return None
+        if not _z_at_bottom():
+            log('[连续抓] 预走跳过：Z 回读不在底部（或读数不可用）→ 按常规顺序走')
+            return None
+
+        def work():
+            first = {'v': True}
+            for tg, order, what in (({AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'),
+                                    ({AXIS_Z: Z_UP}, [AXIS_Z], '②Z 抬顶')):
+                if stop_flag is not None and stop_flag():
+                    log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
+                    return
+                try:
+                    _s, _k, cnt = pos_source() if pos_source else (None, None, None)
+                except Exception:                  # noqa: BLE001
+                    _s, _k, cnt = None, None, None
+                try:
+                    log('[预走] %s 开始' % what)
+                    res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
+                                             acc=_ACC_DEFAULT,
+                                             log=lambda t: log('[预走] ' + t),
+                                             wait=wait, soft=_s, known=_k, counts=cnt,
+                                             prep=first['v'])
+                    first['v'] = False
+                    bad = [r for r in res if not r.get('ok')]
+                    if bad:
+                        log('[预走] %s 没走到位（%s），交给正式流程重走'
+                            % (what, bad[0].get('code') or bad[0].get('text') or ''))
+                        return
+                except Exception as exc:           # noqa: BLE001
+                    log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
+                    return
+            log('[预走] 完成：已在通道末端抬顶，识别一回来就直接走 X/Y')
+
+        th = threading.Thread(target=work, name='grab-prefetch', daemon=True)
+        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道 → ②Z 抬顶」')
+        th.start()
+        return th
 
     done = 0
     failed = 0
@@ -651,19 +734,40 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         # ---- 取下一件：优先用已有清单，空了（或要求每件识别）才识别 ----
         target = None
+        _pre = None          # 预走线程（识别期间先把①②走掉的，见 _prefetch_channel）
         if pending and not recognize_each:
             target = pending.pop(0)
             log('=== 第 %d/%s 件：用已识别清单（剩 %d 件待抓）==='
                 % (i + 1, cnt_txt, len(pending) + 1))
         else:
+            # 识别要几秒（慢时十几秒）：先把固定路线的前两步挂到后台，
+            # 点完「一键启动」不到 1 s 机械臂就动 —— 见 _prefetch_channel()
+            _pre = _prefetch_channel()
             log('=== 第 %d/%s 件：单次识别 ===' % (i + 1, cnt_txt))
+            _t_rec = time.perf_counter()
             try:
-                recognize()
+                _r = recognize()
+                log('[连续抓] 识别完成：%.1f s' % (time.perf_counter() - _t_rec))
+                # recognize_blocking 会返回 (fused, msg)，msg 里带各段耗时明细；
+                # 以前只推到「视觉」页的 note（不落盘），现场排查看不到，这里补进日志。
+                if isinstance(_r, tuple) and len(_r) >= 2 and isinstance(_r[1], str):
+                    log('[连续抓] 视觉：%s' % _r[1])
             except Exception as exc:               # noqa: BLE001
+                if _pre is not None:
+                    try:
+                        _pre.join()
+                    except Exception:              # noqa: BLE001
+                        pass
                 failed += 1
                 log('[连续抓] 第 %d 件识别失败：%s' % (i + 1, exc))
                 emit('item_fail', i=i + 1, reason='识别失败：%s' % exc)
                 break
+            # 预走收尾：固件 goto 只有一个执行槽，绝不能让预走和正式动作抢
+            if _pre is not None:
+                if _pre.is_alive():
+                    log('[连续抓] 等预走收尾（机械臂先走完 ①Y 进通道 / ②Z 抬顶）…')
+                _pre.join()
+                _pre = None
             targets = load_targets()
             if not targets:
                 log('[连续抓] 画面里没有可抓的物块了，结束（已抓 %d 件）' % done)

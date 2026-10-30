@@ -238,6 +238,30 @@ class AutoSegmenter:
         keep.sort(key=lambda z: (z['center_tray'][1], z['center_tray'][0]))
         return keep
 
+    def warmup(self, cfg=None, size: int = 700):
+        """预热到「第一次真实推理也已经跑过」的程度。
+
+        现场实测（2026-10-31，RTX 5060 / torch 2.7.1+cu128）：
+        SAM(...) 只是加载权重，**第一次 predict 还要再花约 8 s**（建算子/传权重）；
+        光构造不推理，用户第一次点「连续抓」仍然要等这 8 s。
+        这里造一张 700×700 的假场景（灰底 + 一个饱和色块）走完整 segment()，
+        把提示点、SAM 推理、掩膜后处理都跑到。失败不影响主流程。
+
+        返回 True 表示这次预热真的跑完了推理。
+        """
+        cfg = dict(cfg or {})
+        # 注意：**不能剥掉 device** —— 真实识别时 segment() 会用 cfg['device']（现场是 cuda），
+        # 预热必须跑在同一个设备上，否则预热的是 CPU、真实识别第一次还是要在 CUDA 上重建算子。
+        s = max(64, int(size or 700))
+        img = np.full((s, s, 3), 110, dtype=np.uint8)     # 灰底：饱和度低，不会被当成候选
+        c = int(s * 0.34)
+        cv2.rectangle(img, (c, c), (c + s // 6, c + s // 6), (40, 40, 200), -1)  # 饱和红块
+        try:
+            self.segment(img, None, cfg)
+            return True
+        except Exception:                              # noqa: BLE001 —— 预热失败只影响速度
+            return False
+
     @staticmethod
     def _faces_merge(item, other, gap=6):
         """两个掩膜是否像块状物体的两个相邻面"顶面+前面"。
