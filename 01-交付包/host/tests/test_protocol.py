@@ -301,6 +301,17 @@ class TestParamDefaults(unittest.TestCase):
         self.assertEqual(P.AXIS_LABELS[4], "X(4)")
         self.assertEqual(P.AXIS_LABELS[5], "Y(5)")
 
+    def test_tele_period_is_the_real_knob(self):
+        """遥测降频要改 tele_on 的 interval（`TELE_PERIOD_MS`），不是 `telemetry_ms`。
+
+        固件里的 `telemetry_ms` 参数只是声明、没人读；真正生效的是 `tele_on` 的
+        interval，而且每拍会把订阅轴 + 其它有回读的轴一起发。200 ms → 四轴 5 Hz
+        ≈20 帧/秒，界面每条还记两遍 → 日志 40 行/秒，把串口桥挤停过 5 s。
+        """
+        self.assertEqual(P.TELE_PERIOD_MS, 400)
+        # tele_on 的合法区间是 20~60000 ms，400 在区间内
+        self.assertIn(400, range(20, 60001))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -25,6 +25,7 @@ import display_link
 import calib_wizard as W
 import grasp_calib as GC
 import prep_pose as PP
+import protocol as P
 import units
 import vision_grasp as VG
 
@@ -543,7 +544,7 @@ class CalibTab(ttk.Frame):
             return True
         for axis in (1, 3, 4, 5):
             try:
-                client.send('tele_on', int(axis), 200)
+                client.send('tele_on', int(axis), int(P.TELE_PERIOD_MS))
             except Exception:                          # noqa: BLE001
                 pass
         for _ in range(12):

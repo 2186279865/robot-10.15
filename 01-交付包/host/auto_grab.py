@@ -43,8 +43,14 @@ P1_Y = -13144
 P0_Y = 0
 TRAY_DEG = 60.0
 
-SETTLE_GRAB_MS = 180       # 夹紧后只等舵机合拢（原 450；实测夹爪 168°→135° 约 0.2 s）
-SETTLE_OPEN_MS = 150       # 松爪后等货物离爪（原 500；爪子张开只需 ~0.15 s，货自然落盒）
+# 2026-10-31 用户明确要求「Z 降到底夹紧后立刻抬升」：夹紧指令发完就走，
+# 不再等舵机合拢 —— 固件 `host_cmd_gripper` 调完 `control_gripper_apply`
+# 立刻回 ok（`host_protocol_inline.h:2112-2185`），舵机自己在 200 ms 内合拢，
+# Z 抬升时爪子已经夹住，两者本来就并行。
+SETTLE_GRAB_MS = 0         # 夹紧后不等（原 180）
+# 「Z 降到底 → 立刻松爪」：连松爪后的 150 ms 也不等了，Z 就停在底部，
+# 下一件的 ①Y 进通道本来也要求 Z 在底。
+SETTLE_OPEN_MS = 0         # 松爪后不等（原 150）
 SETTLE_READY_MS = 0        # 回预备位不再单独等（下一段运动期间舵机自己转完）
 
 #: 在位判定：|残差| ≤ 60 脉冲（≈0.6 mm）就当已经在位，不再为 10 脉冲跑一趟往返。
@@ -82,7 +88,7 @@ TRAY_ACC = 1                  # 位置模式加速度档：1 = 驱动器慢斜�
 TRAY_VERIFY_TOL_PULSES = 40   # 停车后残差超过多少脉冲才补一次
 TRAY_WAIT_EXTRA_S = 0.5       # acc=1 斜坡很慢，估算时长之外再多等这么久
 TRAY_TIMEOUT_S = 20.0
-TRAY_JOIN_TIMEOUT_S = 8.0            # 松爪前等转盘的上限（tray_turn 自带 4~7 s 收口）
+TRAY_JOIN_TIMEOUT_S = 8.0            # 已不再用于松爪前等待（2026-10-31 起松爪不等转盘），留着给诊断/兼容
 # 到位判定放宽（现场：转盘会小幅抖，counts 噪声 ±几十，严格判据会一直等/不松爪）
 TRAY_STABLE_COUNTS = 60.0      # 判“稳定”的 counts 抖动容差（原 20 ≈1 脉冲，现 60 ≈3 脉冲）
 TRAY_SETTLE_NEED = 2           # 连续稳定采样次数（采样 50 ms）
@@ -515,10 +521,12 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                     client, tray_deg, say,
                     counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
                 tray_applied['deg'] = float(tray_deg)   # 转到位了才算"这件已经转过"
+                if state is not None:                   # 异步到这时才有结果，直接写回调用方
+                    state['tray_applied'] = tray_applied['deg']
             except Exception as exc:                    # noqa: BLE001
                 tray_box['err'] = exc
 
-        say('转盘 %+.0f° 后台开始（与抓取/回程并行，松爪前等它到位）' % tray_deg)
+        say('转盘 %+.0f° 后台开始（与抓取/回程并行，松爪不再等它）' % tray_deg)
         job = threading.Thread(target=_tray_work, daemon=True, name='grab-tray')
         job.start()
         tray_job_box['job'] = job
@@ -536,8 +544,8 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     #   收口由 move_xy_fast 按新鲜编码器读数轮询，不达标的轴再顺序补一次 goto。
     move_xy({AXIS_X: x_pulse, AXIS_Y: y_pulse})
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 4 Z 降底 = 抓取位
-    say('夹紧 135°')
-    client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧
+    say('夹紧 135°（发完就走，舵机自己合拢；同时立刻抬 Z）')
+    client.send('gripper', 'grab', timeout_ms=2000)     # 5 夹紧（不等回执后的 settle）
     time.sleep(SETTLE_GRAB_MS / 1000.0)
 
     start_tray()                       # 旧顺序（tray_early=False）在这里才开始转
@@ -559,22 +567,23 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 'tray_applied': tray_applied['deg']}
     say('已在 P1 降到底（P0/P1 下方都是盒子）→ 直接松爪，不再退回 P0')
     if tray_job is not None:
-        # 10 等后台转盘到位（最多再等 TRAY_JOIN_TIMEOUT_S=8 s）；失败/超时都不松爪
-        _w0 = time.monotonic()
-        tray_job.join(timeout=TRAY_JOIN_TIMEOUT_S)
-        _waited = time.monotonic() - _w0
-        if tray_job.is_alive():
-            raise GrabError('转盘 %+.0f° 超过 %.0f s 还没转到位，暂不松爪（避免落错盒）'
-                            % (tray_deg, TRAY_JOIN_TIMEOUT_S))
+        # 10 转盘还在后台转：**不再等它**（原逻辑 join 8 s，现场白等 1.5 s，
+        #    抓空那次还因为旧帧判错 Z 卡很久）。用户要求「降到底就立刻松爪」：
+        #    转盘是从本件一开始就在转的（tray_early），到这里基本已经到位；
+        #    真没到位也只记一条告警照常松爪 —— 落错盒的风险由日志暴露，不再阻塞节拍。
+        #    只有转盘线程明确报错（tray_box['err']）才中止本件，避免"以为转了其实没转"。
         if tray_box.get('err') is not None:
-            raise GrabError('转盘没转到位：%s（暂不松爪，避免落错盒）' % tray_box['err'])
-        say('转盘已到位（%+.0f°），join 只等了 %.2f s → 松爪' % (tray_deg, _waited))
+            raise GrabError('转盘没转到位：%s' % tray_box['err'])
+        if tray_job.is_alive():
+            say('转盘 %+.0f° 还在转（不等它，先松爪；下一件开始前会转完）' % tray_deg)
+        else:
+            say('转盘已到位（%+.0f°），没等 → 松爪' % tray_deg)
     elif abs(tray_deg) >= 1.0:
         # 10 串行转（单件抓/未开 tray_async 时走这里）
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
-    # 11 松爪 → 回预备：不再为"落盒/回位"额外等 0.95 s（原 0.2+0.5+0.25），
-    #    只给爪子张开留 0.15 s；回预备的转动在下一件「②Z 抬顶」期间自己完成。
+    # 11 松爪 → 回预备：不再为"落盒/回位"额外等（原 0.2+0.5+0.25，2026-10-31 已清零）；
+    #    回预备的转动在下一件「②Z 抬顶」期间自己完成。
     say('松爪 180° → 回预备 %d°（下一段运动期间舵机自己转完，不再干等）'
         % int(P.GRIPPER_READY_DEG))
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪

@@ -37,6 +37,11 @@ class Stream:
         self.stop_evt = threading.Event()
         self.frames = 0
         self.t0 = time.time()
+        # 图传节流：每取一帧都是「上位机请求 → 派端缩放+压 JPEG → 走无线」，
+        # 请求越密，派端 CPU 越满，串口桥（遥测/回执）就被挤成几秒停顿
+        # （2026-10-31 05:25 实测链路整段停 5 s、Z 回执迟到 4 s）。
+        # 这里按 config 里的 fps 限速（默认 3）；0/负数 = 不限。
+        self.fps_cfg = float(f or 0)
 
 
     def start(self):
@@ -45,7 +50,9 @@ class Stream:
     def run(self):
         try:
             self.cam.open()
+            min_dt = (1.0 / self.fps_cfg) if self.fps_cfg > 0 else 0.0
             while not self.stop_evt.is_set():
+                t_loop = time.time()
                 ok = self.cam.cap.grab()
                 if ok:
                     ok, fr = self.cam.cap.retrieve()
@@ -53,6 +60,10 @@ class Stream:
                         with self.lock:
                             self.frame = fr
                         self.frames += 1
+                if min_dt > 0.0:
+                    rest = min_dt - (time.time() - t_loop)
+                    if rest > 0.0:
+                        self.stop_evt.wait(rest)
         except Exception as e:
             self.error = str(e)
         finally:

@@ -349,7 +349,7 @@ class AxisPanel:
         if not self._guard():
             self.tele.set(False)
             return
-        period = 200
+        period = int(P.TELE_PERIOD_MS)
         if self.tele.get():
             self.app.client.send("tele_on", self.addr, period)
         else:
@@ -1399,7 +1399,8 @@ class App:
     # （现场现象：预备角度「莫名其妙变小」）。预备角度改成每次初始化现算，
     # 见 _ready_deg_now() / _init_params()。
     _INIT_PARAM_BASE = (("acc", 0), ("goto_max_ms", 120000),
-                        # 遥测更快 → goto 的 SETTLE/MEASURE 等待更短（到位后不再干等 0.2-0.4 s）
+                        # telemetry_ms 在固件里只是占位（没人读），真正的遥测周期由
+                        # tele_on 的 interval 决定，见 protocol.TELE_PERIOD_MS（默认 400 ms）。
                         ("telemetry_ms", 100), ("query_timeout_ms", 60))
 
     def _ready_deg_now(self) -> int:
@@ -1438,7 +1439,7 @@ class App:
             self._log("初始化：stop_clear 失败：%s" % exc, "err")
         for addr in AXIS_LABELS:
             try:
-                client.send("tele_on", addr, 200)
+                client.send("tele_on", addr, int(P.TELE_PERIOD_MS))
             except Exception:                       # noqa: BLE001
                 pass
             panel = self.axes.get(addr)
@@ -1452,7 +1453,7 @@ class App:
                 client.send("param_set", name, value)
             except Exception:                       # noqa: BLE001
                 pass
-        self._log("已订阅四轴遥测（200 ms），等回读…")
+        self._log("已订阅四轴遥测（%d ms），等回读…" % int(P.TELE_PERIOD_MS))
         self.root.after(1200, self._init_report)
 
     def _init_report(self) -> None:

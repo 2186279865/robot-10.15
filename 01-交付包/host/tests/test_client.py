@@ -385,5 +385,38 @@ class TestReadbackMask(ClientTestBase):
         self.assertEqual(self.device.readback_list(), "1/3/4/5")
 
 
+class TestTelemetryNotDuplicated(ClientTestBase):
+    """遥测帧只发 tele 事件，不再额外发一条 rx。
+
+    以前 `_dispatch` 对每一帧都 `emit("rx")`，界面把 rx 和 tele 各记一行，
+    5 Hz×四轴时日志就是 40 行/秒再翻倍 —— 读写都在挤串口/无线。
+    """
+
+    def _subscribe(self) -> None:
+        self.connect()
+        self.client.send("tele_on", 1, 20)
+        self.pump()
+        self.client.poll_events(1000)
+
+    def test_tele_frames_do_not_emit_rx(self):
+        self._subscribe()
+        for _ in range(3):
+            self.clock.advance(100)
+            self.pump()
+        tele = self.polled("tele")
+        self.assertTrue(tele, "订阅后应该收到遥测帧")
+        rx = self.polled("rx")
+        self.assertFalse([e for e in rx if ",tele," in str(e.text)],
+                         "遥测帧不应再额外发 rx 事件")
+
+    def test_reply_frames_still_emit_rx(self):
+        self._subscribe()
+        self.client.send("status")
+        self.pump()
+        rx = self.polled("rx")
+        self.assertTrue([e for e in rx if ",ok," in str(e.text)],
+                        "普通应答仍要走 rx（日志/抓包还靠它）")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -172,30 +173,73 @@ class TrayEarlyTest(unittest.TestCase):
         client = FakeClient()
         target = {'center_tray': [0.5, 0.5], 'confidence': 1.0}
         state = {}
-        res = AG.run_once(client, target, log=lambda _t: None,
-                          wait=lambda rid, ms: client.done_of(rid),
-                          calib=_calib(), pos_source=lambda: ({}, {}, dict(client.counts)),
-                          tray_deg=60.0, tray_early=tray_early, state=state)
-        return client, res, state
+        marks = []
+        orig_turn = AG.tray_turn
+
+        def _fake_turn(*_a, **_k):
+            # 记录"转盘开始"发生在第几条指令之后；转盘本身另有用例覆盖
+            marks.append(len(client.calls))
+            return {'ok': True}
+
+        AG.tray_turn = _fake_turn
+        try:
+            res = AG.run_once(client, target, log=lambda _t: None,
+                              wait=lambda rid, ms: client.done_of(rid),
+                              calib=_calib(), pos_source=lambda: ({}, {}, dict(client.counts)),
+                              tray_deg=60.0, tray_early=tray_early, state=state)
+        finally:
+            AG.tray_turn = orig_turn
+        return client, res, state, marks
 
     def test_tray_starts_before_the_first_lift(self):
-        client, res, state = self._run(True)
-        idx_tray = [i for i, c in enumerate(client.calls)
-                    if c[0] == 'motor_pos' and int(c[1][0]) == AG.AXIS_TRAY]
+        client, res, state, marks = self._run(True)
         idx_first_goto = [i for i, c in enumerate(client.calls) if c[0] == 'goto']
-        self.assertTrue(idx_tray and idx_first_goto)
-        self.assertLess(idx_tray[0], idx_first_goto[0],
-                        '转盘应该在 ①Y/②Z 抬顶之前就开始转，而不是等夹紧')
-        self.assertAlmostEqual(float(res['tray_applied']), 60.0)
+        self.assertTrue(marks and idx_first_goto)
+        self.assertLessEqual(marks[0], idx_first_goto[0],
+                             '转盘应该在 ①Y/②Z 抬顶之前就开始转，而不是等夹紧')
+        self.assertTrue(res['ok'])
+        # 后台线程记录 tray_applied 可能比 run_once 返回稍晚（异步），这里等它一下
+        deadline = time.time() + 1.0
+        while time.time() < deadline and not state.get('tray_applied'):
+            time.sleep(0.01)
+        self.assertEqual(float(state.get('tray_applied') or 0.0), 60.0)
 
     def test_tray_early_false_keeps_old_order(self):
-        client, _res, _state = self._run(False)
-        idx_tray = [i for i, c in enumerate(client.calls)
-                    if c[0] == 'motor_pos' and int(c[1][0]) == AG.AXIS_TRAY]
+        client, _res, _state, marks = self._run(False)
         idx_grab = [i for i, c in enumerate(client.calls)
                     if c[0] == 'gripper' and c[1][0] == 'grab']
-        self.assertTrue(idx_tray and idx_grab)
-        self.assertGreater(idx_tray[0], idx_grab[0], '旧顺序：夹紧之后才转')
+        self.assertTrue(marks and idx_grab)
+        self.assertGreater(marks[0], idx_grab[0], '旧顺序：夹紧之后才转')
+
+    def test_release_does_not_wait_for_the_tray(self):
+        """降到底就立刻松爪：转盘还在转也不能拖住节拍（2026-10-31 用户要求）。"""
+        client = FakeClient()
+        client.counts = {1: 0, 3: 0, 4: 0, 5: 0}
+        gate = threading.Event()
+        orig_turn = AG.tray_turn
+
+        def _blocking_turn(*_a, **_k):
+            gate.wait(3.0)          # 模拟"转盘还没转完"
+            return {'ok': True}
+
+        AG.tray_turn = _blocking_turn
+        logs = []
+        try:
+            t0 = time.perf_counter()
+            res = AG.run_once(client, {'center_tray': [0.5, 0.5]}, log=logs.append,
+                              wait=lambda rid, ms: client.done_of(rid), calib=_calib(),
+                              pos_source=lambda: ({}, {}, dict(client.counts)),
+                              tray_deg=60.0, tray_early=True, state={})
+            dt = time.perf_counter() - t0
+        finally:
+            gate.set()
+            AG.tray_turn = orig_turn
+        self.assertTrue(res['ok'])
+        self.assertLess(dt, 2.0, '松爪不该等转盘（后台还在转时必须照常松爪）')
+        self.assertTrue([t for t in logs if '不等它' in t or '还在转' in t],
+                        '应该留下「转盘还在转但先松爪」的日志')
+        self.assertIn(('gripper', ('open',)), [(c[0], c[1]) for c in client.calls],
+                      '降到底后必须已经松爪')
 
 
 class RunManyEventTest(unittest.TestCase):

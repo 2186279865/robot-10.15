@@ -423,7 +423,10 @@ class HostClient:
             self._dispatch(inbound.frame)
 
     def _dispatch(self, frame: P.Frame) -> None:
-        self.emit("rx", frame.raw, frame=frame)
+        # 遥测帧只发 tele 事件，不再额外发一条 rx：界面两条都会记一行，
+        # 十 Hz × 四轴时日志会翻倍（40 行/秒 → 80 行/秒），读写都在挤链路。
+        if frame.kind != "tele":
+            self.emit("rx", frame.raw, frame=frame)
         if frame.kind == "event":
             self._on_event(frame)
         elif frame.kind == "tele":
