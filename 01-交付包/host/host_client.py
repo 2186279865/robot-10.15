@@ -22,9 +22,9 @@ import protocol as P
 
 #: 心跳周期与失联判定阈值（毫秒）。
 HEARTBEAT_MS = 1000
-LINK_TIMEOUT_MS = 3000
+LINK_TIMEOUT_MS = 8000
 #: 默认请求超时；查询类较紧，运动类较松（等的是“被接纳”，不是到位）。
-TIMEOUT_QUERY_MS = 300
+TIMEOUT_QUERY_MS = 800
 TIMEOUT_DEFAULT_MS = 600
 #: 可安全重试的命令（幂等）。
 RETRYABLE = {"ping", "status", "motor_query", "param_get", "hello"}

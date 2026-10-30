@@ -3,7 +3,7 @@
   "side_camera_index": 1,
   "width": 1920,
   "height": 1080,
-  "fps": 15,
+  "fps": 8,
   "remote": {
     "host": "",
     "img_port": 5057,
