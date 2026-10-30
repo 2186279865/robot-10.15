@@ -9,7 +9,7 @@
   （POS_UNKNOWN），本模块不做任何"盲走"兜底 —— 撞一次机的代价太大。
 * **顺序固定**（现场验证过的 10 步）：
   Z 抬顶 → X/Y 到物块上方 → Z 降底 → 夹紧 → Z 抬顶 → X/Y 回 P1
-  → Z 降底 → Y 退 P0 → 转盘 60° → 松爪 180 → 500 ms 后回 158。
+  → Z 降底 → Y 退 P0 → 转盘 60° → 松爪 180 → 500 ms 后回预备角度（存盘值，默认 158）。
 * 视觉只给 `center_tray` 的 (u, v)，X/Y 脉冲由 `vision/tray_calib.json` 的仿射
   （a/b/c/d/tx/ty）反算，所以换相机或挪支架必须重新标定。
 """
@@ -25,6 +25,7 @@ from typing import Callable, Dict, Iterable, List, Optional
 import box_map as BM
 import prep_pose
 import display_link
+import protocol as P
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 TARGETS_PATH = PKG_ROOT / 'vision' / 'runtime' / 'latest_targets.json'
@@ -492,7 +493,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
     time.sleep(0.2)
-    say('松爪 180° → 等待落盒 → 回预备 158°')
+    say('松爪 180° → 等待落盒 → 回预备 %d°' % int(P.GRIPPER_READY_DEG))
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)
     client.send('gripper', 'ready', timeout_ms=2000)

@@ -77,6 +77,33 @@ class GuiSmokeTest(unittest.TestCase):
         if cls.root is not None:
             cls.root.destroy()
 
+    def test_01c_init_does_not_reset_saved_ready_deg(self):
+        """点「初始化」必须沿用存盘的预备角度，不能冲回 import 时冻结的 158°。"""
+        saved = self.app._load_gripper_ready()
+        self.assertNotIn(
+            "gripper_ready_deg",
+            [name for name, _ in self.app._INIT_PARAM_BASE],
+            "预备角度不能写进类属性：import 时求值 → 永远是协议默认，用户设的会被冲掉",
+        )
+        self.app.ready_var.set("169")
+        self.assertEqual(dict(self.app._init_params())["gripper_ready_deg"], 169)
+        real_report = self.app._init_report
+        # 别让 1.2 s 后的「初始化报告」去改闭环勾选，影响后面的序列用例
+        self.app._init_report = lambda: None
+        try:
+            self.app.clear_log()
+            self.app.initialize_all()
+            _pump(self.root, 0.5)
+        finally:
+            self.app._init_report = real_report
+        log = self.app.log_text.get("1.0", "end")
+        self.assertIn("ready=169", log)
+        self.assertEqual(int(self.app.sim_device.params["gripper_ready_deg"]), 169)
+        # 输入框非法 → 回落到存盘值，而不是随便发 158
+        self.app.ready_var.set("999")
+        self.assertEqual(dict(self.app._init_params())["gripper_ready_deg"], saved)
+        self.app.ready_var.set(str(saved))
+
     # -- 连接 ---------------------------------------------------------------
     def test_01_handshake_reaches_online(self):
         self.assertTrue(self.app.client.online, self.app.client.state)

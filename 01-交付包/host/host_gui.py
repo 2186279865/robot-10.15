@@ -60,7 +60,7 @@ PARAM_LABELS = {
     "acc": "默认加速度档",
     "speed_rpm_max": "速度上限 RPM",
     "gripper_open_deg": "夹爪松开角度",
-    "gripper_ready_deg": "夹爪预备角度(158=待抓)",
+    "gripper_ready_deg": "夹爪预备角度(默认158=待抓)",
     "gripper_grab_deg": "夹爪夹紧角度",
     "gripper_step_deg": "夹爪单步角度",
     "gripper_settle_ms": "夹爪等待 ms",
@@ -1383,9 +1383,31 @@ class App:
         self.note("已下发停止全部；请确认机械确实停下")
 
     # ------------------------------------------------------------ 初始化
-    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", int(P.GRIPPER_READY_DEG)),
-                # 遥测更快 → goto 的 SETTLE/MEASURE 等待更短（到位后不再干等 0.2-0.4 s）
-                ("telemetry_ms", 100), ("query_timeout_ms", 60))
+    # 注意：这里**不要**写死 gripper_ready_deg。类属性在 import 时就求值一次，
+    # 那时还没加载 runtime/gripper.json（_build_gripper 之后才加载），
+    # 结果用户设的 167/168/170° 一按「初始化」就被冲回协议默认 158°
+    # （现场现象：预备角度「莫名其妙变小」）。预备角度改成每次初始化现算，
+    # 见 _ready_deg_now() / _init_params()。
+    _INIT_PARAM_BASE = (("acc", 0), ("goto_max_ms", 120000),
+                        # 遥测更快 → goto 的 SETTLE/MEASURE 等待更短（到位后不再干等 0.2-0.4 s）
+                        ("telemetry_ms", 100), ("query_timeout_ms", 60))
+
+    def _ready_deg_now(self) -> int:
+        """当前应下发给固件的预备角度：界面输入框 > 存盘值 > 模块当前值。"""
+        for getter in (lambda: int(float(self.ready_var.get())),
+                       lambda: self._load_gripper_ready(),
+                       lambda: int(P.GRIPPER_READY_DEG)):
+            try:
+                deg = getter()
+            except Exception:                  # noqa: BLE001 —— 取不到就试下一个来源
+                continue
+            if 135 <= deg <= 180:
+                return deg
+        return int(P.GRIPPER_READY_DEG)
+
+    def _init_params(self):
+        """初始化要下发的兜底参数：预备角度每次现算，其它是固定值。"""
+        return (("gripper_ready_deg", self._ready_deg_now()),) + self._INIT_PARAM_BASE
 
     def initialize_all(self) -> None:
         """上电初始化：清锁存 → 订阅四轴遥测 → 建立四轴位置闭环 → 兜底参数 → 报告。
@@ -1397,7 +1419,9 @@ class App:
         if client is None or not getattr(client, "online", False):
             messagebox.showwarning("初始化", "还没连上控制器：先选端口并点「连接」")
             return
-        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 建立四轴位置闭环 / 兜底参数（acc=0, goto_max_ms=120000, ready=158, telemetry_ms=100, query_timeout_ms=60）")
+        init_params = self._init_params()
+        self._log("初始化：清停止锁存 / 订阅四轴遥测 / 建立四轴位置闭环 / 兜底参数（acc=0, goto_max_ms=120000, ready=%d, telemetry_ms=100, query_timeout_ms=60）"
+                  % dict(init_params)["gripper_ready_deg"])
         try:
             client.send("stop_clear", timeout_ms=800)
         except Exception as exc:                    # noqa: BLE001
@@ -1413,7 +1437,7 @@ class App:
                     panel.tele.set(True)
                 except tk.TclError:
                     pass
-        for name, value in self._INIT_PARAMS:
+        for name, value in init_params:
             try:
                 client.send("param_set", name, value)
             except Exception:                       # noqa: BLE001
@@ -1831,8 +1855,8 @@ class App:
             except Exception as exc:             # noqa: BLE001 —— 尽力而为
                 self.note(f"自动清除停止锁存失败（可手动点『清除停止锁存』）：{exc}")
         ready_deg = int(P.GRIPPER_READY_DEG)
-        # 固件里 gripper_ready_deg 的默认值还是 150（RAM 参数）：连上就改成 158，
-        # 这样改角度不用重烧固件。
+        # 固件里 gripper_ready_deg 的默认值还是 150（RAM 参数）：连上就下发改过的
+        # 存盘值（默认 158），这样改角度不用重烧固件。
         try:
             self.client.send("param_set", "gripper_ready_deg", ready_deg, timeout_ms=1500)
         except Exception as exc:             # noqa: BLE001 —— 尽力而为
@@ -2063,7 +2087,7 @@ class App:
                 # 新会话：驱动器可能已掉电，绝对位置基准一律作废。
                 for panel in self.axes.values():
                     panel.reset_reference()
-                # 连上后把夹爪摆到预备位（158°）：放到下一轮 after 里发，
+                # 连上后把夹爪摆到预备位（当前存盘角度，默认 158°）：放到下一轮 after 里发，
                 # 重连/握手期间卡住也只记日志，不弹框、不阻塞界面。
                 try:
                     self.root.after(10, self._auto_gripper_ready)
