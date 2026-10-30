@@ -616,7 +616,11 @@ class Screen:
             return
         bbox = msg.get('bbox')
         if not bbox or len(bbox) != 4:
-            bbox = [0.37, 0.37, 0.26, 0.26]      # 上位机没带 bbox 时裁托盘中心，仍给实时照片
+            # 没有目标框就不能裁：盲裁中心会让每一件都长一个样（用户踩过），
+            # 直接保留上位机推来的这一件的缩略图（thumb_b64）即可。
+            print('[photo] seq=%s skip(no bbox) thumb=%s'
+                  % (item.get('seq'), bool(item.get('thumb'))))
+            return
         cam = int(msg.get('cam') or self.cam)
         box = None
         for i in range(1, 7):
