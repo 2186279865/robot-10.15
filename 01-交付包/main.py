@@ -185,6 +185,12 @@ def main(argv=None) -> int:
             vision.attach_calib(calib)     # 视觉页右栏的「自动抓一件/连续抓/分盒清零」直接复用标定页实现
     except Exception as exc:
         print('标定页加载失败：', exc)
+
+    # 「运行台」置顶：HostGui 建好后 main 又往 index 0/2 插了视觉页与标定页
+    try:
+        app.notebook.insert(0, app.run_tab, text="运行台")
+    except Exception:                                      # noqa: BLE001
+        pass
     root.geometry('1760x980')              # 放在 App 之后，覆盖它的默认尺寸
     root.title(TITLE)
 

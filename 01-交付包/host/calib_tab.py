@@ -740,7 +740,8 @@ class CalibTab(ttk.Frame):
             self.after(0, self._refresh_pos)
 
     # ------------------------------------------------------- 一键走出固定路线
-    def on_auto_many(self):
+    def on_auto_many(self, count=None, drop=None):
+        """连续抓。count/drop 传 None 时取界面上的值；count<=0 表示「抓到托盘空为止」。"""
         """连续抓 N 件：一次识别→队列逐件；每件都走与「自动抓一件」相同的 run_once。"""
         try:
             self._on_auto_many()
@@ -810,17 +811,21 @@ class CalibTab(ttk.Frame):
         if vision is None or not hasattr(vision, 'recognize_safe'):
             self.say('视觉没开：先到「视觉」页点「打开双画面」')
             return
-        try:
-            count = int(self.many_var.get())
-        except Exception:                                  # noqa: BLE001
-            count = 6
-        count = max(1, min(20, count))
+        if count is None:
+            try:
+                count = int(self.many_var.get())
+            except Exception:                              # noqa: BLE001
+                count = 6
+        else:
+            count = int(count)
+        if count > 0:
+            count = max(1, min(20, count))
         if not self._ensure_pos():
             self.say('读不到当前位置（没有编码器回读）：先在「四轴控制」页点「查位置」或勾「订阅遥测」再试')
             messagebox.showwarning('读不到位置', '没有编码器回读，无法安全自动移动。\n\n'
                                    '先在「四轴控制」页点一次「查位置」，或勾上四轴的「订阅遥测」，再点「连续抓」。')
             return
-        drop = bool(self.drop_var.get())
+        drop = bool(self.drop_var.get()) if drop is None else bool(drop)
         if not drop:
             # 连续抓必须落货：自动帮用户勾上（弹模态框会让人以为界面卡死）
             self.drop_var.set(True)
@@ -830,8 +835,9 @@ class CalibTab(ttk.Frame):
                  '单件失败会重新识别并重试一次；急停请点顶部「停止全部」' % count)
         self._prep_running = True
         self._many_stop = False
-        self._set_many_state(True, '连续抓：启动中…（%d 件）' % count)
-        self.say('▶ 开始连续抓 %d 件（一次识别→队列逐件，失败重试一次）' % count)
+        self._set_many_state(True, '连续抓：启动中…（%s）' % ('∞ 件/抓到空为止' if count <= 0 else '%d 件' % count))
+        self.say('▶ 开始连续抓 %s（一次识别→队列逐件，失败重试一次）'
+                 % ('∞ 件（抓到托盘空为止）' if count <= 0 else '%d 件' % count))
         self._many_thread = threading.Thread(
             target=self._many_worker, args=(client, vision, count, drop), daemon=True)
         self._many_thread.start()

@@ -520,6 +520,10 @@ class App:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=6, pady=4)
 
+        # 运行台（比赛现场用：主摄画面 + 一键启动 + 一键回 P0）——最后 insert 到第一页
+        from run_tab import RunTab
+        self.run_tab = RunTab(self.notebook, self)
+
         axes_tab = ttk.Frame(self.notebook)
         self.notebook.add(axes_tab, text="运动控制")
         for column in range(2):
@@ -556,6 +560,12 @@ class App:
 
         log_tab = ttk.Frame(self.notebook, padding=8)
         self.notebook.add(log_tab, text="原始日志")
+
+        # 「运行台」放到最前面（第 1 页签）
+        try:
+            self.notebook.insert(0, self.run_tab, text="运行台")
+        except Exception:                                  # noqa: BLE001
+            self.notebook.add(self.run_tab, text="运行台")
         self._build_log(log_tab)
 
         self._toggle_axes_adv()          # 默认折叠「接近段示教 / 回初始位」
@@ -877,18 +887,75 @@ class App:
             self.root.after(200, callback)
 
 
+    # -- 夹爪预备角度：存盘读回（runtime/gripper.json） --------------------
+    def _gripper_cfg_path(self):
+        import os
+        base = os.path.dirname(os.path.abspath(__file__))
+        d = os.path.join(base, "runtime")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "gripper.json")
+
+    def _load_gripper_ready(self) -> int:
+        import json as _json
+        try:
+            with open(self._gripper_cfg_path(), "r", encoding="utf-8") as fp:
+                v = int(_json.load(fp).get("ready_deg", P.GRIPPER_READY_DEG))
+            if 135 <= v <= 180:
+                P.GRIPPER_READY_DEG = v
+                return v
+        except Exception:                                  # noqa: BLE001
+            pass
+        return int(P.GRIPPER_READY_DEG)
+
+    def _save_gripper_ready(self, deg: int) -> None:
+        import json as _json
+        try:
+            with open(self._gripper_cfg_path(), "w", encoding="utf-8") as fp:
+                _json.dump({"ready_deg": int(deg)}, fp, ensure_ascii=False, indent=2)
+        except Exception as exc:                           # noqa: BLE001
+            self.note("预备角度存盘失败：%s" % exc)
+
+    def apply_ready_deg(self) -> None:
+        try:
+            deg = int(float(self.ready_var.get()))
+        except Exception:                                  # noqa: BLE001
+            messagebox.showerror("预备角度", "请输入 135–180 的整数")
+            return
+        if not 135 <= deg <= 180:
+            messagebox.showerror("预备角度", "范围 135–180°")
+            return
+        P.GRIPPER_READY_DEG = deg
+        self._save_gripper_ready(deg)
+        try:
+            self.lb_grip_hint.config(
+                text="%d° 夹紧 ｜ %d° 预备（连上自动打到这里）｜ %d° 松开"
+                     % (int(P.PARAM_DEFAULTS["gripper_grab_deg"]), deg,
+                        int(P.PARAM_DEFAULTS["gripper_open_deg"])))
+        except Exception:                                  # noqa: BLE001
+            pass
+        btn = getattr(self, "gripper_buttons", {}).get("ready")
+        if btn is not None:
+            btn.config(text="预备(%d)" % deg)
+        try:
+            if self.client is not None and getattr(self.client, "online", False):
+                self.client.send("param_set", "gripper_ready_deg", deg, timeout_ms=1500)
+        except Exception:                                  # noqa: BLE001
+            pass
+        self.note("预备角度已设为 %d°（已存盘；连上会自动下发固件）" % deg)
+
     def _build_gripper(self, parent: ttk.Frame) -> None:
         grab_default = int(P.PARAM_DEFAULTS["gripper_grab_deg"])
         open_default = int(P.PARAM_DEFAULTS["gripper_open_deg"])
-        ready_default = int(P.GRIPPER_READY_DEG)
+        ready_default = self._load_gripper_ready()
         ttk.Label(parent, text="夹爪（舵机）", font=("Microsoft YaHei", 10, "bold")
                   ).pack(anchor="w")
-        ttk.Label(
+        self.lb_grip_hint = ttk.Label(
             parent,
             text="%d° 夹紧 ｜ %d° 预备（连上自动打到这里）｜ %d° 松开"
                  % (grab_default, ready_default, open_default),
             foreground="#444444",
-        ).pack(anchor="w")
+        )
+        self.lb_grip_hint.pack(anchor="w")
         buttons = ttk.Frame(parent)
         buttons.pack(anchor="w", pady=(6, 2))
         self.gripper_buttons = {}
@@ -902,6 +969,16 @@ class App:
             )
             button.pack(side="left", padx=2)
             self.gripper_buttons[action] = button
+        row = ttk.Frame(parent)
+        row.pack(anchor="w", pady=(2, 0))
+        ttk.Label(row, text="预备角度").pack(side="left")
+        self.ready_var = tk.StringVar(value=str(ready_default))
+        ttk.Spinbox(row, from_=135, to=180, increment=1, width=5,
+                    textvariable=self.ready_var).pack(side="left", padx=(4, 4))
+        ttk.Button(row, text="应用", width=6, command=self.apply_ready_deg
+                   ).pack(side="left")
+        ttk.Label(row, text="（存盘，连上自动下发）", foreground="#888"
+                  ).pack(side="left", padx=(6, 0))
         # 单步微调收进小菜单，避免占宽
         self.grip_menu = tk.Menu(buttons, tearoff=0)
         self.grip_menu.add_command(label="收紧一步（%d°）"
@@ -1306,7 +1383,7 @@ class App:
         self.note("已下发停止全部；请确认机械确实停下")
 
     # ------------------------------------------------------------ 初始化
-    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", 158),
+    _INIT_PARAMS = (("acc", 0), ("goto_max_ms", 120000), ("gripper_ready_deg", int(P.GRIPPER_READY_DEG)),
                 # 遥测更快 → goto 的 SETTLE/MEASURE 等待更短（到位后不再干等 0.2-0.4 s）
                 ("telemetry_ms", 100), ("query_timeout_ms", 60))
 
@@ -2084,6 +2161,12 @@ class App:
 
     def note(self, text: str) -> None:
         self._log(text, "note")
+        rt = getattr(self, "run_tab", None)
+        if rt is not None:
+            try:
+                rt.status(text)
+            except Exception:                              # noqa: BLE001
+                pass
 
     def clear_log(self) -> None:
         self.log_text.delete("1.0", "end")

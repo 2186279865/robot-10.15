@@ -542,7 +542,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     started = time.perf_counter()
     results: List[Dict[str, object]] = []
     box_now = int(current_box) if 1 <= int(current_box) <= BOX_COUNT else 1
-    total_n = int(total or count)
+    count_i = int(count)
+    cnt_txt = '∞' if count_i <= 0 else str(count_i)   # count<=0 = 抓到托盘空为止
+    total_n = int(total or (count_i if count_i > 0 else 0))
     pending: List[dict] = []
 
     log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 %d 盒，每盒 %d°）'
@@ -550,23 +552,23 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     log('[连续抓] 模式：%s；每件都走与「自动抓一件」相同的 run_once'
         % ('每件重新识别' if recognize_each else '一次识别→队列逐件'))
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
-                status='running', last_event='开始连续抓 %d 件' % count)
+                status='running', last_event='开始连续抓 %s 件' % cnt_txt)
 
-    for i in range(max(0, int(count))):
+    for i in range(count_i if count_i > 0 else 10 ** 6):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
             emit('stopped', i=i + 1)
             break
-        emit('item_start', i=i + 1, n=count)
+        emit('item_start', i=i + 1, n=(count_i if count_i > 0 else 0))
 
         # ---- 取下一件：优先用已有清单，空了（或要求每件识别）才识别 ----
         target = None
         if pending and not recognize_each:
             target = pending.pop(0)
-            log('=== 第 %d/%d 件：用已识别清单（剩 %d 件待抓）==='
-                % (i + 1, count, len(pending) + 1))
+            log('=== 第 %d/%s 件：用已识别清单（剩 %d 件待抓）==='
+                % (i + 1, cnt_txt, len(pending) + 1))
         else:
-            log('=== 第 %d/%d 件：单次识别 ===' % (i + 1, count))
+            log('=== 第 %d/%s 件：单次识别 ===' % (i + 1, cnt_txt))
             try:
                 recognize()
             except Exception as exc:               # noqa: BLE001
