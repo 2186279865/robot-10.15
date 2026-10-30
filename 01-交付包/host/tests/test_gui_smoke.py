@@ -85,10 +85,10 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertIn("固件 sim", self.app.fw_label.cget("text"))
 
     def test_01b_auto_ready_after_connect(self):
-        """hello 变在线后要自动补发一次 gripper ready（预备位 158°）。"""
+        """hello 变在线后要自动补发一次 gripper ready（预备位 = 当前存盘值）。"""
         log = self.app.log_text.get("1.0", "end")
         self.assertIn("自动请求夹爪回预备位", log)
-        self.assertIn("158", self.app.gripper_status.cget("text"))
+        self.assertIn(str(self.app._load_gripper_ready()), self.app.gripper_status.cget("text"))
         self.assertIn("ready", self.app.gripper_status.cget("text"))
 
     def test_02_speed_command_gets_reply_and_logs_it(self):
@@ -124,14 +124,14 @@ class GuiSmokeTest(unittest.TestCase):
         self.assertIn("grab", self.app.gripper_status.cget("text"))
         self.assertIn("gripper ok", self.app.log_text.get("1.0", "end"))
         # 三档角度：夹紧 135 / 预备 158 / 松开 180；预备按钮在夹紧与松开之间
-        self.assertIn("预备(158)", self.app.gripper_buttons["ready"].cget("text"))
+        self.assertIn("预备(%d)" % self.app._load_gripper_ready(), self.app.gripper_buttons["ready"].cget("text"))
         _texts = [btn.cget("text") for btn in self.app.gripper_buttons.values()]
-        self.assertEqual(_texts.index("预备(158)"), 1)
+        self.assertEqual(_texts.index("预备(%d)" % self.app._load_gripper_ready()), 1)
         self.app.gripper_buttons["ready"].invoke()
         _pump(self.root, 0.4)
         status = self.app.gripper_status.cget("text")
         self.assertIn("ready", status)
-        self.assertIn("158", status)
+        self.assertIn(str(self.app._load_gripper_ready()), status)
 
     def test_05_sequence_runs_to_done(self):
         self.app.seq_clear()

@@ -147,13 +147,52 @@ class RunTab(ttk.Frame):
 
         def work():
             log = lambda m: self.app.root.after(0, lambda: self.status(m))
+
+            def waiter(req_id, timeout_ms):
+                end = time.monotonic() + timeout_ms / 1000.0
+                while time.monotonic() < end:
+                    got = client.done_of(req_id) if hasattr(client, "done_of") else None
+                    if got is not None:
+                        kind = "reply" if got.get("kind") == "reply" else (
+                            "err" if got.get("kind") == "err" else "timeout")
+                        return {"kind": kind, "code": got.get("code", ""),
+                                "text": "", "pairs": got.get("pairs") or {}}
+                    time.sleep(0.05)
+                return None
+
+            def fresh(axes):
+                """每次移动前重新取一次“当前位置来源”：优先新鲜回读 counts，其次软位置。"""
+                soft = dict(getattr(self.app, "soft_pos", {}) or {})
+                known = dict(getattr(self.app, "pos_known", {}) or {})
+                counts, now = {}, client.now_ms()
+                panels = getattr(self.app, "axes", {}) or {}
+                for axis in axes:
+                    panel = panels.get(axis)
+                    if panel is None:
+                        continue
+                    val = getattr(panel, "last_counts", None)
+                    age = now - int(getattr(panel, "last_counts_ms", 0) or 0)
+                    if val is not None and age < 3000:
+                        counts[axis] = int(val)
+                return soft, known, counts
+
+            def step(title, targets, order):
+                soft, known, counts = fresh(order)
+                if not counts and not any(known.get(a) for a in order):
+                    log("回 P0：%s 的位置未知（回读/软位置都没有）→ 先到「运动控制」页点「初始化」或对轴点「位置清零」" % title)
+                    raise RuntimeError("POS_UNKNOWN: %s" % title)
+                log("→ " + title)
+                return PP.move_abs(client, targets, order=order, rpm=rpm_z if len(order) == 1 else 300,
+                                   acc=int(PP.load().get("acc", 0)), log=log, wait=waiter,
+                                   soft=soft, known=known, counts=counts)
+
             try:
                 Z, X, Y = AG.AXIS_Z, 4, 5
                 rpm_z = AG.GOTO_RPM_BY_AXIS.get(Z, 1500) if hasattr(AG, "GOTO_RPM_BY_AXIS") else 1500
-                PP.move_abs(client, {Z: AG.Z_UP}, [Z], rpm=rpm_z, log=log)
-                PP.move_abs(client, {X: 0, Y: AG.P1_Y}, [X, Y], log=log)
-                PP.move_abs(client, {Z: AG.Z_DOWN}, [Z], rpm=rpm_z, log=log)
-                PP.move_abs(client, {Y: AG.P0_Y}, [Y], log=log)
+                step("Z 抬顶", {Z: AG.Z_UP}, [Z])
+                step("X/Y 回 P1", {X: 0, Y: AG.P1_Y}, [X, Y])
+                step("Z 降底", {Z: AG.Z_DOWN}, [Z])
+                step("Y 退 P0", {Y: AG.P0_Y}, [Y])
                 log("已回到 P0（初始位）")
             except Exception as exc:                      # noqa: BLE001
                 log("回 P0 失败：%s" % exc)
