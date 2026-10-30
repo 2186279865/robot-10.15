@@ -1,0 +1,616 @@
+{
+ "version": 1,
+ "boot": "00000034",
+ "started_at": "2026-10-30 19:11:58",
+ "steps": [
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 13144,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 2390,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 63866,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 1066,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 2390,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 63866,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 1500,
+   "acc": 0,
+   "pulses": 151993,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 1500,
+   "acc": 0,
+   "pulses": 152012,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1500,
+   "acc": 0,
+   "pulses": 13144,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 13144,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151986,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 3506,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 55397,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 3505,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 55397,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151999,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 6533,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 28946,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 1066,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 6533,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 28946,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 8239,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 79524,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151999,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 1066,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151999,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 8239,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 79524,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 8085,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 49100,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 1066,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152002,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 8085,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 49100,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152002,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 3276,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 78147,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 1066,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 3277,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 78147,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151977,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 423,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 49524,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151999,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 2134,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 422,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 49524,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152002,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 0,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 4291,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 1,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 60246,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152000,
+   "kind": "move"
+  },
+  {
+   "axis": 3,
+   "dir": 0,
+   "rpm": 6,
+   "acc": 1,
+   "pulses": 3200,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 1,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 152001,
+   "kind": "move"
+  },
+  {
+   "axis": 4,
+   "dir": 1,
+   "rpm": 300,
+   "acc": 0,
+   "pulses": 4291,
+   "kind": "move"
+  },
+  {
+   "axis": 5,
+   "dir": 0,
+   "rpm": 1600,
+   "acc": 0,
+   "pulses": 60246,
+   "kind": "move"
+  },
+  {
+   "axis": 1,
+   "dir": 0,
+   "rpm": 2200,
+   "acc": 0,
+   "pulses": 151995,
+   "kind": "move"
+  }
+ ],
+ "saved_at": "2026-10-30 19:20:17"
+}
