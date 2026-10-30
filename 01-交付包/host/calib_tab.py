@@ -744,7 +744,7 @@ class CalibTab(ttk.Frame):
         """连续抓。count/drop 传 None 时取界面上的值；count<=0 表示「抓到托盘空为止」。"""
         """连续抓 N 件：一次识别→队列逐件；每件都走与「自动抓一件」相同的 run_once。"""
         try:
-            self._on_auto_many()
+            self._on_auto_many(count, drop)
         except Exception as exc:                       # noqa: BLE001
             # 点按钮时绝不能"静默无反应"：任何异常都要看得见
             self.say('连续抓按钮出错：%s: %s' % (type(exc).__name__, exc))
@@ -790,7 +790,7 @@ class CalibTab(ttk.Frame):
         except Exception:                                   # noqa: BLE001
             pass
 
-    def _on_auto_many(self):
+    def _on_auto_many(self, count=None, drop=None):
         # 已经在跑 → 这个按钮就是「停止」：当前件走完后停
         if getattr(self, '_prep_running', False) and                 getattr(self, '_many_thread', None) is not None and self._many_thread.is_alive():
             self._many_stop = True

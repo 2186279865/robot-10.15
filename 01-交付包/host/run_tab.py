@@ -119,7 +119,11 @@ class RunTab(ttk.Frame):
         self._busy = True
         self.status("▶ 一键启动：连续抓取（抓到空为止）")
         try:
-            self.app.calib.on_auto_many(count=0, drop=True)
+            calib = (getattr(self.app, "calib_tab", None)
+                     or getattr(self.app, "calib", None))
+            if calib is None:
+                raise RuntimeError("找不到标定/连续抓页（app.calib_tab）")
+            calib.on_auto_many(count=0, drop=True)
         except Exception as exc:                          # noqa: BLE001
             self._busy = False
             self.status("启动失败：%s" % exc)
