@@ -267,6 +267,59 @@ def _bilinear(src, u, v):
 
 
 # ---------------------------------------------------------------- 网络
+# ---------------- 预设示意图片（图片/presets/ 缩放后的 96/160 版） ----------------
+_PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'presets')
+_preset_index = None
+_preset_cache = {}
+
+
+def _load_preset_index():
+    """class_key（形如 '长方体|蓝'）→ 预设图片基名。"""
+    global _preset_index
+    if _preset_index is not None:
+        return _preset_index
+    idx = {}
+    try:
+        with open(os.path.join(_PRESET_DIR, 'index.json'), encoding='utf-8') as f:
+            idx = dict(json.load(f) or {})
+    except Exception:                                   # noqa: BLE001
+        idx = {}
+    _preset_index = idx
+    return idx
+
+
+def preset_photo(name, color, size=96):
+    """按「形状|颜色」取预设图；取不到返回 None。同一文件只加载一次。"""
+    idx = _load_preset_index()
+    if not idx:
+        return None
+    name = (name or '').strip()
+    color = (color or '').strip()
+    base = idx.get('%s|%s' % (name, color))
+    if base is None and color:
+        # 退一步：同颜色下按形状族模糊匹配（长方体/正方体/菱形 都算长方体）
+        fam = ('cone' if '圆锥' in name else
+               'pyramid' if '棱锥' in name or '棱' in name else
+               'cylinder' if '柱' in name and '棱' not in name else
+               'cuboid' if ('长方' in name or '正方' in name or '菱' in name or '矩形' in name) else '')
+        if fam:
+            for k, v in idx.items():
+                if k.endswith('|' + color) and fam in v:
+                    base = v
+                    break
+    if not base:
+        return None
+    key = (base, int(size))
+    if key in _preset_cache:
+        return _preset_cache[key]
+    try:
+        photo = tk.PhotoImage(file=os.path.join(_PRESET_DIR, '%s_%d.png' % (base, int(size))))
+    except Exception:                                   # noqa: BLE001
+        photo = None
+    _preset_cache[key] = photo
+    return photo
+
+
 class Pump:
     """TCP 行服务器（5059）：收到 JSON 塞队列，坏行静默丢弃，断线不清屏。"""
 
@@ -566,8 +619,12 @@ class Screen:
             box = int(msg.get('box') or 0)
             cls_label = ('%s %s' % (name, color)).strip()
             label = cls_label or str(msg.get('box_label') or '')
+            _thumb = self._thumb_from_b64(msg.get('thumb_b64'))
+            if _thumb is None:
+                _thumb = preset_photo(name, color, 96)
             item = {'seq': seq, 'name': name, 'color': color,
-                    'thumb': self._thumb_from_b64(msg.get('thumb_b64')),
+                    'thumb': _thumb,
+                    'preset': bool(_thumb is not None and msg.get('thumb_b64') is None),
                     'key': '%d/%d' % (box, seq),
                     'bbox': msg.get('bbox'), 'cam': msg.get('cam')}
             if 1 <= box <= 6:
@@ -584,8 +641,9 @@ class Screen:
                         if it.get('seq') == seq:
                             it.update(item)
                 slot['items'] = items
+            _big = item['thumb'] or preset_photo(name, color, 160)
             self.latest = {'seq': seq, 'name': label or name, 'box': box,
-                           'thumb': item['thumb'], 'color': color}
+                           'thumb': _big, 'color': color}
             if msg.get('total_done') is not None:
                 self.done = int(msg.get('total_done') or 0)
             self.last_event = str(msg.get('last_event') or

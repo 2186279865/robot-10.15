@@ -64,7 +64,15 @@ TRAY_AUTOSCALE = False        # True 时才按“实测一半”自动 ×2 改 t
 TRAY_ACC = 1                  # 位置模式加速度档：1 = 驱动器慢斜坡（转盘惯性大，必须用这个）
 TRAY_VERIFY_TOL_PULSES = 40   # 停车后残差超过多少脉冲才补一次
 TRAY_WAIT_EXTRA_S = 0.5       # acc=1 斜坡很慢，估算时长之外再多等这么久
-TRAY_TIMEOUT_S = 20.0     # 单次转动最长等待（秒）
+TRAY_TIMEOUT_S = 20.0
+TRAY_JOIN_TIMEOUT_S = 8.0            # 松爪前等转盘的上限（tray_turn 自带 4~7 s 收口）
+# 到位判定放宽（现场：转盘会小幅抖，counts 噪声 ±几十，严格判据会一直等/不松爪）
+TRAY_STABLE_COUNTS = 60.0      # 判“稳定”的 counts 抖动容差（原 20 ≈1 脉冲，现 60 ≈3 脉冲）
+TRAY_SETTLE_NEED = 2           # 连续稳定采样次数（采样 50 ms）
+TRAY_MOVED_OK = 0.72           # 位移达到目标的 72% 即算转到位（原 85%）
+TRAY_MOVED_LENIENT = 0.45      # 已等到 elapsed ≥ 1.1×巡航时间 时，只要 45% 位移 + 稳定即算到位
+TRAY_TIME_FALLBACK = 1.25      # counts 不可信时：巡航时间 ×1.25 即视为到位（时间收口）
+TRAY_RELEASE_TOL_DEG = 4.0     # join 时若残差 ≤4° 也允许松爪
 
 # 转盘软启动/软停车（惯性很大，必须慢升速、慢降速）
 TRAY_RAMP_MS = 90            # 每一级升/降速的停留时间（ms）
@@ -227,20 +235,34 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
     deadline = t0 + min(TRAY_TIMEOUT_S, cruise * 1.6 + TRAY_WAIT_EXTRA_S + 0.8)
 
     moved = 0.0
+    counts_unreliable = False
     if c0 is not None:
         stable, prev = 0, None
         while time.monotonic() < deadline:
-            time.sleep(0.06)
+            time.sleep(0.05)
             c = cnt()
             if c is None:
                 break
             moved = abs(c - c0) / 20.48
-            if prev is not None and abs(c - prev) <= 20:
+            elapsed = time.monotonic() - t0
+            if prev is not None and abs(c - prev) <= TRAY_STABLE_COUNTS:
                 stable += 1
-                if stable >= 2 and moved >= 0.85 * target:
-                    break
             else:
                 stable = 0
+            if stable >= TRAY_SETTLE_NEED:
+                if moved >= TRAY_MOVED_OK * target:
+                    break
+                # 宽容：等够巡航时间后，只要转过一小半且稳定就认为到位（抖动的 counts 也能收口）
+                if elapsed >= cruise * 1.1 and moved >= TRAY_MOVED_LENIENT * target:
+                    log('[转盘] 已等 %.2f s、位移 %.0f/%.0f 脉冲（≥%.0f%%）且稳定 → 认为到位'
+                        % (elapsed, moved, target, TRAY_MOVED_LENIENT * 100))
+                    break
+            # counts 完全跟不上（例如轴 3 无回读/恒 0）：按时间收口，别死等
+            if elapsed >= cruise * TRAY_TIME_FALLBACK and moved < 0.25 * target:
+                counts_unreliable = True
+                log('[转盘] counts 不可信（%.0f s 内只读到 %.0f/%.0f 脉冲）→ 按时间收口'
+                    % (elapsed, moved, target))
+                break
             prev = c
     else:
         time.sleep(min(TRAY_TIMEOUT_S, cruise + TRAY_WAIT_EXTRA_S))
@@ -252,6 +274,10 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
                 'mode': 'pos_acc', 'seconds': round(el, 2)}
 
     moved = abs(c1 - c0) / 20.48
+    if counts_unreliable:
+        log('[转盘] 无有效回读，按时间认为已到位（%.2f s）' % el)
+        return {'pulses': target, 'scale': scale, 'measured': None,
+                'trusted': False, 'mode': 'pos_acc_time', 'seconds': round(el, 2)}
     resid = target - moved
     log('[转盘] 实测 %.0f 脉冲（目标 %.0f，残差 %+.0f ≈ %+.1f°），用时 %.2f s'
         % (moved, target, resid, resid / max(1e-6, scale) / 3200.0 * 360.0, el))
@@ -451,13 +477,13 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 'target': describe(target), 'dropped': False}
     say('已在 P1 降到底（P0/P1 下方都是盒子）→ 直接松爪，不再退回 P0')
     if tray_job is not None:
-        # 10 等后台转盘到位（最多再等 TRAY_TIMEOUT_S+5 s）；失败/超时都不松爪
+        # 10 等后台转盘到位（最多再等 TRAY_JOIN_TIMEOUT_S=8 s）；失败/超时都不松爪
         _w0 = time.monotonic()
-        tray_job.join(timeout=TRAY_TIMEOUT_S + 5.0)
+        tray_job.join(timeout=TRAY_JOIN_TIMEOUT_S)
         _waited = time.monotonic() - _w0
         if tray_job.is_alive():
             raise GrabError('转盘 %+.0f° 超过 %.0f s 还没转到位，暂不松爪（避免落错盒）'
-                            % (tray_deg, TRAY_TIMEOUT_S + 5.0))
+                            % (tray_deg, TRAY_JOIN_TIMEOUT_S))
         if tray_box.get('err') is not None:
             raise GrabError('转盘没转到位：%s（暂不松爪，避免落错盒）' % tray_box['err'])
         say('转盘已到位（%+.0f°），join 只等了 %.2f s → 松爪' % (tray_deg, _waited))

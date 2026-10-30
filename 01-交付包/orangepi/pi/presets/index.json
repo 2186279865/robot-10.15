@@ -1,0 +1,18 @@
+{
+ "圆锥|黄": "yellow_cone",
+ "四棱锥|紫": "purple_square_pyramid",
+ "棱锥|紫": "purple_square_pyramid",
+ "六棱锥|白": "white_pent_pyramid",
+ "五棱锥|白": "white_pent_pyramid",
+ "棱锥|白": "white_pent_pyramid",
+ "长方体|蓝": "blue_cuboid",
+ "正方体|蓝": "blue_cuboid",
+ "菱形|蓝": "blue_cuboid",
+ "菱体|蓝": "blue_cuboid",
+ "长方体|红": "red_cuboid",
+ "正方体|红": "red_cuboid",
+ "菱形|红": "red_cuboid",
+ "菱体|红": "red_cuboid",
+ "椭圆柱|粉": "pink_ellipse_cylinder",
+ "圆柱|粉": "pink_ellipse_cylinder"
+}
