@@ -75,16 +75,70 @@ class AutoSegmenter:
                 gray_obj = ((diff > max(30, float(cfg.get('background_diff', 26))))
                             & (sat < 55)).astype(np.uint8) * 255
                 gray_obj = cv2.morphologyEx(gray_obj, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        return color, gray_obj, diff, hsv
+        white = None
+        if cfg.get('white_objects', True):
+            white = AutoSegmenter._white_mask(hsv, cfg)
+        return color, gray_obj, diff, hsv, white
+
+    @staticmethod
+    def _white_ok(bbox, area, cfg):
+        """白色候选的块级过滤（面积 + 填充率）。
+
+        现场实测（2026-10-31，托盘里放两个白六棱锥的一帧，700×700 校正图）：
+          白棱锥 A bbox(212,537,115,124) area=7262 fill=0.52
+          白棱锥 B bbox(502,532,139,129) area=7778 fill=0.44
+          托盘内壁反光 bbox(560,430,98,108) area=3800 fill=0.37  ← 假目标，必须滤掉
+        内壁是一条斜向亮带（底部没有阴影、面积只有白棱锥一半），
+        所以用「面积下限 5000 + 填充率 ≥0.35」这两条把它挡在外面。
+        真白块比这大得多；万一现场改用更小的白块，把 `white_min_area` 调小即可。
+        """
+        bw = max(1, int(bbox[2]))
+        bh = max(1, int(bbox[3]))
+        fill = float(area) / (bw * bh)
+        if float(area) < float(cfg.get('white_min_area', 5000)):
+            return False
+        return fill >= float(cfg.get('white_min_fill', 0.35))
+
+    @staticmethod
+    def _white_mask(hsv, cfg):
+        """浅色/白色物块的候选（2026-10-31 新增）。
+
+        现场问题：两个**白色六棱锥**一直识别不出来。原因是颜色分支判据是
+        `饱和度 > 45`，而白块在画面里 S 只有 11~15（现场实帧实测），
+        候选前景里一个点都落不到它们身上 → SAM 没有提示点 → 永远分不出来。
+        白块和灰色托盘的区别不在饱和度，而在**亮度**：白块 V 比周围表面高 10%~20%。
+
+        所以这里用「V ÷ 大核高斯模糊(V)」这个**局部亮度比**来找：
+        - 比值与整体光照无关（整幅变亮/变暗，比值不变），比固定阈值稳；
+        - 核比物块大、比光照渐变尺幅小，托盘本身和阴影都是平的、比值≈1；
+        - 仍然要求低饱和 + 足够亮，避免把彩色块的亮面也当成"白块"。
+
+        cfg 可调：`white_ratio`(1.10) / `white_sat_max`(55) / `white_val_min`(80)。
+        关掉整条分支：config 里写 `"white_objects": false`。
+        """
+        h, w = hsv.shape[:2]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+        v = val.astype(np.float32)
+        sigma = max(15.0, min(h, w) * 0.04)      # 700 宽时约 28 px
+        surf = cv2.GaussianBlur(v, (0, 0), sigma)
+        ratio = v / np.maximum(surf, 1.0)
+        mul = float(cfg.get('white_ratio', 1.10))
+        sat_max = int(cfg.get('white_sat_max', 55))
+        val_min = int(cfg.get('white_val_min', 80))
+        m = ((ratio > mul) & (sat < sat_max) & (val > val_min)).astype(np.uint8) * 255
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
+        return m
 
     # 兼容旧调用名
     _foreground = _foregrounds
 
 
     @staticmethod
-    def _blobs(mask, strength=None, min_strength=0.0):
+    def _blobs(mask, strength=None, min_strength=0.0, min_area=None):
         h, w = mask.shape[:2]
-        min_a = max(600, int(h * w * .0025))
+        min_a = max(600, int(h * w * .0025)) if min_area is None else int(min_area)
         max_a = int(h * w * .30)
         n, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
         blobs = []
@@ -136,21 +190,36 @@ class AutoSegmenter:
         return [list(p) for p in pts]
 
     # ------------------------------------------------------------------ 主入口
-    def segment(self, frame, background=None, cfg=None):
+    def segment(self, frame, background=None, cfg=None, stats=None):
         """对已透视校正的托盘图做实例分割。
 
         background: 与 frame 同尺寸的空托盘灰度图（可选），用于灰度物体差分。
+        stats:      可选 dict；会写入 `white_blobs`（白色/浅色候选块数），便于现场排查。
         """
         cfg = cfg or {}
         h, w = frame.shape[:2]
-        color, gray_obj, diff, hsv = self._foregrounds(frame, background, cfg)
+        color, gray_obj, diff, hsv, white = self._foregrounds(frame, background, cfg)
         blobs = self._blobs(color)
+        fg = color
+        white_blobs = 0
+        if white is not None:
+            # 白色/浅色物块候选：另起一块，和颜色块重叠的不要（避免同一物体打两次点）。
+            # 面积下限单独给（白块常被高光切成几块，太小的是反光，不要浪费提示点）。
+            for b in self._blobs(white, None, 0.0, int(cfg.get('white_min_area', 5000) * 0.6)):
+                if not self._white_ok(b['bbox'], b['area'], cfg):
+                    continue
+                if all(self._bbox_iou(b['bbox'], k['bbox']) < .30 for k in blobs):
+                    blobs.append(b)
+                    white_blobs += 1
+            fg = cv2.bitwise_or(fg, white)
+        if stats is not None:
+            stats['white_blobs'] = white_blobs
         if gray_obj is not None:
             # 颜色和差分各自成块，再做重叠合并：差分有残留时不会把彩色物体连成一片。
             for b in self._blobs(gray_obj, diff, 45.0):
                 if all(self._bbox_iou(b['bbox'], k['bbox']) < .30 for k in blobs):
                     blobs.append(b)
-        fg = color if gray_obj is None else cv2.bitwise_or(color, gray_obj)
+        fg = fg if gray_obj is None else cv2.bitwise_or(fg, gray_obj)
         if not blobs:
             return []
         pts = self._prompts(blobs, fg)
@@ -202,7 +271,14 @@ class AutoSegmenter:
             # 物体性：掩膜内部至少要有明显颜色或与空托盘的亮度差。
             sat_mean = float(hsv[:, :, 1][sel].mean()) if sel.any() else 0.0
             diff_mean = float(diff[sel].mean()) if sel.any() else 0.0
-            if sat_mean < 32 and diff_mean < 20:
+            # 白色/浅色物体在同一道门上会被误杀：白六棱锥 S≈10，现场又没开
+            # gray_objects（没有空托盘差分）→ diff_mean=0，两条都不满足。
+            # 所以再加一条：掩膜大部分落在白色候选上就认（white 分支自己已经做过
+            # 「比周围表面亮 10% 以上 + 低饱和」的判断）。
+            _white_hit = 0.0
+            if white is not None and sel.any():
+                _white_hit = float(np.logical_and(sel, white > 0).sum()) / max(1, int(sel.sum()))
+            if sat_mean < 32 and diff_mean < 20 and _white_hit < .35:
                 continue
             M = cv2.moments(c)
             cx = M['m10'] / M['m00'] if M['m00'] else x + bw / 2

@@ -1181,7 +1181,7 @@ class App:
                     self.note(f'空托盘背景读不到（{exc}），本次跳过灰度差分')
                 if bgi is not None:
                     bg = cv2.warpPerspective(bgi, H, (s, s))
-        masks = self.segmenter.segment(warp, bg, self.cfg)
+        masks = self.segmenter.segment(warp, bg, self.cfg, stats)
         t2 = time.perf_counter()
         out = []
         # 目标过滤：托盘外的杯子/夹爪常被 SAM 当成“物块”。

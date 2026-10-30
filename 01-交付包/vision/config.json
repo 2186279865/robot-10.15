@@ -117,5 +117,11 @@
       "mode": "max",
       "note": "6 类×2=12；mode=max 表示“最多”，实际可少于该数量"
     }
-  }
+  },
+  "white_objects": true,
+  "white_ratio": 1.1,
+  "white_sat_max": 55,
+  "white_val_min": 80,
+  "white_min_area": 5000,
+  "white_min_fill": 0.35
 }
