@@ -43,10 +43,20 @@ P1_Y = -13144
 P0_Y = 0
 TRAY_DEG = 60.0
 
-SETTLE_GRAB_MS = 450       # 夹紧后等舵机走完
-SETTLE_OPEN_MS = 500       # 松爪后等货物落盒
-SETTLE_READY_MS = 250      # 回预备位
+SETTLE_GRAB_MS = 180       # 夹紧后只等舵机合拢（原 450；实测夹爪 168°→135° 约 0.2 s）
+SETTLE_OPEN_MS = 150       # 松爪后等货物离爪（原 500；爪子张开只需 ~0.15 s，货自然落盒）
+SETTLE_READY_MS = 0        # 回预备位不再单独等（下一段运动期间舵机自己转完）
 
+#: 在位判定：|残差| ≤ 60 脉冲（≈0.6 mm）就当已经在位，不再为 10 脉冲跑一趟往返。
+IN_PLACE_TOL_PULSES = 60.0
+
+#: 编码器读数"够新"门槛（ms）：超了就再取一次（最多 ~0.15 s），
+#: 不再像以前那样死等 0.6 s 稳定才肯发下一条（现场每件白等 4~5 s）。
+COUNTS_MAX_AGE_MS = 400.0
+
+#: 「预走」只走 ①Y 进通道（0.45 s），**不提前抬 Z**：
+#: 识别 3~4 s 期间 Y 早就走完了，提前抬 Z 对第一件没有加速；
+#: 而抓空时提前抬顶会白抬 1.6 s + 回 P0 再降 1.6 s。
 #: 「预走」只允许在 Z 确实到底时才敢做（穿通道时通道净高不够）。
 #: 400 脉冲 ≈ 0.24 mm（1658 脉冲/mm），比"在底部"更宽松一点点也不会顶到横梁。
 PREFETCH_Z_TOL_PULSES = 400
@@ -321,11 +331,13 @@ def tray_turn(client, deg: float, log=print, counts_get=None) -> dict:
 def run_once(client, target: dict, log=print, wait=None, calib=None,
              pos_source: Optional[Callable[[], tuple]] = None,
              drop: bool = True, tray_deg: float = TRAY_DEG,
-             tray_async: bool = True) -> Dict[str, object]:
+             tray_async: bool = True, prep: bool = True) -> Dict[str, object]:
     """按固定顺序走一遍，成功返回 dict，失败抛 GrabError。
 
     drop=True  抓完继续「转盘 60° → 松爪 → 回预备」；
     drop=False 抓完停在 P0（手里还夹着），交给人工决定要不要放。
+    prep=False 表示「本批的前置准备（stop_clear + goto_max_ms + acc）已经做过」，
+               后续件不再重复发这 3 条命令（连抓时每件省 ~0.4 s）。
     pos_source() 返回 (soft, known, counts) 三个 dict，给 move_abs 判断当前位置；
     缺省时从 client 的软位置里取（GUI 应传入自己的面板数据，能拿到回读 counts）。
     """
@@ -354,7 +366,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         except Exception:                      # noqa: BLE001
             return None, None, None
 
-    _prep_done = {'v': False}
+    _prep_done = {'v': not bool(prep)}
 
     def _live_counts() -> Dict[int, float]:
         """直接读客户端缓存的最新编码器 counts（GUI 面板那份在主线程、此处不会刷新）。"""
@@ -373,63 +385,99 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 continue
         return out
 
-    def _counts_fresh(max_age_ms: float = 260.0) -> bool:
-        """四轴 counts 是否都是"新"的（遥测 ts 与当前 uptime 之差 ≤ max_age_ms）。"""
+    def _counts_ok(cnt, axes) -> bool:
+        """要动的这些轴，counts 是否"够新"（遥测 ts 与 uptime 差 ≤ COUNTS_MAX_AGE_MS）。"""
+        if not cnt:
+            return False
+        for a in axes:
+            if a not in cnt:
+                return False
         raw = getattr(client, 'last_counts', None) or {}
         try:
             now_ms = float(client.now_ms())
         except Exception:                              # noqa: BLE001
-            return False
-        for a in (1, 3, 4, 5):
+            return True                                # 判断不了年龄就先用，别卡流程
+        for a in axes:
             info = raw.get(a)
-            if not isinstance(info, dict):
-                return False
-            ts = info.get('ts')
-            if ts is None or (now_ms - float(ts)) > max_age_ms:
+            ts = info.get('ts') if isinstance(info, dict) else None
+            if ts is not None and (now_ms - float(ts)) > COUNTS_MAX_AGE_MS:
                 return False
         return True
 
-    def _settle_counts(axes=None, tries=10, gap=0.06, tol=12.0):
-        """等 counts 既"新鲜"又"连续两次几乎不变"。遥测 100 ms 一次，
-        正常空闲时 ~60-120 ms 就能返回，不再固定等 1.5 s。"""
-        axes = [int(a) for a in (axes or (1, 3, 4, 5))]
-        prev = _live_counts()
-        for _i in range(tries):
-            time.sleep(gap)
-            now = _live_counts()
-            if _counts_fresh() and prev and now and all(
-                    abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= tol for a in axes if a in prev):
-                return now
-            prev = now or prev
-        say('读数未在 %.2f s 内稳定，按现有值继续（有偏风险）' % (tries * gap))
-        return prev
+    def _fresh_counts_for(axes) -> Dict[int, float]:
+        """取一份能用的 counts：最多重取 5 次（30 ms 一次，上限约 0.15 s）。
+
+        以前是"等 10×60 ms 且连续两次几乎不变"才肯放行 —— 现场读数噪声 + 遥测节流
+        基本次次跑满 0.6 s，一件白等 4~5 s（现场要求：多余的等待都不要）。
+        现在只要求"够新"，老一点也照走，由后面的残差复核兜住。
+        """
+        axes = [int(a) for a in axes]
+        cnt = _live_counts()
+        for _i in range(5):
+            if _counts_ok(cnt, axes):
+                return cnt
+            time.sleep(0.03)
+            nxt = _live_counts()
+            if nxt:
+                cnt = nxt
+        say('读数不够新（>%d ms），按现有值继续' % int(COUNTS_MAX_AGE_MS))
+        return cnt
+
+    def _counts_with_soft(targets, cnt) -> Dict[int, float]:
+        """凑一份能用的 counts：遥测直读 > 界面面板（pos_source）> 软位置换算。
+
+        motor_pos / goto 都是相对量，只要方向对就能走；绝对值只用来判"在不在位"，
+        老一点也能接受（后面残差复核会兜住）。全缺才会退化成 POS_UNKNOWN。
+        """
+        soft_, known_, panel = pos()
+        out: Dict[int, float] = {}
+        for src in (panel, cnt):                   # panel 先放，cnt（更新）覆盖
+            for k, v in (src or {}).items():
+                try:
+                    out[int(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
+        for a in targets:
+            a = int(a)
+            if a in out:
+                continue
+            if soft_ and known_ and known_.get(a) and soft_.get(a) is not None:
+                try:
+                    out[a] = float(soft_[a]) * float(prep_pose.COUNTS_PER_PULSE)
+                except Exception:                  # noqa: BLE001
+                    pass
+        return out
+
+    _speed_once = {'v': bool(prep)}
 
     def move_xy(targets: Dict[int, float]) -> None:
-        """X/Y 同时走一步：两轴 motor_pos 并行；没有编码器读数才退回顺序 goto。"""
-        targets = {int(k): int(v) for k, v in targets.items()}
-        _settle_counts(list(targets))
-        soft_, known_, cnt_ = pos()
-        if cnt_ and all(cnt_.get(a) is not None for a in targets):
-            say('X/Y 并行一步走：%s'
-                % ', '.join('%s→%+d' % (prep_pose.AXIS_LABEL.get(a, a), v)
-                            for a, v in targets.items()))
-            prep_pose.move_xy_fast(client, targets, rpm=RPM, log=say, wait=wait,
-                                   counts=cnt_,
-                                   counts_fn=lambda: (pos()[2] or _live_counts()),
-                                   acc=_ACC_DEFAULT)
-        else:
-            move(targets, list(targets))
+        """X/Y **永远并行**：两轴各发一条相对 motor_pos，固件独立执行、真正同时动。
 
-    def move(targets: Dict[int, float], order: List[int]) -> None:
-        _settle_counts(list(targets))
-        soft, known, counts = pos()
-        # 注意：固件的 host_goto 只有一个执行槽，两条 motor_goto 同时下发时
-        # 第二条会返回 E09(goto_busy)，所以**不能并行**，必须按 order 顺序走。
-        first = not _prep_done['v']
+        绝不退回"先 X 后 Y"的顺序 goto —— 现场要求 X/Y 必须一起走。
+        """
+        targets = {int(k): int(v) for k, v in targets.items()}
+        cnt = _counts_with_soft(targets, _fresh_counts_for(list(targets)))
+        say('X/Y 并行一步走：%s'
+            % ', '.join('%s→%+d' % (prep_pose.AXIS_LABEL.get(a, a), v)
+                        for a, v in targets.items()))
+        prep_pose.move_xy_fast(client, targets, rpm=RPM, log=say, wait=wait,
+                               counts=cnt,
+                               counts_fn=lambda: (pos()[2] or _live_counts()),
+                               acc=_ACC_DEFAULT, speed_setup=_speed_once['v'])
+        _speed_once['v'] = False
+
+    def move(targets: Dict[int, float], order: List[int],
+             prep_now: Optional[bool] = None) -> None:
+        cnt = _counts_with_soft(targets, _fresh_counts_for(list(targets)))
+        soft, known, _ = pos()
+        # 固件 host_goto 只有一个执行槽（两条 motor_goto 同时发，第二条 E09），
+        # 所以 Y/Z 这类固定位只能顺序走；X/Y 一律走 move_xy() 的 motor_pos 并行。
+        first = (not _prep_done['v']) if prep_now is None else bool(prep_now)
         _prep_done['v'] = True
         results = prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
                                      log=say, wait=wait, soft=soft, known=known,
-                                     counts=counts, prep=first)
+                                     counts=cnt, prep=first,
+                                     skip_tol=IN_PLACE_TOL_PULSES)
         bad = [r for r in results if not r.get('ok')]
         if bad:
             first = bad[0]
@@ -496,12 +544,15 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         # 10 串行转（单件抓/未开 tray_async 时走这里）
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
-    time.sleep(0.2)
-    say('松爪 180° → 等待落盒 → 回预备 %d°' % int(P.GRIPPER_READY_DEG))
+    # 11 松爪 → 回预备：不再为"落盒/回位"额外等 0.95 s（原 0.2+0.5+0.25），
+    #    只给爪子张开留 0.15 s；回预备的转动在下一件「②Z 抬顶」期间自己完成。
+    say('松爪 180° → 回预备 %d°（下一段运动期间舵机自己转完，不再干等）'
+        % int(P.GRIPPER_READY_DEG))
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)
-    client.send('gripper', 'ready', timeout_ms=2000)
-    time.sleep(SETTLE_READY_MS / 1000.0)
+    client.send('gripper', 'ready', timeout_ms=2000)    # 回预备（不等它转完）
+    if SETTLE_READY_MS > 0:
+        time.sleep(SETTLE_READY_MS / 1000.0)
 
     elapsed = time.perf_counter() - t0
     say('完成，用时 %.1f s' % elapsed)
@@ -530,14 +581,20 @@ def pick_order(targets: Iterable[dict]) -> List[dict]:
 
 def goto_p0(client, log=print, wait=None,
             pos_source: Optional[Callable[[], tuple]] = None) -> None:
-    """把爪子退回 P0（初始位/落料位）。
+    """把爪子退回 P0（初始位/落料位）—— 现场规则（2026-10-31 用户确认）：
 
-    规则（现场确认）：
-      * 若此刻已在「P1 且 Z 已降到底」→ **直接 Y 回 0**（一步，不抬 Z）；
-      * 否则 → 先「Z 降到底」，再把 X/Y 回 (0, P0_Y)。
+      1) 已经在 P0（X≈0、Y≈0、Z≈底）      → 什么都不做；
+      2) 在 P1（X≈0、Y≈P1_Y）：
+           * Z 已到底（**新鲜读数确认过**）→ 一步 Y 回 0（唯一允许「直接回 P0」的情形）；
+           * Z 没到底                    → Z 降到底 → Y 回 0；
+      3) 不在 P1（比如停在托盘上方 X≠0）  → X/Y **并行**先回 P1（Z 保持当前高度）
+                                             → Z 降到底 → Y 回 0。
 
-    只在「整批抓完」时调用（点一键启动时不再自动归位，现场保证已在 P0）；
-    用户叫停时不调用，避免中途把货压在通道里。
+    为什么非得先用新鲜读数：2026-10-31 01:58:53 现场，预走刚把 Z 抬到顶，
+    回读还是旧的 -8 counts → 被判成「Z 已在底」、跳过降底、直接在高位把 Y 退回 P0
+    （用户看到的就是「抓空后直接回 p0」）。这里要求连续两次采样一致才敢信。
+
+    只在「整批抓完」时调用；用户叫停时不调用，避免中途把货压在通道里。
     """
     def say(t: str) -> None:
         log('[回 P0] ' + t)
@@ -550,41 +607,114 @@ def goto_p0(client, log=print, wait=None,
         except Exception:                              # noqa: BLE001
             return None, None, None
 
+    def raw_counts() -> Dict[int, float]:
+        out: Dict[int, float] = {}
+        for k, v in (pos()[2] or {}).items():
+            try:
+                out[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def fresh_counts(tries: int = 6, gap: float = 0.05, tol: float = 30.0) -> Dict[int, float]:
+        """连续两次读数一致（X/Y/Z 三轴差 ≤30 counts）才算新鲜；取不到就返回最后一份。"""
+        prev = raw_counts()
+        for _i in range(tries):
+            time.sleep(gap)
+            now = raw_counts()
+            same = (prev and now
+                    and all(abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= tol
+                            for a in (AXIS_Z, AXIS_X, AXIS_Y) if a in prev))
+            if same:
+                return now
+            prev = now or prev
+        return prev
+
     def pulse_of(axis, soft, known, counts):
-        """当前轴位置（脉冲）；软位置优先，其次 counts 换算，都没有返回 None。"""
+        """当前轴位置（脉冲）：优先新鲜 counts，其次软位置；都没有返回 None。"""
         try:
-            if known and axis in known and soft and soft.get(axis) is not None:
-                return float(soft[axis])
             if counts and counts.get(axis) is not None:
                 return float(counts[axis]) / prep_pose.COUNTS_PER_PULSE
+            if known and axis in known and soft and soft.get(axis) is not None:
+                return float(soft[axis])
         except Exception:                              # noqa: BLE001
             pass
         return None
 
-    def move(targets, order, title, prep):
-        say(title)
-        soft, known, counts = pos()
-        prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
-                           log=say, wait=wait, soft=soft, known=known,
-                           counts=counts, prep=prep)
+    first = {'v': True}
 
-    soft, known, counts = pos()
-    x = pulse_of(AXIS_X, soft, known, counts)
-    y = pulse_of(AXIS_Y, soft, known, counts)
-    z = pulse_of(AXIS_Z, soft, known, counts)
-    tol = 60.0                                        # ≈0.6 mm，够判“就在这个位”
-    at_p1_z_down = (None not in (x, y, z)
-                    and abs(x) <= tol
-                    and abs(y - P1_Y) <= tol
-                    and abs(z - Z_DOWN) <= tol)
-    if at_p1_z_down:
-        say('已在 P1 且 Z 已到底 → 直接 Y 回 P0（不抬 Z）')
-        move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0', True)
+    def send_prep():
+        """一条动作序列只准备一次：停锁存 / 放宽 goto 超时 / 加速度档。"""
+        if not first['v']:
+            return
+        first['v'] = False
+        for name, arg in (('stop_clear', None), ('param_set', ('goto_max_ms', 120000)),
+                          ('param_set', ('acc', int(_ACC_DEFAULT)))):
+            try:
+                if arg is None:
+                    client.send(name, timeout_ms=1500)
+                else:
+                    client.send(name, *arg, timeout_ms=1500)
+            except Exception:                          # noqa: BLE001
+                pass
+
+    def move(targets, order, title):
+        say(title)
+        send_prep()
+        _s, _k, cnt = pos()
+        prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
+                           log=say, wait=wait, soft=_s, known=_k,
+                           counts=cnt, prep=False, skip_tol=IN_PLACE_TOL_PULSES)
+
+    def move_xy(targets, title):
+        """X/Y 并行（两轴 motor_pos 同时下发，绝不退化成先 X 后 Y）。"""
+        say(title)
+        send_prep()
+        _s, _k, cnt = pos()
+        c = {int(k): float(v) for k, v in (cnt or {}).items()}
+        if _s and _k:
+            for a in targets:
+                if a not in c and _k.get(a) and _s.get(a) is not None:
+                    c[a] = float(_s[a]) * prep_pose.COUNTS_PER_PULSE
+        if not all(a in c for a in targets):
+            move(targets, list(targets), title + '（缺读数 → 只能顺序走）')
+            return
+        say('X/Y 并行一步走：%s'
+            % ', '.join('%s→%+d' % (prep_pose.AXIS_LABEL.get(a, a), int(v))
+                        for a, v in targets.items()))
+        prep_pose.move_xy_fast(client, targets, rpm=RPM, log=say, wait=wait,
+                               counts=c, counts_fn=raw_counts,
+                               acc=_ACC_DEFAULT, speed_setup=True)
+
+    cnt = fresh_counts()
+    soft, known, _c = pos()
+    x = pulse_of(AXIS_X, soft, known, cnt)
+    y = pulse_of(AXIS_Y, soft, known, cnt)
+    z = pulse_of(AXIS_Z, soft, known, cnt)
+    if None in (x, y, z):
+        say('没有可用的位置读数（counts / 软位置都缺）→ 不自动回 P0，请人工确认')
+        return
+    tol = IN_PLACE_TOL_PULSES                            # 60 脉冲 ≈ 0.6 mm
+
+    if abs(x) <= tol and abs(y - P0_Y) <= tol and abs(z - Z_DOWN) <= tol:
+        say('已经在 P0（X %+.0f / Y %+.0f / Z %+.0f 脉冲）→ 不用动' % (x, y, z))
         return
 
-    say('不在「P1 + Z 到底」→ 先 Z 降到底，再回 P0')
-    move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 先降到底', True)
-    move({AXIS_X: 0.0, AXIS_Y: P0_Y}, [AXIS_X, AXIS_Y], 'X/Y 回 P0', False)
+    if abs(x) <= tol and abs(y - P1_Y) <= tol:
+        if abs(z - Z_DOWN) <= tol:
+            say('在 P1 且 Z 已到底 → 直接 Y 回 P0（不抬 Z）')
+            move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
+            return
+        say('在 P1、Z 没到底（%+.0f 脉冲）→ 先 Z 降到底，再 Y 回 P0' % z)
+        move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底')
+        move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
+        return
+
+    say('不在 P1（X %+.0f / Y %+.0f）→ 先 X/Y 并行回 P1（Z 保持 %+.0f 不动）'
+        % (x, y, z))
+    move_xy({AXIS_X: 0.0, AXIS_Y: P1_Y}, 'X/Y 回 P1')
+    move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底')
+    move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
 
 
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
@@ -658,10 +788,12 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 and abs(vals[1] - vals[0]) <= 24.0)
 
     def _prefetch_channel():
-        """把固定路线的前两步（①Y 进通道 → ②Z 抬顶）放到后台先走。
+        """把固定路线的**第一步「①Y 进通道」**放到后台先走（只走这一步）。
 
         识别要 2~4 s（慢时十几秒），这段时间机械臂本来只能干等；
-        而这两步与识别结果无关（任何物块都得先穿通道再抬顶），可以并行。
+        「Y 进通道」与识别结果无关（任何物块都得先穿通道），可以并行。
+        **不提前抬 Z**：现场要求 Z 必须始终抬到位置才允许横移，提前抬反而多一趟；
+        Z 抬顶留在识别回来后的正式流程里（run_once ②）。
         返回后台线程（可能被 join），跳过时返回 None。
         """
         if not prefetch or pos_source is None:
@@ -674,35 +806,34 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         def work():
             first = {'v': True}
-            for tg, order, what in (({AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'),
-                                    ({AXIS_Z: Z_UP}, [AXIS_Z], '②Z 抬顶')):
-                if stop_flag is not None and stop_flag():
-                    log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
+            tg, order, what = {AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'
+            if stop_flag is not None and stop_flag():
+                log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
+                return
+            try:
+                _s, _k, cnt = pos_source() if pos_source else (None, None, None)
+            except Exception:                  # noqa: BLE001
+                _s, _k, cnt = None, None, None
+            try:
+                log('[预走] %s 开始' % what)
+                res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
+                                         acc=_ACC_DEFAULT,
+                                         log=lambda t: log('[预走] ' + t),
+                                         wait=wait, soft=_s, known=_k, counts=cnt,
+                                         prep=first['v'])
+                first['v'] = False
+                bad = [r for r in res if not r.get('ok')]
+                if bad:
+                    log('[预走] %s 没走到位（%s），交给正式流程重走'
+                        % (what, bad[0].get('code') or bad[0].get('text') or ''))
                     return
-                try:
-                    _s, _k, cnt = pos_source() if pos_source else (None, None, None)
-                except Exception:                  # noqa: BLE001
-                    _s, _k, cnt = None, None, None
-                try:
-                    log('[预走] %s 开始' % what)
-                    res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
-                                             acc=_ACC_DEFAULT,
-                                             log=lambda t: log('[预走] ' + t),
-                                             wait=wait, soft=_s, known=_k, counts=cnt,
-                                             prep=first['v'])
-                    first['v'] = False
-                    bad = [r for r in res if not r.get('ok')]
-                    if bad:
-                        log('[预走] %s 没走到位（%s），交给正式流程重走'
-                            % (what, bad[0].get('code') or bad[0].get('text') or ''))
-                        return
-                except Exception as exc:           # noqa: BLE001
-                    log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
-                    return
-            log('[预走] 完成：已在通道末端抬顶，识别一回来就直接走 X/Y')
+            except Exception as exc:           # noqa: BLE001
+                log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
+                return
+            log('[预走] 完成：已在通道末端（Z 仍在底），识别一回来就抬顶走 X/Y')
 
         th = threading.Thread(target=work, name='grab-prefetch', daemon=True)
-        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道 → ②Z 抬顶」')
+        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道」（Z 保持到底）')
         th.start()
         return th
 
@@ -724,6 +855,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 status='running', last_event='开始连续抓 %s 件' % cnt_txt)
 
     stopped = False
+    # 前置准备（stop_clear / goto_max_ms / acc）整批只做一次：首件 True，之后 False。
+    _prep_batch = {'v': True}
     for i in range(count_i if count_i > 0 else 10 ** 6):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
@@ -765,7 +898,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             # 预走收尾：固件 goto 只有一个执行槽，绝不能让预走和正式动作抢
             if _pre is not None:
                 if _pre.is_alive():
-                    log('[连续抓] 等预走收尾（机械臂先走完 ①Y 进通道 / ②Z 抬顶）…')
+                    log('[连续抓] 等预走收尾（机械臂先走完 ①Y 进通道）…')
                 _pre.join()
                 _pre = None
             targets = load_targets()
@@ -832,7 +965,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         one = None
         try:
             one = run_once(client, target, log=log, wait=wait, pos_source=pos_source,
-                           drop=drop, tray_deg=deg, tray_async=True)
+                           drop=drop, tray_deg=deg, tray_async=True,
+                           prep=_prep_batch['v'])
+            _prep_batch['v'] = False
         except Exception as exc:                   # noqa: BLE001
             reason = str(exc)
             log('[连续抓] 第 %d 件失败：%s' % (i + 1, reason))
@@ -858,7 +993,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                     log('[连续抓] 重试前识别失败（沿用旧坐标）：%s' % exc_r)
                 try:
                     one = run_once(client, target, log=log, wait=wait,
-                                   pos_source=pos_source, drop=drop, tray_deg=deg)
+                                   pos_source=pos_source, drop=drop, tray_deg=deg,
+                                   prep=False)
+                    _prep_batch['v'] = False
                     log('[连续抓] 第 %d 件重试成功' % (i + 1))
                 except Exception as exc2:          # noqa: BLE001
                     failed += 1

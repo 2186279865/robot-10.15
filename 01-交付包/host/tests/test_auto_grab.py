@@ -192,10 +192,10 @@ class RunManyEventTest(unittest.TestCase):
 
 
 class PrefetchTest(unittest.TestCase):
-    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 ②Z 抬顶 走掉。
+    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 走掉（Z 不提前抬，必须抬到位置才横移）。
 
     预走是安全敏感的（Z 不在底时绝不能动 Y 进通道），所以两个方向都要测：
-    在底 → 走两步；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
+    在底 → 走一步；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
     """
 
     def setUp(self):
@@ -225,13 +225,27 @@ class PrefetchTest(unittest.TestCase):
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
         self.assertTrue(any('[预走] 完成' in t for t in logs), logs)
-        # 预走顺序：Y 进通道（goto 到 P1_Y）在前，Z 抬顶在后
+        # 预走**只走 ①Y 进通道**：Z 必须抬到位置才允许横移，所以抬顶留在正式流程里
         pre = [t for t in logs if t.startswith('[预走]')]
         self.assertTrue(any('①Y 进通道 开始' in t for t in pre), pre)
-        self.assertTrue(any('②Z 抬顶 开始' in t for t in pre), pre)
-        y_i = next(i for i, t in enumerate(pre) if '①Y' in t)
-        z_i = next(i for i, t in enumerate(pre) if '②Z' in t)
-        self.assertLess(y_i, z_i)
+        self.assertFalse(any('②Z 抬顶' in t for t in pre), pre)
+        self.assertTrue(any('Z 仍在底' in t for t in pre), pre)
+        # Z 抬顶（正式流程的 goto -152000）依旧发生，且在识别完成之后
+        full = '\n'.join(logs)
+        self.assertIn('识别完成：', full)
+        z_gotos = [c for c in client.gotos() if int(c[1][0]) == AG.AXIS_Z]
+        self.assertTrue(z_gotos)
+        self.assertEqual(int(z_gotos[0][1][1]), AG.Z_UP)
+
+    def test_prefetch_moves_y_only_before_recognition(self):
+        """识别期间只允许 Y 动；Z 抬顶的 goto 必须在识别回来之后。"""
+        logs = []
+        client, res = self._run({}, logs)
+        self.assertEqual(res['done'], 1)
+        y_gotos = [c for c in client.gotos() if c[1][0] == AG.AXIS_Y]
+        self.assertTrue(y_gotos)
+        # 预走用的是相对口径：Y 目标 -13144 脉冲（从 0 往通道里走）
+        self.assertEqual(int(y_gotos[0][1][1]), AG.P1_Y)
 
     def test_skipped_when_z_not_at_bottom(self):
         logs = []
@@ -246,6 +260,57 @@ class PrefetchTest(unittest.TestCase):
                   recognize=lambda: (None, '单次识别完成：3 个目标（用时 2.10s）'))
         self.assertTrue(any('识别完成：' in t for t in logs), logs)
         self.assertTrue(any('视觉：单次识别完成' in t for t in logs), logs)
+
+
+class GotoP0Test(unittest.TestCase):
+    """回 P0 的现场规矩（用户反复强调，2026-10-31 抓空那次就是这里出错）。
+
+    1) 已在 P0 三轴都在位        → 一步都不动；
+    2) 在 P1 且 Z 到底           → 只 Y 回 0（唯一允许"直接回 P0"的情形）；
+    3) 在 P1 但 Z 没到底         → Z 降到底 → Y 回 0；
+    4) 不在 P1（停在托盘上方）   → X/Y 并行回 P1 → Z 降到底 → Y 回 0。
+    """
+
+    def _run(self, pulses):
+        client = FakeClient()
+        pos = {int(a): float(p) for a, p in pulses.items()}
+        known = {a: True for a in pos}
+        counts = {a: p * 20.48 for a, p in pos.items()}
+        logs = []
+        AG.goto_p0(client, log=logs.append,
+                   wait=lambda rid, ms: client.done_of(rid),
+                   pos_source=lambda: (dict(pos), dict(known), dict(counts)))
+        return client, logs
+
+    def test_already_at_p0_does_nothing(self):
+        client, logs = self._run({AG.AXIS_X: 0, AG.AXIS_Y: AG.P0_Y, AG.AXIS_Z: AG.Z_DOWN})
+        self.assertEqual(client.gotos(), [])
+        self.assertEqual([c for c in client.calls if c[0] == 'motor_pos'], [])
+        self.assertTrue(any('不用动' in t for t in logs), logs)
+
+    def test_at_p1_and_z_down_goes_y_in_one_step(self):
+        client, _logs = self._run({AG.AXIS_X: 0, AG.AXIS_Y: AG.P1_Y, AG.AXIS_Z: AG.Z_DOWN})
+        gotos = client.gotos()
+        self.assertEqual(len(gotos), 1, gotos)
+        self.assertEqual(int(gotos[0][1][0]), AG.AXIS_Y)      # 只动 Y
+        self.assertEqual(int(gotos[0][1][1]), AG.P0_Y - AG.P1_Y)
+
+    def test_at_p1_with_z_up_drops_z_first(self):
+        client, _logs = self._run({AG.AXIS_X: 0, AG.AXIS_Y: AG.P1_Y, AG.AXIS_Z: AG.Z_UP})
+        gotos = client.gotos()
+        self.assertEqual([int(g[1][0]) for g in gotos], [AG.AXIS_Z, AG.AXIS_Y], gotos)
+        self.assertEqual(int(gotos[0][1][1]), AG.Z_DOWN - AG.Z_UP)   # Z 先降到底
+
+    def test_not_at_p1_parks_x_y_parallel_before_dropping(self):
+        """停在托盘上方：必须 X/Y 并行回 P1 → Z 降到底 → Y 回 0（绝不就地降 Z）。"""
+        client, logs = self._run({AG.AXIS_X: 5000, AG.AXIS_Y: AG.P1_Y, AG.AXIS_Z: AG.Z_UP})
+        mp = [c for c in client.calls if c[0] == 'motor_pos'
+              and int(c[1][0]) in (AG.AXIS_X, AG.AXIS_Y)]
+        self.assertGreaterEqual(len(mp), 1, client.calls)      # 并行 motor_pos，不是顺序 goto
+        gotos = client.gotos()
+        self.assertTrue(any(int(g[1][0]) == AG.AXIS_Z for g in gotos), gotos)
+        self.assertTrue(all(int(g[1][0]) != AG.AXIS_X for g in gotos), gotos)  # X 不许单独 goto
+        self.assertTrue(any('X/Y 回 P1' in t for t in logs), logs)
 
 
 if __name__ == '__main__':

@@ -155,7 +155,7 @@ AXIS_LABEL = {1: 'Z', 3: '托盘', 4: 'X', 5: 'Y'}
 
 def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
              soft=None, known=None, counts=None,
-             prep: bool = True) -> List[Dict[str, object]]:
+             prep: bool = True, skip_tol: float = 2.0) -> List[Dict[str, object]]:
     """按 `{轴号: 目标脉冲}` 依次闭环走到目标（增量由回读 counts / 软位置算出）。
 
     给「回 P1」「Z 抬顶」「Z 降底」「走通道」「退通道」这类固定位置按钮用：
@@ -163,7 +163,7 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
     - 有回读 counts（3000 ms 内）优先按 counts 算增量，否则用软位置；
     - 两种位置来源都没有 → `POS_UNKNOWN` 拒绝（绝不按目标值盲走）；
     - 单步超过该轴行程 1.5 倍 → `RANGE` 拒绝；
-    - 已在目标位（|Δ| ≤ 2 脉冲）→ 跳过（重复点按钮安全）。
+    - 已在目标位（|Δ| ≤ skip_tol 脉冲，默认 2）→ 跳过（重复点按钮安全）。
     """
     say = log or (lambda _t: None)
     waiter = wait or (lambda rid, ms: client.wait_reply(rid, timeout_ms=ms))
@@ -200,7 +200,7 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
         if cur_counts is not None:
             want = int(round(target * COUNTS_PER_PULSE))
             pulses = int(round((want - int(cur_counts)) / COUNTS_PER_PULSE))
-            if abs(pulses) <= 2:
+            if abs(pulses) <= skip_tol:
                 say('%s：已经在目标位（回读 %d counts），跳过' % (label, int(cur_counts)))
                 continue
             say('%s：回读 %d counts → 走 %+d 脉冲（%d RPM）'
@@ -213,7 +213,7 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
                 say('%s：位置未知，拒绝执行（先复位或在四轴页对 Y/Z 点「位置清零」）' % label)
                 return results
             pulses = target - int((soft or {}).get(axis, 0))
-            if abs(pulses) <= 2:
+            if abs(pulses) <= skip_tol:
                 say('%s：已经在目标位（%+d 脉冲），跳过' % (label, int((soft or {}).get(axis, 0))))
                 continue
             say('%s：现在 %+d → 走 %+d 脉冲（%d RPM）'
@@ -448,14 +448,16 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
     return results
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=None,
-                 tol_pulses=8, timeout_s=3.5, acc=0, wait=None):
+                 tol_pulses=8, timeout_s=3.5, acc=0, wait=None,
+                 speed_setup: bool = True):
     """X/Y **一步并行**走位：两轴各发一条 motor_pos（固件独立执行，同时动）。
 
-    收口策略（关键）：GUI 的 telemetry 约 200 ms 一次，运动中按 counts 轮询会被旧值误导，
+    收口策略（关键）：GUI 的 telemetry 约 100~200 ms 一次，运动中按 counts 轮询会被旧值误导，
     因此这里不靠"运动中实时判到位"，而是：
-      1) 用行程/转速估算运动时间 t_est；
-      2) 等 t_est*0.9 后，用"连续两次读数几乎不变"判断停稳（最多再等 2 s）；
+      1) 用行程/转速估算运动时间 t_est（驱动器实际封顶≈1240 rpm）；
+      2) 等 t_est*1.02+0.1 s 后用"连续两次读数几乎不变（间隔 50 ms）"判断停稳（最多再等 2 s）；
       3) 用停稳后的读数算残差，只有 > tol_pulses 的轴才顺序 goto 补一次。
+    speed_setup=False：跳过 param_get/param_set speed_rpm_max（一批只做一次，省 2 次往返）。
     """
     say = log or (lambda _t: None)
     rpm_of = (lambda a: int(rpm.get(int(a), 1600))) if isinstance(rpm, dict) else (lambda a: int(rpm))
@@ -568,17 +570,18 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         return move_abs(client, targets, order=sorted(targets), rpm=rpm, acc=acc,
                         log=log, wait=wait, counts=_c, prep=True)
 
-    # 1) 放开 speed_rpm_max
+    # 1) 放开 speed_rpm_max（一批只做一次；固件参数是持久的，没必要每步都问一遍）
     old_max = None
-    try:
-        pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=800)) or {}
-        if pr.get('value') not in (None, ''):
-            old_max = int(float(pr['value']))
-        need = max([rpm_of(a) for a in targets] + [int(old_max or 300)])
-        if old_max is None or old_max < need:
-            _snd('param_set', 'speed_rpm_max', max(need, 3200), timeout_ms=1200)
-    except Exception:                                   # noqa: BLE001
-        pass
+    if speed_setup:
+        try:
+            pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=800)) or {}
+            if pr.get('value') not in (None, ''):
+                old_max = int(float(pr['value']))
+            need = max([rpm_of(a) for a in targets] + [int(old_max or 300)])
+            if old_max is None or old_max < need:
+                _snd('param_set', 'speed_rpm_max', max(need, 3200), timeout_ms=1200)
+        except Exception:                                   # noqa: BLE001
+            pass
 
     plans, bad, t_est = [], [], 0.0
     try:
@@ -602,28 +605,28 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             plans.append((axis, tgt, delta))
             say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
-        # 3) 等停稳：等满估算时长（含减速余量），再要求 **连续 3 次** 读数几乎不变
+        # 3) 等停稳：等满估算时长（几乎不加余量），再要求 **连续 2 次（间隔 50 ms）**读数几乎不变
         if plans:
-            t_wait = min(9.0, t_est * 1.20 + 0.30)
+            t_wait = min(9.0, t_est * 1.02 + 0.10)
+            say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
             t_end = time.monotonic() + t_wait
             while time.monotonic() < t_end:
-                time.sleep(0.05)
-            hard = time.monotonic() + 3.0
+                time.sleep(0.02)
+            hard = time.monotonic() + 2.0
             prev = read_counts()
             stable = 0
             while time.monotonic() < hard:
-                time.sleep(0.10)
+                time.sleep(0.05)
                 now = read_counts()
                 if now and prev and all(
                         abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans):
                     stable += 1
-                    if stable >= 3:
+                    if stable >= 2:
                         prev = now
                         break
                 else:
                     stable = 0
                 prev = now or prev
-            say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
 
         # 4) 残差 > tol 的轴顺序补一次
         # 先用"连续两次一致"的新鲜读数收口：运动中/刚停时的旧帧会把残差放大成上万脉冲，
