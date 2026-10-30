@@ -205,14 +205,19 @@ class CountsBasedTests(unittest.TestCase):
                soft={PP.AXIS_Y: 0, PP.AXIS_Z: 0}, known={PP.AXIS_Y: True, PP.AXIS_Z: True})
         self.assertEqual(client.calls, [])
 
-    def test_estimate_caps_rpm_at_50(self):
+    def test_estimate_uses_real_rpm_without_50_cap(self):
+        """不许再把有效转速压到 50 圈/分：那会把 Z 满行程估成 122 s（假超时根源）。"""
         fast = PP.estimate_timeout_ms(32000, 3000)
-        slow = PP.estimate_timeout_ms(32000, 50)
-        self.assertEqual(fast, slow)
+        slow = PP.estimate_timeout_ms(32000, 300)
+        self.assertLess(fast, slow)
+        z_ms = PP.estimate_timeout_ms(152000, 2400)      # Z 满行程，实测 1.49 s
+        self.assertGreater(z_ms, 2000)
+        self.assertLess(z_ms, 20000)
 
     def test_goto_budget_reasonable(self):
-        self.assertGreater(PP.goto_budget_ms(152000, 1500), 60000)
-        self.assertLess(PP.goto_budget_ms(152000, 1500), 120000)
+        budget = PP.goto_budget_ms(152000, 2400)
+        self.assertGreater(budget, 3000)
+        self.assertLess(budget, 20000)
 
 
 class _FastClock:

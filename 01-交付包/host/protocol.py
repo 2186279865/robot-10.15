@@ -73,10 +73,11 @@ EVIDENCE_SETTLE_ELAPSED = "settle_elapsed"
 
 EVENT_TYPES = ("task", "latch", "link", "reset")
 
-#: 运行参数默认值（方案 5 节）。界面默认速度上限 300RPM。
-#: 本版使用的「预备位」角度（比 150° 再张开一点：下探时爪尖不蹭物块）。
-#: 固件参数 gripper_ready_deg 出厂默认仍是 150，上位机连上时会 param_set 成这个值。
-GRIPPER_READY_DEG = 158
+#: 运行参数默认值（方案 5 节）。界面默认速度上限 3200RPM（2026-10-31 速度版）。
+#: 本版使用的「预备位」角度（现场标定 168°：下探时爪尖不蹭物块）。
+#: 固件参数 gripper_ready_deg 出厂默认也已改成 168（host_param_defaults），
+#: 上位机连上时再 param_set 一次存盘值（`host/runtime/gripper.json`）。
+GRIPPER_READY_DEG = 168
 
 #: 闭环 goto 的默认转速（圈/分，按轴分）。实测 rpm 就是速度，
 #: 驱动器自己封顶约 2740 圈/分。Z 要快（满行程 3 s），X/Y 慢一点不得不快不震。
@@ -85,16 +86,23 @@ GRIPPER_READY_DEG = 158
 #   Z 2200→2400（+9%，仍走闭环 goto，丢步会自动补）、Y 1600→2000（+25%）。
 #   02:22 那批实测：请求 2400 时 Z 满行程 152000 脉冲 ≈1.49 s（有效约 1910 圈/分，
 #   含加减速与闭环开销），24 趟 err 全在 ±350 counts 内、仅 3 趟需 passes=1 → 稳。
-# 2026-10-31 第二轮：Z 2400→2800（再抢 ~0.15 s/趟 × 4 趟/件）、Y 保持 2000。
-#   现场若 Z 有异响/丢步/闭环反复补差（passes≥2 变多），把这里 [1] 退回 2400 即可（一行回滚）。
-GOTO_RPM_BY_AXIS = {1: 2800, 3: 300, 4: 300, 5: 2000}
+# 2026-10-31 第二轮：Z 2400→2800 试过又**退回 2400** —— 现场 02:37 那批 Z 单趟
+#   1474~2182 ms 且常带 passes=1~2（2400 时恒定 1494 ms、passes=0），2800 反而更慢，
+#   属"改差"回退（用户红线：2.29 版只能更好不能变差）。
+#   现场若 Z 有异响/丢步/闭环反复补差，把这里 [1] 再降一档即可（一行回滚）。
+GOTO_RPM_BY_AXIS = {1: 2400, 3: 300, 4: 300, 5: 2000}
 
+#: 运行参数默认值（方案 5 节）。**必须与固件 host_param_defaults 完全一致**
+#: （`01-交付包/stm32/firmware/Drive/Include/host_protocol_inline.h` 的默认表）。
+#: 2026-10-31「速度版」：固件默认表已改成 acc=0 / speed_rpm_max=3200 /
+#: telemetry_ms=100 / gripper_ready_deg=168，这里同步 —— 否则界面参数页显示的
+#: "默认值"和复位后的真实值不一致，排查时会被误导。
 PARAM_DEFAULTS: Dict[str, object] = {
     "speed_rpm": 60,
-    "acc": 1,
-    "speed_rpm_max": 300,
+    "acc": 0,
+    "speed_rpm_max": 3200,
     "gripper_open_deg": 180,
-    "gripper_ready_deg": 150,
+    "gripper_ready_deg": 168,
     "gripper_grab_deg": 135,
     "gripper_step_deg": 45,
     "gripper_settle_ms": 200,
@@ -103,7 +111,7 @@ PARAM_DEFAULTS: Dict[str, object] = {
     "heartbeat_ms": 500,
     "link_timeout_ms": 3000,
     "query_timeout_ms": 100,
-    "telemetry_ms": 200,
+    "telemetry_ms": 100,
     "frame_gap_ms": 10,
     #: 哪些轴接了驱动器回读线：bit0=Z(1)、bit1=托盘(3)、bit2=X(4)、bit3=Y(5)。
     #: 默认 15 = 四轴都接；某个轴还没接就把对应位去掉，不用重烧固件。

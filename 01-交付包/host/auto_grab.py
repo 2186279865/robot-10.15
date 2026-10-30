@@ -766,16 +766,34 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             pass
 
     # ---- 首件「预走」：点完「一键启动」马上动，别让机械臂干等识别 ----
+    def _z_readback_age_ms() -> float:
+        """Z 这条回读是多久以前的（ms）；拿不到时间戳返回 0（当新）。"""
+        raw = getattr(client, 'last_counts', None) or {}
+        info = raw.get(AXIS_Z)
+        ts = info.get('ts') if isinstance(info, dict) else None
+        if ts is None:
+            return 0.0
+        try:
+            return max(0.0, float(client.now_ms()) - float(ts))
+        except Exception:                          # noqa: BLE001
+            return 0.0
+
     def _z_at_bottom(tol_pulses: float = PREFETCH_Z_TOL_PULSES) -> bool:
-        """Z 是否确实在底部：连续两次回读都在容差内、且几乎没动。
+        """Z 是否确实在底部：两次回读都在容差内、够新、且几乎没动。
 
         穿通道时 Z 必须在底（通道净高不够），所以预走只在"确认在底"时才敢做；
-        读数缺失 / 两次差太多一律当"不知道"，直接跳过（按常规顺序走，安全第一）。
+        读数缺失 / 太旧（>COUNTS_MAX_AGE_MS）/ 两次差太多一律当"不知道"，
+        直接跳过（按常规顺序走，安全第一）。
+        2026-10-31 02:39 现场：初始化刚清零、Z 还在收尾，两次读数差 94 counts
+        就被判成"不在底部"（原阈值 24 太严）→ 预走白跳过。现在放宽到 200 counts
+        （≈0.01 圈，仍在"没在动"的量级），并加新鲜度门槛。
         """
         if pos_source is None:
             return False
         vals: List[float] = []
         for _i in range(2):
+            if _z_readback_age_ms() > COUNTS_MAX_AGE_MS:
+                return False
             try:
                 _s, _k, cnt = pos_source()
             except Exception:                      # noqa: BLE001
@@ -790,15 +808,17 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
             time.sleep(0.15)
         tol_counts = float(tol_pulses) * float(prep_pose.COUNTS_PER_PULSE)
         return (abs(vals[0]) <= tol_counts and abs(vals[1]) <= tol_counts
-                and abs(vals[1] - vals[0]) <= 24.0)
+                and abs(vals[1] - vals[0]) <= 200.0)
 
     def _prefetch_channel():
-        """把固定路线的**前两步「①Y 进通道 → ②Z 抬顶」**放到后台先走。
+        """把固定路线的**第一步「①Y 进通道」**放到后台先走（只走这一步）。
 
         识别要 2~6 s（慢时十几秒），这段时间机械臂本来只能干等；
-        「Y 进通道 → Z 抬顶」与识别结果无关（任何物块都得先穿通道再抬顶），可以并行。
-        顺序仍是「先 Y 后 Z」：穿通道时 Z 必须在底（通道净高不够），抬顶只能在
-        Y 到位之后做 —— 这两步走完，识别一回来就直接走 X/Y。
+        「Y 进通道」与识别结果无关（任何物块都得先穿通道），可以并行。
+        **不提前抬 Z**（= 2.29 版行为，现场验收过的那版）：
+          * 现场要求 Z 必须抬到位才允许横移，抬顶只能等识别回来、拿到 X/Y 目标后再做；
+          * 抓空那一件若提前抬顶，白抬 1.6 s，回 P0 还要再降 1.6 s（用户明确说这条变差了）。
+        Z 抬顶留在识别回来后的正式流程里（run_once ②）。
         返回后台线程（可能被 join），跳过时返回 None。
         """
         if not prefetch or pos_source is None:
@@ -811,36 +831,34 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         def work():
             first = {'v': True}
-            steps = (({AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'),
-                     ({AXIS_Z: Z_UP}, [AXIS_Z], '②Z 抬顶'))
-            for tg, order, what in steps:
-                if stop_flag is not None and stop_flag():
-                    log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
+            tg, order, what = {AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'
+            if stop_flag is not None and stop_flag():
+                log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
+                return
+            try:
+                _s, _k, cnt = pos_source() if pos_source else (None, None, None)
+            except Exception:                      # noqa: BLE001
+                _s, _k, cnt = None, None, None
+            try:
+                log('[预走] %s 开始' % what)
+                res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
+                                         acc=_ACC_DEFAULT,
+                                         log=lambda t: log('[预走] ' + t),
+                                         wait=wait, soft=_s, known=_k, counts=cnt,
+                                         prep=first['v'])
+                first['v'] = False
+                bad = [r for r in res if not r.get('ok')]
+                if bad:
+                    log('[预走] %s 没走到位（%s），交给正式流程重走'
+                        % (what, bad[0].get('code') or bad[0].get('text') or ''))
                     return
-                try:
-                    _s, _k, cnt = pos_source() if pos_source else (None, None, None)
-                except Exception:                  # noqa: BLE001
-                    _s, _k, cnt = None, None, None
-                try:
-                    log('[预走] %s 开始' % what)
-                    res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
-                                             acc=_ACC_DEFAULT,
-                                             log=lambda t: log('[预走] ' + t),
-                                             wait=wait, soft=_s, known=_k, counts=cnt,
-                                             prep=first['v'])
-                    first['v'] = False
-                    bad = [r for r in res if not r.get('ok')]
-                    if bad:
-                        log('[预走] %s 没走到位（%s），交给正式流程重走'
-                            % (what, bad[0].get('code') or bad[0].get('text') or ''))
-                        return
-                except Exception as exc:           # noqa: BLE001
-                    log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
-                    return
-            log('[预走] 完成：已在通道末端抬到顶，识别一回来就直接走 X/Y')
+            except Exception as exc:               # noqa: BLE001
+                log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
+                return
+            log('[预走] 完成：已在通道末端（Z 仍在底），识别一回来就抬顶走 X/Y')
 
         th = threading.Thread(target=work, name='grab-prefetch', daemon=True)
-        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道 → ②Z 抬顶」')
+        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道」（Z 保持到底）')
         th.start()
         return th
 

@@ -852,6 +852,26 @@ class CalibTab(ttk.Frame):
         BM.reset()
         self.say('分盒登记已清空，现在：%s' % BM.describe())
 
+    def _grab_waiter(self, client):
+        """给后台抓取线程用的 waiter：只用 `done_of` 查结果，**不碰 GUI 的事件队列**。
+
+        以前 run_many 没传 wait，prep_pose 默认用 client.wait_reply() —— 它会
+        `poll_events()` 把回执从队列里取走，主线程再也看不到，于是后台线程干等到
+        超时才报警（现场 02:39:37 Z 抬顶已回 `#265,ok`，却等到 02:41:37 才报超时）。
+        """
+        def waiter(req_id, timeout_ms=None):
+            end = time.monotonic() + max(0.3, float(timeout_ms or 8000) / 1000.0)
+            while time.monotonic() < end:
+                got = client.done_of(int(req_id)) if hasattr(client, 'done_of') else None
+                if got is not None:
+                    kind = ('reply' if got.get('kind') == 'reply'
+                            else ('err' if got.get('kind') == 'err' else 'timeout'))
+                    return {'kind': kind, 'code': got.get('code', ''),
+                            'text': got.get('text', ''), 'pairs': got.get('pairs') or {}}
+                time.sleep(0.05)
+            return None
+        return waiter
+
     def _many_worker(self, client, vision, count, drop):
         try:
             self.app.disp_run_start()
@@ -872,6 +892,8 @@ class CalibTab(ttk.Frame):
                 # Tk 不是线程安全的：日志/事件一律 after 回主线程，否则「连续抓」会卡死
                 log=lambda t: self.after(0, self.say, t),
                 pos_source=self._pos_source,
+                # 回执等待必须绕开 GUI 的事件队列（否则主线程再也收不到那条回执 → 假超时）
+                wait=self._grab_waiter(client),
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
                 on_event=lambda ev: self.after(0, self._many_event, ev),

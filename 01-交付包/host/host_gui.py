@@ -368,6 +368,13 @@ class AxisPanel:
             try:
                 self.last_counts = int(pairs["counts"])
                 self.last_counts_ms = self.app.client.now_ms()
+                # 软位置以编码器回读为准：遥测一到就把软位置对齐到实测。
+                # 修 2026-10-31 02:38 的漂移 —— 被固件拒绝的 motor_pos 也会在
+                # motion_hook 里记账，随后 goto 再记一次，soft_pos[Y] 漂到 +140570 脉冲，
+                # 下一条动作因此算出 -153714 脉冲的假位移、被 RANGE 拦下停机。
+                self.app.soft_pos[self.addr] = int(round(
+                    units.counts_to_pulses(self.last_counts)))
+                self.app.pos_known[self.addr] = True
             except ValueError:
                 pass
         self.refresh_readback()
@@ -1864,15 +1871,20 @@ class App:
             self.client.send("param_set", "gripper_ready_deg", ready_deg, timeout_ms=1500)
         except Exception as exc:             # noqa: BLE001 —— 尽力而为
             self.note(f"设置预备角度 {ready_deg}° 失败（固件将用 150°）：{exc}")
-        # 速度：固件默认 acc=1（≈32 圈/分，Z 抬一次要十几秒）。
-        # acc=0 = 直接到速度（最快）。连上就统一设成 0，这样手动闭环、动作序列、
-        # auto_runner 里的每一个 Z/X/Y 动作都是快的，而不只是"一键走出固定路线"。
+        # 速度：固件默认 acc=1（≈32 圈/分，Z 抬一次要十几秒）；acc=0 = 直接到速度。
+        # 2026-10-31「速度版」：每次连上都把这几条推一遍 —— 固件出厂默认表已经改成
+        # 这套，但换板子 / 烧了旧 hex / 别人接手时靠这里兜底，不会回落到慢速。
+        # （现场 02:37：speed_rpm_max 被复位回 300 → Y@2000 全被拒、X/Y 被迫分开走。）
+        speed_params = (("acc", 0), ("speed_rpm_max", 3200),
+                        ("goto_max_ms", 120000), ("telemetry_ms", 100))
         try:
-            self.client.send("param_set", "acc", 0, timeout_ms=1500)
-            self.client.send("param_set", "goto_max_ms", 120000, timeout_ms=1500)
-            self.note("连接成功：已设 acc=0（最快加速度）、goto_max_ms=120000")
+            for _name, _value in speed_params:
+                self.client.send("param_set", _name, _value, timeout_ms=1500)
+            self.note("连接成功：速度版参数已下发 %s"
+                      % ' '.join('%s=%s' % kv for kv in speed_params))
         except Exception as exc:             # noqa: BLE001 —— 尽力而为
-            self.note(f"设置速度参数失败（可用参数页手动写 acc=0）：{exc}")
+            self.note(f"设置速度参数失败（可用参数页手动写 acc=0 / speed_rpm_max=3200）：{exc}")
+        self._log_param_snapshot()
         try:
             self.client.send("gripper", "ready", timeout_ms=1000)
         except Exception as exc:             # noqa: BLE001 —— 自动动作用尽力而为
@@ -1883,6 +1895,45 @@ class App:
             self.gripper_status.configure(text=f"状态：已自动请求 ready（预备位 {ready_deg}°）")
         except tk.TclError:
             pass
+
+    def _log_param_snapshot(self) -> None:
+        """后台读回关键参数，往日志写一行「参数快照」。
+
+        现场/队友只要看日志就知道板子上烧的是不是速度版，不用手动去参数页查。
+        用 `done_of` 轮询回执、**不调 wait_reply**：wait_reply 会把 GUI 主线程的
+        事件队列取走，主线程就再也看不到那条回执（现场 02:39 的 Z 抬顶超时就是这竞态）。
+        """
+        import threading
+        names = ("speed_rpm_max", "acc", "telemetry_ms", "goto_max_ms", "gripper_ready_deg")
+        client = self.client
+
+        def work():
+            got = {}
+            for name in names:
+                try:
+                    rid = client.send("param_get", name, timeout_ms=1200)
+                except Exception:                       # noqa: BLE001
+                    continue
+                end = time.monotonic() + 1.2
+                rep = None
+                while time.monotonic() < end:
+                    rep = client.done_of(rid) if hasattr(client, "done_of") else None
+                    if rep is not None:
+                        break
+                    time.sleep(0.05)
+                if isinstance(rep, dict):
+                    val = (rep.get("pairs") or {}).get("value")
+                    if val is not None:
+                        got[name] = val
+            if not got:
+                return
+            text = "参数快照：" + " ".join("%s=%s" % (k, got[k]) for k in names if k in got)
+            try:
+                self.root.after(0, lambda: self.note("[连接] " + text))
+            except Exception:                           # noqa: BLE001
+                pass
+
+        threading.Thread(target=work, name="param-snapshot", daemon=True).start()
 
     def attach_vision(self, vision_app) -> None:
         """main.py 把视觉页挂进来：连到派时本类会自动开双画面。"""

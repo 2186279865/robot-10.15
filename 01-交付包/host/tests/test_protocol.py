@@ -277,14 +277,23 @@ class TestSessionCache(unittest.TestCase):
 class TestParamDefaults(unittest.TestCase):
     def test_defaults_match_spec(self):
         self.assertEqual(P.PARAM_DEFAULTS["speed_rpm"], 60)
-        self.assertEqual(P.PARAM_DEFAULTS["speed_rpm_max"], 300)
         self.assertEqual(P.PARAM_DEFAULTS["gripper_open_deg"], 180)
-        self.assertEqual(P.PARAM_DEFAULTS["gripper_ready_deg"], 150)
         self.assertEqual(P.PARAM_DEFAULTS["gripper_grab_deg"], 135)
         self.assertEqual(P.PARAM_DEFAULTS["gripper_step_deg"], 45)
         # 固件参数表 value/min/max 是 uint16_t，所以 hold 上限是 60000 不是 600000
         self.assertEqual(P.PARAM_DEFAULTS["gripper_hold_max_ms"], 0)
         self.assertLessEqual(P.PARAM_DEFAULTS["gripper_hold_max_ms"], 60000)
+
+    def test_speed_defaults_match_firmware(self):
+        """2026-10-31「速度版」固件默认值：上位机这份必须和固件表逐项一致。
+
+        固件 `host_protocol_inline.h` 的 `host_param_defaults` 复位时会恢复成它自己
+        那一份，所以两边不一致时"参数页显示的默认值"就等于骗人。
+        """
+        self.assertEqual(P.PARAM_DEFAULTS["speed_rpm_max"], 3200)
+        self.assertEqual(P.PARAM_DEFAULTS["acc"], 0)
+        self.assertEqual(P.PARAM_DEFAULTS["telemetry_ms"], 100)
+        self.assertEqual(P.PARAM_DEFAULTS["gripper_ready_deg"], 168)
 
     def test_axis_labels(self):
         self.assertEqual(P.AXIS_LABELS[1], "Z(1)")

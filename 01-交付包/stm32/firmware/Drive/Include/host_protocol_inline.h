@@ -86,14 +86,26 @@ typedef struct
 #define HOST_PARAM_COUNT 22U
 
 /* 出厂默认值。host_protocol_init() 会把下面的运行参数表恢复成这一份，
- * 所以 MCU 复位后参数一定回到默认，不会带着上一次会话的临时值。 */
+ * 所以 MCU 复位后参数一定回到默认，不会带着上一次会话的临时值。
+ *
+ * 2026-10-31「速度版」默认值（现场要求：每次重启都必须是速度版，不能回落到慢速）：
+ *   acc            1   -> 0       加速档。acc=1 时 Z 只有约 32 圈/分（抬一次十几秒），
+ *                                 0 = 直接按 speed_rpm 走，这是最致命的慢速来源。
+ *   speed_rpm_max  300 -> 3200    手动 motor_pos 的限速。上位机 X/Y 并行要用
+ *                                 Y=2000、Z=2400/2800，300 会把它们全部拒成
+ *                                 reason=speed_limit（现场 02:37 那批 X/Y 被迫分开走
+ *                                 就是这个值被复位回 300 引起的）。
+ *   telemetry_ms   200 -> 100     编码器回读周期，与上位机默认一致，回读更新鲜。
+ *   gripper_ready_deg 150 -> 168  现场标定的「预备（待抓）」角；上位机连上也会推存盘值，
+ *                                 这里改默认只是让"没连上位机"时也一致。
+ * 其余参数保持原样。改这里的数值不影响任何协议命令/字段，只影响复位后的初值。 */
 static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
 {
     { "speed_rpm",         60U,   1U,  6000U  },
-    { "acc",               1U,    0U,  255U   },
-    { "speed_rpm_max",     300U,  1U,  6000U  },
+    { "acc",               0U,    0U,  255U   },
+    { "speed_rpm_max",     3200U, 1U,  6000U  },
     { "gripper_open_deg",  180U,  0U,  270U   },
-    { "gripper_ready_deg", 150U,  0U,  270U   },
+    { "gripper_ready_deg", 168U,  0U,  270U   },
     { "gripper_grab_deg",  135U,  0U,  270U   },
     { "gripper_step_deg",  45U,   1U,  270U   },
     { "gripper_settle_ms", 200U,  0U,  60000U },
@@ -104,7 +116,8 @@ static const HostParam host_param_defaults[HOST_PARAM_COUNT] =
     { "heartbeat_ms",      500U,  20U, 60000U },
     { "link_timeout_ms",   3000U, 100U, 60000U },
     { "query_timeout_ms",  100U,  10U, 60000U },
-    { "telemetry_ms",      200U,  20U, 60000U },
+    /* 编码器回读周期：100 ms 与上位机默认一致（原来 200 ms，现场拥塞时被判"读数不够新"） */
+    { "telemetry_ms",      100U,  20U, 60000U },
     { "frame_gap_ms",      10U,   1U,  1000U  },
     /* 哪些轴接了驱动器回读线（bit0=Z=1、bit1=托盘=3、bit2=X=4、bit3=Y=5）。
      * 默认 15 = 四轴都接；某个轴还没接就改小这个参数，不用重烧固件。

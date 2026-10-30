@@ -98,11 +98,14 @@ def save(cfg: Dict[str, object], path: Optional[Path] = None) -> Path:
     return p
 
 
-#: 实测转速上限（EMM 驱动器侧限速，rpm 写多大都差不多）：约 50 圈/分。
+#: 实测转速上限：drivers 侧封顶约 2740 圈/分（protocol.GOTO_RPM_BY_AXIS 注释同源）。
+#: 以前这里写 50（早期"rpm 写多大都差不多"的错误结论），导致 estimate_timeout_ms
+#: 把 Z 满行程估成 122 s：现场 02:39:37 Z 抬顶早就回执了，上位机却一直等到 02:41:37。
+#: 真实值：2400 圈/分满行程 152000 脉冲实测 1.49 s（含加减速）→ 有效约 1910 圈/分。
 #: 单步位移硬上限（脉冲）：只用来拦"位置基准错了还闷头走"的撞机，不是行程。
 #: 实测 Y 从抓取位回 P0 要 ~5.6 万脉冲，所以 Y 上限按 12 万给（真正的行程由 limits.json 拦）。
 MAX_STEP_PULSES = {AXIS_Z: 200000, AXIS_Y: 120000, 4: 30000, 3: 6000}
-EFFECTIVE_RPM_CAP = 50
+EFFECTIVE_RPM_CAP = 2740
 
 #: X/Y **并行**走位后的残差保护阈值（脉冲）。
 #: 2026-10-31 现场反馈：并行后报「偏离目标 +11394 脉冲（>3000）」时爪子其实已经到位，
@@ -118,7 +121,13 @@ XY_MISS_ABORT_PULSES = 40000
 
 
 def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000) -> int:
-    """按"实际速度上限 50 圈/分"估客户端等待上限（rpm 参数再大也不快）。"""
+    """按真实有效转速估客户端等待上限（单程时间 × 2 倍余量 + extra）。
+
+    历史上这里硬压 `min(rpm, 50)`（"实际最多 50 圈/分"是早期误判），于是
+    Z 满行程 152000 脉冲被估成 122 s —— 回执其实早就到了，后台线程还在等超时
+    （现场 02:39:37 已回 `#265,ok`，02:41:37 才报超时，就是这条）。
+    真实数据：Z 2400 圈/分走 152000 脉冲实测 1.49 s，有效约 1910 圈/分。
+    """
     revs = abs(int(pulses)) / float(PULSES_PER_REV)
     speed = max(1, min(int(rpm), EFFECTIVE_RPM_CAP))
     ms = revs / (speed / 60.0) * 1000.0
@@ -499,8 +508,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         if wf is None:
             say('%s 补走已下发（无回执可等）' % AXIS_LABEL.get(axis, axis))
             return False
-        spd = min(max(1, int(rpm_i)), 274)
-        tmo = int(abs(int(tgt)) / 3200.0 / spd * 60000 * 3) + 8000
+        tmo = estimate_timeout_ms(tgt, rpm_i)
         try:
             rep = wf(rid, timeout_ms=tmo)
         except Exception as exc:                    # noqa: BLE001
@@ -571,17 +579,45 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                         log=log, wait=wait, counts=_c, prep=True)
 
     # 1) 放开 speed_rpm_max（一批只做一次；固件参数是持久的，没必要每步都问一遍）
-    old_max = None
+    #    **不再在函数末尾还原**：2026-10-31 现场 —— 首件把它从 300 抬到 3200，
+    #    finally 立刻又改回 300，之后所有 Y@2000 全部被固件拒成 reason=speed_limit，
+    #    退化成「X 先走、Y 补走」，每件还多花 0.5~1 s（02:37 那批 12 次全被拒）。
+    need_rpm = max([rpm_of(a) for a in targets] + [1])
     if speed_setup:
         try:
             pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=800)) or {}
-            if pr.get('value') not in (None, ''):
-                old_max = int(float(pr['value']))
-            need = max([rpm_of(a) for a in targets] + [int(old_max or 300)])
-            if old_max is None or old_max < need:
-                _snd('param_set', 'speed_rpm_max', max(need, 3200), timeout_ms=1200)
+            old_max = pr.get('value')
+            old_max = int(float(old_max)) if old_max not in (None, '') else None
+            if old_max is None or old_max < need_rpm:
+                _snd('param_set', 'speed_rpm_max', max(need_rpm, 3200), timeout_ms=1200)
+                say('X/Y 并行：speed_rpm_max %s → %d（之后不再还原）'
+                    % (old_max if old_max is not None else '未知', max(need_rpm, 3200)))
         except Exception:                                   # noqa: BLE001
             pass
+
+    def _send_pos(axis, delta, rpm_i):
+        """发一条 motor_pos；若被 `reason=speed_limit` 拒，抬限速后**原地重发**。
+
+        绝不退化成单轴顺序补走 —— 现场 02:37 那批就是因为退回"X 先走、Y 补走"，
+        看起来像 X/Y 没一起走。第二次仍被拒才交给调用方记录 bad。
+        """
+        def _once():
+            rep = _snd('motor_pos', axis, 1 if delta < 0 else 0, int(rpm_i), int(acc),
+                       abs(int(delta)), 'rel', timeout_ms=1500)
+            pr = _pairs(rep) or {}
+            return pr, str(pr.get('reason') or '')
+
+        pr, reason = _once()
+        if reason == 'speed_limit':
+            hi = max(int(rpm_i), 3200)
+            say('%s 并行：被限速拒绝（reason=speed_limit, max=%s）→ 把 speed_rpm_max 抬到 %d 原地重发'
+                % (AXIS_LABEL.get(axis, axis), pr.get('max', '?'), hi))
+            try:
+                _snd('param_set', 'speed_rpm_max', hi, timeout_ms=1200)
+            except Exception:                            # noqa: BLE001
+                pass
+            pr, reason = _once()
+        return pr, reason
 
     plans, bad, t_est = [], [], 0.0
     try:
@@ -591,12 +627,10 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             delta = tgt - now_p
             if delta == 0:
                 continue
-            r = _snd('motor_pos', axis, 1 if delta < 0 else 0, rpm_of(axis), int(acc),
-                     abs(delta), 'rel', timeout_ms=1500)
-            pr = _pairs(r) or {}
-            reason = str(pr.get('reason') or '')
+            pr, reason = _send_pos(axis, delta, rpm_of(axis))
             if reason:
-                say('%s 并行：被拒绝 reason=%s' % (AXIS_LABEL.get(axis, axis), reason))
+                say('%s 并行：被拒绝（reason=%s, 应答=%s）'
+                    % (AXIS_LABEL.get(axis, axis), reason, pr))
                 bad.append(axis)
                 continue
             eff_rpm = min(float(rpm_of(axis)), 1240.0)   # 驱动器实际封顶≈1240 rpm，按指令值估会等不够
@@ -676,10 +710,8 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         return [{'axis': a, 'pulses': targets[a], 'ok': True, 'code': '', 'text': '', 'pairs': {}}
                 for a in sorted(targets)]
     finally:
-        if old_max is not None:
-            try:
-                _snd('param_set', 'speed_rpm_max', int(old_max), timeout_ms=800)
-            except Exception:                           # noqa: BLE001
-                pass
+        # 这里**故意什么都不还原**（见上面 speed_rpm_max 注释）：
+        # 限速一旦抬起就保持整批有效，固件参数本身是持久的。
+        pass
 
 

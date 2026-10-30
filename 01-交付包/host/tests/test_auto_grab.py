@@ -192,10 +192,13 @@ class RunManyEventTest(unittest.TestCase):
 
 
 class PrefetchTest(unittest.TestCase):
-    """一键启动要「点完就动」：识别期间先把 ①Y 进通道 → ②Z 抬顶 走掉。
+    """一键启动要「点完就动」：识别期间先把「①Y 进通道」走掉。
 
     预走是安全敏感的（Z 不在底时绝不能动 Y 进通道），所以两个方向都要测：
-    在底 → 走两步（先 Y 后 Z）；不在底 / 没读数 → 只打一行"跳过"，按常规顺序走。
+    在底 → 只走 Y（Z 抬顶留给识别回来后的正式流程）；不在底 / 没读数 → 只打一行
+    "跳过"，按常规顺序走。
+    2026-10-31：Z 抬顶**不放进预走**（= 2.29 版行为）——用户明确说提前抬 Z 那版变差，
+    且抓空那件会白抬 1.6 s、回 P0 再降 1.6 s。
     """
 
     def setUp(self):
@@ -220,24 +223,21 @@ class PrefetchTest(unittest.TestCase):
                           pos_source=pos_source, drop=False, prefetch=True)
         return client, res
 
-    def test_walks_channel_steps_while_recognizing(self):
+    def test_walks_channel_while_recognizing(self):
         logs = []
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
         pre = [t for t in logs if t.startswith('[预走]')]
         self.assertTrue(any('[预走] 完成' in t for t in pre), pre)
-        # 预走两步：①Y 进通道 → ②Z 抬顶，顺序不能反（穿通道时 Z 必须在底）
-        iy = next(i for i, t in enumerate(pre) if '①Y 进通道 开始' in t)
-        iz = next(i for i, t in enumerate(pre) if '②Z 抬顶 开始' in t)
-        self.assertLess(iy, iz, pre)
-        self.assertIn('已在通道末端抬到顶', ''.join(pre))
-        # Z 抬顶是在识别还没回来时就走掉的（这就是点完立刻动的原因）
+        self.assertTrue(any('①Y 进通道 开始' in t for t in pre), pre)
+        self.assertIn('已在通道末端（Z 仍在底）', ''.join(pre))
+        # 预走只动 Y：Z 抬顶必须等识别回来（正式流程 ②）
         full = '\n'.join(logs)
         self.assertIn('识别完成：', full)
-        self.assertLess(full.index('②Z 抬顶 开始'), full.index('识别完成：'), full)
+        self.assertLess(full.index('①Y 进通道 开始'), full.index('识别完成：'), full)
 
-    def test_prefetch_y_first_then_z_during_recognition(self):
-        """预走先 Y（相对 -13144 脉冲进通道），再 Z 抬到顶；两趟都发生在识别期间。"""
+    def test_prefetch_moves_y_only_before_recognition(self):
+        """预走只走 Y（相对 -13144 脉冲进通道）；Z 抬顶在识别完成之后才动。"""
         logs = []
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
@@ -248,6 +248,13 @@ class PrefetchTest(unittest.TestCase):
         z_gotos = [c for c in gotos if int(c[1][0]) == AG.AXIS_Z]
         self.assertTrue(z_gotos)
         self.assertEqual(int(z_gotos[0][1][1]), AG.Z_UP)      # 抬到顶（不是减高度）
+        # 第一个 Z 动作在「识别完成」之后（说明不是预走抬的）
+        z_line = None
+        for t in logs:
+            if 'Z 目标' in t:
+                z_line = t
+                break
+        self.assertIsNotNone(z_line)
 
     def test_skipped_when_z_not_at_bottom(self):
         logs = []
