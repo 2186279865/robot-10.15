@@ -254,6 +254,11 @@ class App:
         self._rec_q = queue.Queue()
         self._rec_busy = False
         self._rec_cb = None
+        #: 云端分类的“熔断”状态：上次调用耗时、以及熔断到什么时候。
+        #: 现场 10-31 03:13 云端单次 6.5 s、识别总耗 20.6 s，抓取节拍被拖垮，
+        #: 所以云端一慢就自动跳过、走本地几何判据（120 s 后再试）。
+        self._vlm_last_s = 0.0
+        self._vlm_slow_until = 0.0
         self.live = False
         self.live_thread = None
         self.live_msg = None
@@ -1314,14 +1319,27 @@ class App:
                 _views = str(cc.get('views') or 'two')
                 _call = (classify._CVLM.ask_objects2_cached if (_views != 'top' and sw is not None)
                          else classify._CVLM.ask_objects_cached)
-                if _call is classify._CVLM.ask_objects2_cached:
-                    _tmo = min(float(cc.get('timeout_s') or 10.0), 8.0)
-                    r = _call(tw, sw, candidates=cc.get('candidates'),
-                              timeout=_tmo, model=cc.get('model'))
+                # 云端调用封顶 6 s，且「上一次很慢 → 本轮直接跳过」。
+                # 现场（10-31 03:13）双图 8 s 超时 + 单图 10 s 重试 = 白等 18.5 s，
+                # 而抓取节拍只有 12 s 左右：宁可回退本地几何判据，也要把节拍保住。
+                _tmo = max(1.0, min(float(cc.get('timeout_s') or 6.0), 6.0))
+                _slow_until = float(getattr(self, '_vlm_slow_until', 0.0) or 0.0)
+                if time.time() < _slow_until:
+                    self.note('云端上次很慢，本轮跳过（用本地几何判据）')
+                    r = None
                 else:
-                    _tmo = min(float(cc.get('timeout_s') or 10.0), 8.0)
-                    r = _call(tw, candidates=cc.get('candidates'),
-                              timeout=_tmo, model=cc.get('model'))
+                    _t0 = time.time()
+                    if _call is classify._CVLM.ask_objects2_cached:
+                        r = _call(tw, sw, candidates=cc.get('candidates'),
+                                  timeout=_tmo, model=cc.get('model'))
+                    else:
+                        r = _call(tw, candidates=cc.get('candidates'),
+                                  timeout=_tmo, model=cc.get('model'))
+                    _dt = time.time() - _t0
+                    self._vlm_last_s = _dt
+                    if _dt > 3.5:
+                        self._vlm_slow_until = time.time() + 120.0
+                        self.note('云端慢（%.1f s > 3.5 s），120 s 内不再调用，先用本地几何判据' % _dt)
                 objs = [o for o in (r or {}).get('objects', []) if o.get('shape')]
                 self._vlm_ms = (r or {}).get('ms')
                 # 条数一致性校验：VLM 数数能力弱，以本地分割为准，不一致只告警不阻断
@@ -1349,10 +1367,18 @@ class App:
                 labeled = classify.attach_vlm_to_fused(fused, objs, tw,
                                                 color_from_mask=bool(_cc0.get('color_from_mask', False)))
                 if not labeled and _call is classify._CVLM.ask_objects2_cached and tw is not None:
-                    # 两图结果与分割目标对不上（常见于模型把图2坐标混进来）→ 用单图重试一次
-                    r2 = classify._CVLM.ask_objects_cached(
-                        tw, candidates=cc.get('candidates'),
-                        timeout=float(cc.get('timeout_s') or 10.0), model=cc.get('model'))
+                    # 两图结果与分割目标对不上（常见于模型把图2坐标混进来）→ 用单图重试一次。
+                    # 但云端已经慢/已熔断时不要再花第二个超时（现场吃过 8 s + 10 s 的亏）。
+                    _slow = (float(getattr(self, '_vlm_last_s', 0.0) or 0.0) > 3.5
+                             or time.time() < float(getattr(self, '_vlm_slow_until', 0.0) or 0.0))
+                    if _slow:
+                        self.note('云端偏慢/已熔断，跳过单图重试（用本地几何判据）')
+                        r2 = None
+                    else:
+                        r2 = classify._CVLM.ask_objects_cached(
+                            tw, candidates=cc.get('candidates'),
+                            timeout=max(1.0, min(float(cc.get('timeout_s') or 6.0), 6.0)),
+                            model=cc.get('model'))
                     objs2 = [o for o in (r2 or {}).get('objects', []) if o.get('shape')]
                     if objs2:
                         objs = objs2

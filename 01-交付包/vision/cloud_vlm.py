@@ -30,7 +30,10 @@ import cv2
 API_URL = 'https://api.deepseek.com/chat/completions'
 MODELS_URL = 'https://api.deepseek.com/models'
 DEFAULT_MODEL = 'deepseek-flash'
-DEFAULT_TIMEOUT = 12.0
+#: 单次云端调用的默认超时。原来 12 s：现场网络一慢就会把「一件的抓取节拍」整段吃掉
+#: （02:21 那批 1.2 s → 03:13 那批 6.5 s，识别总耗时被拖到 20 s）。
+#: 6 s 还拿不到答案就让它失败、回退本地几何判据，节拍比"完美分类"更重要。
+DEFAULT_TIMEOUT = 6.0
 
 # 与视觉主流程一致的类别名（含新增的圆锥/棱锥）
 # 赛题 6 类（形状裸名；颜色单独由 color 字段给出，class_key = 颜色|形状）
@@ -80,10 +83,15 @@ def api_key() -> str:
     return _key_from_credentials()
 
 
-def available(timeout: float = 1.5, force: bool = False) -> bool:
-    """能否使用云端复核（有 key 且网络可达）。结果缓存 60 s。"""
+def available(timeout: float = 5.0, force: bool = False) -> bool:
+    """能否使用云端复核（有 key 且网络可达）。结果缓存 10 s。
+
+    2026-10-31 现场：链路被图传占满时，`/models` 探测 1.5 s 一律超时 → 返回 False，
+    但真实识别调用其实还能成功（只是要 6.5 s）。所以探测窗口放大到 5 s、
+    缓存 60 s → 10 s：宁可多探一次，也别让一次网络抖动把云端功能"锁死一分钟"。
+    """
     now = time.time()
-    if not force and _AVAILABLE['ok'] is not None and now - _AVAILABLE['ts'] < 60:
+    if not force and _AVAILABLE['ok'] is not None and now - _AVAILABLE['ts'] < 10:
         return bool(_AVAILABLE['ok'])
     key = api_key()
     ok = False

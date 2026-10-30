@@ -119,6 +119,15 @@ XY_MISS_TOL_PULSES = 60
 XY_MISS_SKIP_PULSES = 3000
 XY_MISS_ABORT_PULSES = 40000
 
+#: 指令「被接纳」的回执超时（毫秒）。原来一律 1500 ms，但现场链路一拥塞（图传占满无线），
+#: 回执迟到 1~3 s 是常态 —— 超时会让我们误判「结果未知/没被接纳」，进而重发或中止本件。
+#: 真正的到位判定不靠这个超时（走 event/goto 闭环），所以放大没有副作用。
+ACK_MS = 3000
+#: 只回一个值的参数查询（param_get）超时。
+PARAM_GET_MS = 1500
+#: 参数写入（param_set）超时。
+PARAM_SET_MS = 2000
+
 
 def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000) -> int:
     """按真实有效转速估客户端等待上限（单程时间 × 2 倍余量 + extra）。
@@ -180,15 +189,15 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
 
     if prep:                       # 一次动作序列里只需准备一次，省 3 次往返（约 0.15-0.25 s）
         try:
-            client.send('stop_clear', timeout_ms=1500)
+            client.send('stop_clear', timeout_ms=ACK_MS)
         except Exception:                             # noqa: BLE001
             pass
         try:
-            client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+            client.send('param_set', 'goto_max_ms', 120000, timeout_ms=ACK_MS)
         except Exception:                             # noqa: BLE001
             pass
         try:
-            client.send('param_set', 'acc', max(0, min(255, int(acc))), timeout_ms=1500)
+            client.send('param_set', 'acc', max(0, min(255, int(acc))), timeout_ms=ACK_MS)
         except Exception:                             # noqa: BLE001
             pass
 
@@ -358,17 +367,17 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
     # 断开重连后固件的停止锁存可能还在（界面上的 latched 标志也会过期），
     # 所以无条件先清一次：stop_clear 只解锁，不产生任何运动。
     try:
-        client.send('stop_clear', timeout_ms=1500)
+        client.send('stop_clear', timeout_ms=ACK_MS)
     except Exception as exc:                          # noqa: BLE001
         say('stop_clear 失败：%s' % (exc,))
     # 长行程要放宽固件的 goto 超时（默认按 rpm 估，而实际速度被限在 ~50 圈/分）
     try:
-        client.send('param_set', 'goto_max_ms', 120000, timeout_ms=1500)
+        client.send('param_set', 'goto_max_ms', 120000, timeout_ms=ACK_MS)
     except Exception:                                 # noqa: BLE001
         pass
     # 加速度档：0 = 直接到速度（最快）。默认档位（1）下 Z 只有 ~32 圈/分，抬一次要十几秒。
     try:
-        client.send('param_set', 'acc', max(0, min(255, int(conf.get('acc', 0)))), timeout_ms=1500)
+        client.send('param_set', 'acc', max(0, min(255, int(conf.get('acc', 0)))), timeout_ms=ACK_MS)
     except Exception:                                 # noqa: BLE001
         pass
 
@@ -481,7 +490,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             return p if isinstance(p, dict) else rep
         return {}
 
-    def _snd(name, *args, timeout_ms=1500):
+    def _snd(name, *args, timeout_ms=ACK_MS):
         """发命令并等回执：优先用传入的 wait()，否则用 client.wait_reply（都没有就只发不等）。"""
         rid = client.send(name, *args, timeout_ms=timeout_ms)
         if wait is not None:
@@ -585,11 +594,11 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
     need_rpm = max([rpm_of(a) for a in targets] + [1])
     if speed_setup:
         try:
-            pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=800)) or {}
+            pr = _pairs(_snd('param_get', 'speed_rpm_max', timeout_ms=PARAM_GET_MS)) or {}
             old_max = pr.get('value')
             old_max = int(float(old_max)) if old_max not in (None, '') else None
             if old_max is None or old_max < need_rpm:
-                _snd('param_set', 'speed_rpm_max', max(need_rpm, 3200), timeout_ms=1200)
+                _snd('param_set', 'speed_rpm_max', max(need_rpm, 3200), timeout_ms=PARAM_SET_MS)
                 say('X/Y 并行：speed_rpm_max %s → %d（之后不再还原）'
                     % (old_max if old_max is not None else '未知', max(need_rpm, 3200)))
         except Exception:                                   # noqa: BLE001
@@ -603,7 +612,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         """
         def _once():
             rep = _snd('motor_pos', axis, 1 if delta < 0 else 0, int(rpm_i), int(acc),
-                       abs(int(delta)), 'rel', timeout_ms=1500)
+                       abs(int(delta)), 'rel', timeout_ms=ACK_MS)
             pr = _pairs(rep) or {}
             return pr, str(pr.get('reason') or '')
 
@@ -613,7 +622,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             say('%s 并行：被限速拒绝（reason=speed_limit, max=%s）→ 把 speed_rpm_max 抬到 %d 原地重发'
                 % (AXIS_LABEL.get(axis, axis), pr.get('max', '?'), hi))
             try:
-                _snd('param_set', 'speed_rpm_max', hi, timeout_ms=1200)
+                _snd('param_set', 'speed_rpm_max', hi, timeout_ms=PARAM_SET_MS)
             except Exception:                            # noqa: BLE001
                 pass
             pr, reason = _once()

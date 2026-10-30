@@ -91,7 +91,7 @@
     "mode": "primary",
     "min_conf": 0.88,
     "accept_conf": 0.7,
-    "timeout_s": 10.0,
+    "timeout_s": 6.0,
     "model": "deepseek-flash",
     "ambiguous": [
       "四棱锥",

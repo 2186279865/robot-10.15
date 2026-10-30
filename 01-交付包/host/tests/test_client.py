@@ -229,11 +229,57 @@ class TestEventsAndSafety(ClientTestBase):
         self.pump()
         self.assertTrue(self.client.latched)
         self.assertTrue(self.device.stop_latched)
-        # 锁存期间运动命令返回 E10。
-        rid = self.client.send("motor_speed", 1, 0, 60, 1, timeout_ms=200)
+
+    def test_e10_recovers_by_clearing_latch_and_resending(self):
+        """派端看门狗造成的 E10 不该直接把命令判死：自动 stop_clear 后换新 id 重发。
+
+        现场 10-31 03:14 就是因为这条整件失败（派端串口桥 1.5 s 静默注入停车帧 → E10）；
+        注意必须换 id：重复 req_id 会被固件/模拟器当成重传，回放的还是那条 E10。
+        """
+        self.connect()
+        self.client.poll_events(100)
+        self.device.latch_stop("pi-watchdog")  # 协议只允许 ASCII   # 不是人按停止
         self.pump()
-        errs = [e for e in self.client.poll_events(100) if e.kind == "err"]
-        self.assertTrue(any(e.data.get("code") == "E10" for e in errs))
+        rid = self.client.send("motor_speed", 1, 0, 60, 1, timeout_ms=200)
+        for _ in range(4):
+            self.pump()
+        notes = [e.text for e in self.client.poll_events(1000) if e.kind == "note"]
+        self.assertTrue(any("E10" in t for t in notes), notes)
+        self.assertFalse(self.client.latched, "自动 stop_clear 之后锁存应解除")
+        self.assertFalse(self.device.stop_latched)
+        self.assertNotIn(rid, self.client.pending)
+        done = self.client.done_of(rid)
+        self.assertIsNotNone(done, "恢复成功后结果要记在原请求 id 上（调用方只看原 id）")
+        self.assertEqual(done["kind"], "reply")
+
+    def test_e10_by_user_stop_is_not_auto_cleared(self):
+        """人按「停止全部」造成的锁存绝不能被 E10 恢复悄悄清掉（安全优先）。"""
+        self.connect()
+        self.client.poll_events(100)
+        self.client.stop_all()
+        self.pump()
+        self.client.poll_events(1000)
+        rid = self.client.send("motor_speed", 1, 0, 60, 1, timeout_ms=200)
+        for _ in range(3):
+            self.pump()
+        errs = [e for e in self.client.poll_events(1000) if e.kind == "err"]
+        self.assertTrue(any(e.data.get("code") == "E10" for e in errs), errs)
+        self.assertNotIn(rid, self.client.pending)
+        self.assertTrue(self.client.latched, "人工停止的锁存必须留着，等人来解")
+        self.assertTrue(self.device.stop_latched)
+
+    def test_e10_gives_up_after_retry_cap(self):
+        """恢复次数到上限后仍然报 E10 —— 不能无限重发掩盖真故障。"""
+        self.connect()
+        self.client.poll_events(100)
+        self.device.latch_stop("pi-watchdog")  # 协议只允许 ASCII
+        self.pump()
+        rid = self.client.send("motor_speed", 1, 0, 60, 1, timeout_ms=200)
+        self.client.pending[rid].attempts = HC.E10_MAX_RETRIES + 1
+        for _ in range(3):
+            self.pump()
+        errs = [e for e in self.client.poll_events(1000) if e.kind == "err"]
+        self.assertTrue(any(e.data.get("code") == "E10" for e in errs), errs)
         self.assertNotIn(rid, self.client.pending)
 
     def test_query_counts_are_cached(self):
