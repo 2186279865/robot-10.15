@@ -6,10 +6,13 @@
   "discovery_port": 5056,
   "serial": "/dev/ttyACM0",
   "baud": 115200,
-  "cameras": [0],
+  "cameras": [
+    0
+  ],
   "width": 1280,
   "height": 720,
   "fps": 30,
   "quality": 80,
-  "name": "robot-pi"
+  "name": "robot-pi",
+  "preview_port": 5060
 }

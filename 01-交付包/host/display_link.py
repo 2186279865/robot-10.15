@@ -82,7 +82,7 @@ class DisplayLink:
         self.push(**msg)
 
     def item(self, seq, name, color='', box=0, box_label='', total_done=None,
-             last_event=None, thumb_b64=None):
+             last_event=None, thumb_b64=None, bbox=None, cam=None):
         msg = {'kind': 'item', 'seq': int(seq), 'name': str(name)[:24],
                'color': str(color)[:8], 'box': int(box)}
         if box_label:
@@ -93,6 +93,14 @@ class DisplayLink:
             msg['last_event'] = str(last_event)[:80]
         if thumb_b64:
             msg['thumb_b64'] = thumb_b64
+        # 派端屏自己抓“放入瞬间”的实时帧时用：bbox 是 700×700 校正图里的归一化框
+        if bbox is not None:
+            try:
+                msg['bbox'] = [round(float(v), 4) for v in bbox][:4]
+            except (TypeError, ValueError):
+                pass
+        if cam is not None:
+            msg['cam'] = int(cam)
         self.push(**msg)
 
     def item_done(self, seq, total_done, ok=True, last_event=None):

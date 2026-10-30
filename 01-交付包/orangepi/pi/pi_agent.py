@@ -105,6 +105,7 @@ DEFAULTS = {
     'fps': 30,
     'quality': 80,
     'name': 'robot-pi',
+    'preview_port': 5060,        # 只读预览口（返回缓存帧，0=关闭）
 }
 
 #: 请求里允许的最大宽高，防止笔记本发来离谱数字把内存吃光。
@@ -439,6 +440,9 @@ class ImageServer:
         self.errors_sent = 0
         self.bytes_sent = 0
         self.connections = 0
+        #: 最近一帧缓存：cam_id -> (jpeg_bytes, w, h, seq, ts_us)，供只读预览口使用
+        self.latest = {}
+        self.latest_lock = threading.Lock()
 
     # -- 生命周期 ---------------------------------------------------------
     def start(self):
@@ -537,8 +541,10 @@ class ImageServer:
         with self._lock:
             self._seq = (self._seq + 1) & 0xFFFFFFFF
             seq = self._seq
-        packet = wire.pack_image(cam_id, out_w, out_h, seq,
-                                 time.time_ns() // 1000, jpeg)
+        ts_us = time.time_ns() // 1000
+        with self.latest_lock:
+            self.latest[int(cam_id)] = (jpeg, int(out_w), int(out_h), int(seq), int(ts_us))
+        packet = wire.pack_image(cam_id, out_w, out_h, seq, ts_us, jpeg)
         if self._send(conn, packet):
             with self._lock:
                 self.frames_served += 1
@@ -571,6 +577,11 @@ class ImageServer:
             return True
         except (ConnectionError, OSError):
             return False
+
+    def latest_frame(self, cam_id):
+        """取最近缓存的一帧：(jpeg, w, h, seq, ts_us) 或 None。"""
+        with self.latest_lock:
+            return self.latest.get(int(cam_id))
 
     def _error(self, conn, code, msg):
         with self._lock:
@@ -1613,6 +1624,96 @@ class SerialBridge:
 # =========================================================================
 # UDP 发现服务
 # =========================================================================
+class PreviewServer:
+    """只读预览口：连上→回一帧缓存 JPEG（不触发新抓帧，因此不会与 5057 抢相机）。
+
+    握手：客户端发 `b"0\n"`（0/1 = 相机号），或不发直接关闭写端。服务端回标准 IM 包。
+    """
+
+    def __init__(self, bind_host, port, image_server, log, stop_event):
+        self.bind_host = bind_host
+        self.port = int(port)
+        self.image_server = image_server
+        self.log = log
+        self.stop_event = stop_event
+        self.sock = None
+        self._thread = None
+        self.served = 0
+
+    def start(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((self.bind_host, self.port))
+        s.listen(8)
+        s.settimeout(0.5)
+        self.sock = s
+        self._thread = threading.Thread(target=self._accept_loop, name='preview-accept',
+                                        daemon=True)
+        self._thread.start()
+        self.log('img', '只读预览口已监听 %s:%d（返回缓存帧，不抓新帧）'
+                 % (self.bind_host, self.port))
+
+    def stop(self):
+        sock, self.sock = self.sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        self._thread = None
+
+    def _accept_loop(self):
+        while not self.stop_event.is_set():
+            sock = self.sock
+            if sock is None:
+                return
+            try:
+                conn, addr = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._handle, args=(conn, '%s:%d' % (addr[0], addr[1])),
+                             daemon=True).start()
+
+    def _handle(self, conn, peer):
+        try:
+            conn.settimeout(1.0)
+            head = b''
+            try:
+                head = conn.recv(8)
+            except (socket.timeout, OSError):
+                head = b''
+            cam_id = 0
+            parts = head.decode('ascii', 'ignore').strip().split()
+            if parts and parts[0].isdigit():
+                cam_id = int(parts[0])
+            got = self.image_server.latest_frame(cam_id) if self.image_server else None
+            if got is None:
+                self.log('img', '%s 预览：相机 %d 还没有缓存帧' % (peer, cam_id))
+                try:
+                    conn.sendall(wire.pack_error(wire.E_NO_CAMERA,
+                                                 '相机 %d 还没有缓存帧（先让上位机拉一次帧）'
+                                                 % cam_id))
+                except OSError:
+                    pass
+                return
+            jpeg, w, h, seq, ts_us = got
+            try:
+                conn.sendall(wire.pack_image(cam_id, w, h, seq, ts_us, jpeg))
+                self.served += 1
+            except OSError:
+                pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 class DiscoveryServer:
     """监听 UDP 广播：收到 DISCOVERY_PROBE 就回自己的 IP 与端口。"""
 
@@ -1735,6 +1836,8 @@ def build_arg_parser():
                     help='串口桥控制口 TCP 端口（同一时刻只允许一个控制方）')
     ap.add_argument('--observer-port', type=int, default=None,
                     help='串口观察口 TCP 端口（只读：能看回包、发出的字节被丢弃；0=关闭）')
+    ap.add_argument('--preview-port', type=int, default=None,
+                    help='只读预览口 TCP 端口（返回缓存帧，供派端屏实时取图；0=关闭）')
     ap.add_argument('--no-bridge-exclusive', action='store_true',
                     help='允许多个控制方并发（默认独占）')
     ap.add_argument('--discovery-port', type=int, default=None, help='UDP 发现端口')
@@ -1773,6 +1876,8 @@ class Settings:
                                       DEFAULTS['observer_port']))
         self.discovery_port = int(pick(args.discovery_port, 'discovery_port',
                                        DEFAULTS['discovery_port']))
+        self.preview_port = int(pick(getattr(args, 'preview_port', None), 'preview_port',
+                                     DEFAULTS['preview_port']))
         self.baud = int(pick(args.baud, 'baud', DEFAULTS['baud']))
         self.width = int(pick(args.width, 'width', DEFAULTS['width']))
         self.height = int(pick(args.height, 'height', DEFAULTS['height']))
@@ -1809,10 +1914,10 @@ class Settings:
         return path, ''
 
     def describe(self):
-        return ('host=%s img=%d ser=%d obs=%d disc=%d cameras=%s %dx%d@%d q=%d '
+        return ('host=%s img=%d ser=%d obs=%d disc=%d preview=%d cameras=%s %dx%d@%d q=%d '
                 'exclusive=%s fake_camera=%s fake_serial=%s' % (
                     self.host, self.img_port, self.ser_port, self.observer_port,
-                    self.discovery_port,
+                    self.discovery_port, self.preview_port,
                     [c['index'] for c in self.cameras], self.width, self.height,
                     self.fps, self.quality, self.bridge_exclusive,
                     self.fake_camera, self.fake_serial))
@@ -1831,6 +1936,7 @@ class App:
         self.stop_event = threading.Event()
         self.cameras = {}
         self.image_server = None
+        self.preview_server = None
         self.transport = None
         self.serial_bridge = None
         self.discovery = None
@@ -1877,6 +1983,11 @@ class App:
                 self.image_server = ImageServer(st.host, st.img_port, self.cameras,
                                                 st.quality, self.log, self.stop_event)
                 self.image_server.start()
+                if st.preview_port > 0:
+                    self.preview_server = PreviewServer(st.host, st.preview_port,
+                                                        self.image_server, self.log,
+                                                        self.stop_event)
+                    self.preview_server.start()
         if st.run_serial and self.transport is not None:
             self.serial_bridge = SerialBridge(st.host, st.ser_port, self.transport,
                                              self.log, self.stop_event,
@@ -1938,6 +2049,8 @@ class App:
 
     def shutdown(self):
         self.log('main', '正在关闭服务…')
+        if self.preview_server is not None:
+            self.preview_server.stop()
         if self.image_server is not None:
             self.image_server.stop()
         if self.serial_bridge is not None:
