@@ -84,6 +84,32 @@ class DisplayLink:
             msg['current_label'] = str(current_label)[:40]
         self.push(**msg)
 
+    @staticmethod
+    def norm_bbox(bbox, w=1920.0, h=1080.0):
+        """把各种 bbox 统一成屏端要的 [x, y, w, h]（0~1 归一化）。
+
+        支持：像素框 (x,y,w,h)、归一化框 (x,y,w,h)、角点框 (x0,y0,x1,y1)。
+        """
+        try:
+            x, y, ww, hh = [float(v) for v in (bbox or [])[:4]]
+        except (TypeError, ValueError):
+            return None
+        if ww <= 0 or hh <= 0:
+            return None
+        if ww > 1.02 or hh > 1.02 or x > 1.02 or y > 1.02:
+            # 角点框：x1,y1 比 x,y 大且都像像素
+            if x < ww and y < hh:
+                ww, hh = ww - x, hh - y
+            nx, ny = x / float(w), y / float(h)
+            nw, nh = ww / float(w), hh / float(h)
+        else:
+            if x + ww > 1.02 or y + hh > 1.02:      # 实际是 (x0,y0,x1,y1) 归一化
+                ww, hh = ww - x, hh - y
+            nx, ny, nw, nh = x, y, ww, hh
+        nx = max(0.0, min(1.0, nx)); ny = max(0.0, min(1.0, ny))
+        nw = max(0.01, min(1.0 - nx, nw)); nh = max(0.01, min(1.0 - ny, nh))
+        return [round(nx, 4), round(ny, 4), round(nw, 4), round(nh, 4)]
+
     def item(self, seq, name, color='', box=0, box_label='', total_done=None,
              last_event=None, thumb_b64=None, bbox=None, cam=None):
         msg = {'kind': 'item', 'seq': int(seq), 'name': str(name)[:24],
@@ -98,10 +124,9 @@ class DisplayLink:
             msg['thumb_b64'] = thumb_b64
         # 派端屏自己抓“放入瞬间”的实时帧时用：bbox 是 700×700 校正图里的归一化框
         if bbox is not None:
-            try:
-                msg['bbox'] = [round(float(v), 4) for v in bbox][:4]
-            except (TypeError, ValueError):
-                pass
+            _nb = self.norm_bbox(bbox)
+            if _nb is not None:
+                msg['bbox'] = _nb
         if cam is not None:
             msg['cam'] = int(cam)
         self.push(**msg)

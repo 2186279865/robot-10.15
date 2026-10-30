@@ -621,16 +621,9 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 _bo = target.get('bbox_orig') or None
                 _bw = target.get('bbox_warped') or None
                 if _bo and len(_bo) == 4:
-                    _x, _y, _w, _h = (float(v) for v in _bo)
-                    _W, _H = 1920.0, 1080.0          # 识别用的原始帧尺寸（vision/config.json）
-                    if _w > _W or _h > _H:           # 有的后端给的是 (x0,y0,x1,y1)
-                        _w, _h = _w - _x, _h - _y
-                    _bbox_n = [max(0.0, _x / _W), max(0.0, _y / _H),
-                               min(1.0, (_x + _w) / _W), min(1.0, (_y + _h) / _H)]
+                    _bbox_n = display_link.DisplayLink.norm_bbox(_bo, 1920.0, 1080.0)
                 elif _bw and len(_bw) == 4:
-                    _x, _y, _w, _h = (float(v) for v in _bw)
-                    _bbox_n = [max(0.0, _x / 700.0), max(0.0, _y / 700.0),
-                               min(1.0, (_x + _w) / 700.0), min(1.0, (_y + _h) / 700.0)]
+                    _bbox_n = display_link.DisplayLink.norm_bbox(_bw, 700.0, 700.0)
             except (TypeError, ValueError):
                 _bbox_n = None
         say_display(getattr(display, 'item', None), seq=i + 1, name=_shape, color=_color,

@@ -704,7 +704,7 @@ class CalibTab(ttk.Frame):
                 disp.item(seq=1, name=_shape, color=_color, box=_box,
                           box_label='%d 号盒' % _box, total_done=0,
                           thumb_b64=_thumb,
-                          bbox=target.get('bbox_orig') or target.get('bbox'),
+                          bbox=target.get('bbox_orig') or target.get('bbox'),  # 像素框，link 侧归一化
                           cam=0,
                           last_event='第 1 件：%s %s → %d 号盒' % (_shape, _color, _box))
                 disp.state(done=0, total=1, status='running',

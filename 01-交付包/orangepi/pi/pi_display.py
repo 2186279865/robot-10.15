@@ -577,12 +577,6 @@ class Screen:
                         it['ok'] = ok
             if msg.get('last_event'):
                 self.last_event = str(msg['last_event'])
-            # 落货完成 = 最接近“放入瞬间”的时刻：用这时的最新缓存帧再刷一次
-            for i in range(1, 7):
-                for it in self.boxes[i]['items']:
-                    if it.get('seq') == seq:
-                        self._fetch_photo_later(it, {'bbox': it.get('bbox'),
-                                                     'cam': it.get('cam')})
             self._dirty = True
             return
         if kind == 'alarm':
