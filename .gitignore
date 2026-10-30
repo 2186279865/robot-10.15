@@ -165,3 +165,34 @@ Ultralytics/
 03-实验台/Qwen-VLM/logs/
 03-实验台/Qwen-VLM/models/
 03-实验台/Qwen-VLM/runtime/
+# ---------- 2026-10-30 收口：运行版整体推送 ----------
+# 1) 本机临时/测试产物（不入库）
+grasp_io_*/
+gui_smoke_*/
+units_*/
+torchinductor_rs/
+Ultralytics/
+.acl-recovery/
+3d/
+weights/
+codex/
+.survey/
+
+# 2) 视觉运行态中“每次都会变”的输出（保留标定类文件）
+01-交付包/vision/runtime/dbg_split_last.jpg
+01-交付包/vision/runtime/last_top_warp.jpg
+01-交付包/vision/runtime/last_side_warp.jpg
+01-交付包/vision/runtime/latest_targets.json
+01-交付包/vision/runtime/vlm_debug.json
+01-交付包/vision/runtime/vision_error.log
+01-交付包/vision/runtime/numbered_test.jpg
+
+# 3) 上位机运行态（盒号/托盘比例等每台机器自己跑出来）
+01-交付包/host/tray_state.json
+
+# 4) 但标定结果与运行必需要的配置必须入库
+!01-交付包/vision/runtime/calib_marks.json
+!01-交付包/vision/runtime/grasp_pairs.json
+!01-交付包/vision/runtime/empty_background.png
+!01-交付包/host/runtime/
+!01-交付包/host/runtime/*.json
