@@ -497,6 +497,40 @@ def pick_order(targets: Iterable[dict]) -> List[dict]:
     return sorted([t for t in targets if t.get('center_tray')], key=key)
 
 
+def goto_p0(client, log=print, wait=None,
+            pos_source: Optional[Callable[[], tuple]] = None) -> None:
+    """把爪子退回 P0（初始位/落料位）：Z 抬顶 → X/Y 回 P1 → Z 降到底 → Y 退 P0。
+
+    只在「整批抓完」时调用（点一键启动时不再自动归位，现场保证已在 P0）；
+    用户叫停时不调用，避免中途把货压在通道里。
+    """
+    def say(t: str) -> None:
+        log('[回 P0] ' + t)
+
+    def pos():
+        if pos_source is None:
+            return None, None, None
+        try:
+            return pos_source()
+        except Exception:                              # noqa: BLE001
+            return None, None, None
+
+    prep = True
+    plan = (
+        ({AXIS_Z: Z_UP}, [AXIS_Z], 'Z 抬顶（先抬，避免通道内刮碰）'),
+        ({AXIS_X: 0.0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y], 'X/Y 回 P1（通道末端）'),
+        ({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底'),
+        ({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0'),
+    )
+    for targets, order, title in plan:
+        say(title)
+        soft, known, counts = pos()
+        prep_pose.move_abs(client, targets, order=order, rpm=RPM, acc=_ACC_DEFAULT,
+                           log=say, wait=wait, soft=soft, known=known,
+                           counts=counts, prep=prep)
+        prep = False
+
+
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
              stop_flag: Optional[Callable[[], bool]] = None,
@@ -554,9 +588,11 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
                 status='running', last_event='开始连续抓 %s 件' % cnt_txt)
 
+    stopped = False
     for i in range(count_i if count_i > 0 else 10 ** 6):
         if stop_flag is not None and stop_flag():
             log('[连续抓] 收到停止信号，第 %d 件前结束' % (i + 1))
+            stopped = True
             emit('stopped', i=i + 1)
             break
         emit('item_start', i=i + 1, n=(count_i if count_i > 0 else 0))
@@ -693,6 +729,16 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         say_display(getattr(display, 'state', None), done=done, total=total_n,
                     elapsed_s=time.perf_counter() - started, status='running',
                     last_event='已完成 %d 件' % done)
+
+    # ---- 整批结束：托盘抓空 → 回 P0（叫停则停在原地等人确认）----
+    if stopped:
+        log('[连续抓] 已叫停 → 不回 P0（保持当前姿态，等你确认）')
+    else:
+        try:
+            log('[连续抓] 托盘已抓空 → 回 P0')
+            goto_p0(client, log=log, wait=wait, pos_source=pos_source)
+        except Exception as exc:                       # noqa: BLE001
+            log('[连续抓] 回 P0 失败（不影响已完成件数）：%s' % exc)
 
     elapsed = time.perf_counter() - started
     log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
