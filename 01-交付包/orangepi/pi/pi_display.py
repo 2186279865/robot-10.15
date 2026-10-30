@@ -194,6 +194,10 @@ def _load_top_points():
     return _CROP_CFG['points']
 
 
+# 卡片取景：1.0 = 严格截取「运行台画的那个识别框」；>1 会带一点上下文
+CROP_PAD = 1.0
+
+
 def crop_square(jpeg, bbox=None, cam=0):
     """把整帧 JPEG 按 bbox（托盘归一化坐标）裁成正方形，返回 PNG base64；失败返回 None。"""
     try:
@@ -221,9 +225,9 @@ def crop_square(jpeg, bbox=None, cam=0):
             bw, bh = max(1e-3, bw), max(1e-3, bh)
             cx = int(round((x0 + bw / 2.0) * w))
             cy = int(round((y0 + bh / 2.0) * h))
-            # 只框这件货：1.45 倍外扩（留一点上下文），并且不小于 110px、不超过画面 42%
-            side = int(round(max(bw * w, bh * h) * 1.45))
-            side = max(110, min(side, int(min(w, h) * 0.42)))
+            # 取景 = 识别框（默认 1.0 = 严格框内）；下限 72px、上限画面 42%
+            side = int(round(max(bw * w, bh * h) * CROP_PAD))
+            side = max(72, min(side, int(min(w, h) * 0.42)))
         except (TypeError, ValueError):
             pass
     side = max(64, min(side, int(min(h, w) * 0.9)))
