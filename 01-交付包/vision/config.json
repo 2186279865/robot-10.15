@@ -8,8 +8,8 @@
     "host": "",
     "img_port": 5057,
     "cam_map": {
-      "1": 0,
-      "2": 1
+      "1": 1,
+      "2": 0
     }
   },
   "frames_for_vote": 1,
@@ -123,9 +123,5 @@
   "white_sat_max": 55,
   "white_val_min": 80,
   "white_min_area": 5000,
-  "white_min_fill": 0.35,
-  "img_quality": 0,
-  "preview_fps": 0,
-  "calib_width": 1920,
-  "calib_height": 1080
+  "white_min_fill": 0.35
 }

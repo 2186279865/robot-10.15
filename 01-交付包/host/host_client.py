@@ -42,10 +42,6 @@ RETRYABLE = {"ping", "status", "motor_query", "param_get", "hello"}
 E10_RECOVERABLE = {"motor_pos", "motor_speed", "motor_goto", "motor_zero", "gripper", "angle"}
 #: 同一条命令最多自动恢复几次（超过就老老实实报错，避免掩盖真故障）。
 E10_MAX_RETRIES = 2
-#: 回执迟到告警线：`(收到时刻 - 下发时刻) - 固件自报 elapsed_ms` 超过它就在日志里点名。
-#: 现场 2026-10-31 04:38~04:55 实测：固件 1.0~1.6 s 就走完，回执却迟到 2~15 s，
-#: 表现为「Z 降底后停顿很久」——根子是图传把派端/无线挤满，不是轴慢。
-LATE_REPLY_MS = 1500
 
 #: goto / angle 不传 rpm 时的兜底转速（圈/分）。固件默认 60，Z 满行程要 72 s，
 #: 现场实测 1500 才能把 152,000 脉冲压到 3 s 内（见 10-27 日志）。
@@ -110,8 +106,6 @@ class PendingRequest:
     frames: List[P.Frame] = field(default_factory=list)
     #: 原始参数：E10 恢复要换新 id 重发同一条命令，得能原样重建（见 `_recover_e10`）。
     args: Tuple[object, ...] = ()
-    #: 下发时刻（毫秒）。用来算「回执迟到多少」，见 `_resolve` / `LATE_REPLY_MS`。
-    sent_ms: int = 0
 
 
 class HostClient:
@@ -268,7 +262,6 @@ class HostClient:
             body=body,
             deadline_ms=self.now_ms() + timeout_ms,
             args=tuple(args),
-            sent_ms=self.now_ms(),
         )
         self._write(raw, f"TX {rid} {cmd}")
         hook = self.motion_hook
@@ -454,21 +447,6 @@ class HostClient:
         """查一条请求的最终结果；还没完成返回 None。"""
         return self.done.get(int(req_id))
 
-    def extend_deadline(self, req_id: int, extra_ms: int = 30000) -> bool:
-        """把一条「还在等应答」的请求的截止时间往后推。
-
-        用途：上位机已经用**遥测 counts** 确认运动到位（回执只是迟到，见
-        `prep_pose.await_goto`），于是不再等这条回执来推进流程 —— 但要把它在
-        pending 里的截止时间推后，否则 `tick()` 会把它判成「结果未知」刷一堆告警，
-        而真正的回执几秒后回来时又会变成「收到无对应请求的应答」。
-        """
-        with self._lock:
-            pending = self.pending.get(int(req_id))
-            if pending is None or pending.result != RESULT_WAITING:
-                return False
-            pending.deadline_ms = max(pending.deadline_ms, self.now_ms() + int(extra_ms))
-            return True
-
     def _recover_e10(self, pending: "PendingRequest") -> bool:
         """E10（停止锁存）自动恢复：先 `stop_clear`，再用**新 id** 重发同一条命令。
 
@@ -510,7 +488,6 @@ class HostClient:
             deadline_ms=self.now_ms() + TIMEOUT_MOTION_MS,
             attempts=pending.attempts,
             args=tuple(pending.args),
-            sent_ms=self.now_ms(),
         )
         self._e10_alias[new_rid] = pending.req_id
         pending.result = RESULT_WAITING
@@ -524,37 +501,10 @@ class HostClient:
         )
         return True
 
-    def _note_late_reply(self, pending: PendingRequest, frame: P.Frame) -> None:
-        """回执比固件自报的耗时晚太多 → 打一条点名日志（链路/派端桥被挤）。
-
-        现场判据就靠这条：图传降负载后它应该消失；还在刷说明链路仍然堵。
-        注意应答帧的 `frame.kind` 是 `ok` / `err`（不是 `reply`）。
-        """
-        if frame.kind not in ("ok", "err"):
-            return
-        sent = int(getattr(pending, "sent_ms", 0) or 0)
-        if not sent:
-            return
-        try:
-            elapsed = int((frame.pairs or {}).get("elapsed_ms") or 0)
-        except (TypeError, ValueError):
-            elapsed = 0
-        late = self.now_ms() - sent - elapsed
-        if late < LATE_REPLY_MS:
-            return
-        self.emit(
-            "note",
-            "%s 回执迟到 %.1f s（固件自报 %d ms）——链路被图传/无线挤满，"
-            "已按遥测 counts 判到位继续" % (pending.cmd, late / 1000.0, elapsed),
-            req_id=pending.req_id,
-            late_ms=late,
-        )
-
     def _resolve(self, pending: PendingRequest, frame: P.Frame) -> None:
         """给一条请求结算（ok / err）。事件里的 req_id 一律用原请求 id。"""
         self.pending.pop(pending.req_id, None)
         self.ids.release(pending.req_id)
-        self._note_late_reply(pending, frame)
         if frame.kind == "err":
             pending.result = RESULT_ERR
             code = frame.error_code or "E05"

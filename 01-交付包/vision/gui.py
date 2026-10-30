@@ -30,19 +30,8 @@ CLS_COLORS = {'1': '#ff6b6b', '2': '#ffd400', '3': '#6ee06e',
 
 
 class Stream:
-    """一路取流线程。
-
-    `max_fps` 是**预览节流**：图传每帧都是「上位机请求一帧 → 派端编码 JPEG → 走无线」，
-    请求越快派端 CPU 与无线占用越高。现场（2026-10-31 04:38~04:55）就是图传把链路挤满，
-    导致运动回执迟到 2~15 s（表现为「Z 降底后停顿很久」）。预览用不到 8 fps，
-    限到 4 fps 就把带宽/CPU 让给控制链路；识别时用 `set_max_fps(0)` 临时拉满。
-
-    `quality` 是 JPEG 质量（0 = 用派端配置）。
-    """
-
-    def __init__(self, i, w, h, f, max_fps=0.0, quality=0):
-        self.cam = make_camera(i, w, h, f, quality=quality)
-        self.max_fps = float(max_fps or 0.0)
+    def __init__(self, i, w, h, f):
+        self.cam = make_camera(i, w, h, f)
         self.frame = None
         self.lock = threading.Lock()
         self.stop_evt = threading.Event()
@@ -53,15 +42,10 @@ class Stream:
     def start(self):
         threading.Thread(target=self.run, daemon=True).start()
 
-    def set_max_fps(self, v):
-        """改预览节流（0 = 不限速）。识别前调 0、识别完恢复。"""
-        self.max_fps = max(0.0, float(v or 0.0))
-
     def run(self):
         try:
             self.cam.open()
             while not self.stop_evt.is_set():
-                t0 = time.time()
                 ok = self.cam.cap.grab()
                 if ok:
                     ok, fr = self.cam.cap.retrieve()
@@ -69,11 +53,6 @@ class Stream:
                         with self.lock:
                             self.frame = fr
                         self.frames += 1
-                cap = self.max_fps
-                if cap > 0:
-                    rest = (1.0 / cap) - (time.time() - t0)
-                    if rest > 0:
-                        self.stop_evt.wait(rest)
         except Exception as e:
             self.error = str(e)
         finally:
@@ -889,13 +868,10 @@ class App:
             side_i = _idx(self.sv, self.cfg.get('side_camera_index', 1))
             self.tv.set(str(top_i))
             self.sv.set(str(side_i))
-            w = int(self.cfg.get('width', 1920) or 1920)
-            h = int(self.cfg.get('height', 1080) or 1080)
-            f = int(self.cfg.get('fps', 15) or 15)
-            cap = float(self.cfg.get('preview_fps', 0) or 0)
-            q = int(self.cfg.get('img_quality', 0) or 0)
-            self.a = Stream(top_i, w, h, f, max_fps=cap, quality=q)
-            self.bstream = Stream(side_i, w, h, f, max_fps=cap, quality=q)
+            self.a = Stream(top_i, self.cfg.get('width', 1920),
+                            self.cfg.get('height', 1080), self.cfg.get('fps', 15))
+            self.bstream = Stream(side_i, self.cfg.get('width', 1920),
+                                  self.cfg.get('height', 1080), self.cfg.get('fps', 15))
             self.a.start()
             self.bstream.start()
             self.running = True
@@ -1182,18 +1158,6 @@ class App:
             return [], None
         t0 = time.perf_counter()
         s = 700
-        # 标定点是按 `calib_width/calib_height`（现场是 1920×1080）量的；实际取帧分辨率
-        # 可能更小（图传降负载后是 1280×720）。这里按比例缩放源点即可 ——
-        # 下游的 center_tray 仍是 0~1 归一化坐标，所以**不用重新标定**。
-        try:
-            fh, fw = int(frame.shape[0]), int(frame.shape[1])
-            cw = float(self.cfg.get('calib_width') or 1920)
-            ch = float(self.cfg.get('calib_height') or 1080)
-            sx, sy = fw / cw, fh / ch
-            if abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3:
-                pts = [(float(x) * sx, float(y) * sy) for (x, y) in pts]
-        except Exception:                              # noqa: BLE001 - 缩放失败就按原坐标
-            pass
         p = np.array(pts, dtype=np.float32)
         dst = np.array([[0, 0], [s, 0], [s, s], [0, s]], dtype=np.float32)
         H = cv2.getPerspectiveTransform(p, dst)
@@ -1216,14 +1180,6 @@ class App:
                 except Exception as exc:              # 背景图问题不该让整次识别失败
                     self.note(f'空托盘背景读不到（{exc}），本次跳过灰度差分')
                 if bgi is not None:
-                    # 背景图是把 1920×1080 的空托盘拍的；现在取帧可能是 1280×720。
-                    # 差分看的是灰度结构，缩放一下即可（不做会因尺寸/单应不匹配整个错位）。
-                    try:
-                        if bgi.shape[:2] != frame.shape[:2]:
-                            bgi = cv2.resize(bgi, (int(frame.shape[1]), int(frame.shape[0])),
-                                             interpolation=cv2.INTER_AREA)
-                    except Exception:                  # noqa: BLE001
-                        pass
                     bg = cv2.warpPerspective(bgi, H, (s, s))
         masks = self.segmenter.segment(warp, bg, self.cfg, stats)
         t2 = time.perf_counter()
@@ -2091,7 +2047,6 @@ class App:
         self._rec_set(0, '识别中 0/%d 帧' % n, busy=True)
 
         def work():
-            self._ramp_streams(True)
             try:
                 fused, info = self._recognize_core(n)
             except Exception:                  # noqa: BLE001
@@ -2105,29 +2060,10 @@ class App:
                 last = [ln for ln in tb.strip().splitlines() if ln.strip()][-1]
                 self._rec_q.put(('error', callback, last))
                 return
-            finally:
-                self._ramp_streams(False)
             self._rec_q.put(('done', fused, callback, info))
 
         threading.Thread(target=work, daemon=True, name='recognize').start()
         return True
-
-    def _ramp_streams(self, fast):
-        """识别期间把预览节流放开（fast=True：拉满取帧，识别拿到的是最新帧）/收回。"""
-        if fast:
-            saved = []
-            for st in (getattr(self, 'a', None), getattr(self, 'bstream', None)):
-                if st is not None and hasattr(st, 'max_fps'):
-                    saved.append((st, st.max_fps))
-                    st.set_max_fps(0.0)
-            self._ramp_saved = saved
-        else:
-            for st, v in (getattr(self, '_ramp_saved', None) or []):
-                try:
-                    st.set_max_fps(v)
-                except Exception:              # noqa: BLE001
-                    pass
-            self._ramp_saved = None
 
     def recognize_blocking(self):
         """工作线程内使用：同步跑完识别（不碰 Tk，只往队列里塞进度）。"""
@@ -2140,11 +2076,7 @@ class App:
         # 一帧要跑 顶视SAM + 副摄SAM + 云端分类 ≈ 2~5 s，以前这里写死 max(2, …) 硬凑 2 帧，
         # 等于每次识别白等一倍时间（用户配置里本来就是 1 帧投票）。
         n = max(1, min(5, n))
-        self._ramp_streams(True)
-        try:
-            return self._recognize_core(n)
-        finally:
-            self._ramp_streams(False)
+        return self._recognize_core(n)
 
     def _recognize_core(self, n):
         """真正的识别计算：不碰任何 Tk 控件，可在任意线程运行。"""

@@ -239,20 +239,19 @@ class RemoteCamera:
     `read()` 失败时抛 RuntimeError（和本地 Camera 一致），`close()` 可重复调用。
     """
 
-    def __init__(self, index, width, height, fps, host, port=None, quality=0) -> None:
+    def __init__(self, index, width, height, fps, host, port=None) -> None:
         self.index = int(index)
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
         self.host = str(host)
         self.port = int(port) if port is not None else _wire().IMG_PORT
-        self.quality = int(quality or 0)
         self.cap = None
 
     def open(self) -> None:
         if self.cap is None:
             self.cap = RemoteCap(self.index, self.width, self.height, self.fps,
-                                 self.host, self.port, quality=self.quality)
+                                 self.host, self.port)
         ok = self.cap.open()
         if not ok:
             if self.cap._closed:
