@@ -218,7 +218,9 @@ def crop_square(jpeg, bbox=None, cam=0):
             bw, bh = max(1e-3, bw), max(1e-3, bh)
             cx = int(round((x0 + bw / 2.0) * w))
             cy = int(round((y0 + bh / 2.0) * h))
-            side = int(round(max(bw * w, bh * h) * 2.2))
+            # 只框这件货：1.45 倍外扩（留一点上下文），并且不小于 110px、不超过画面 42%
+            side = int(round(max(bw * w, bh * h) * 1.45))
+            side = max(110, min(side, int(min(w, h) * 0.42)))
         except (TypeError, ValueError):
             pass
     side = max(64, min(side, int(min(h, w) * 0.9)))
@@ -591,7 +593,7 @@ class Screen:
             return
         bbox = msg.get('bbox')
         if not bbox or len(bbox) != 4:
-            bbox = [0.30, 0.30, 0.40, 0.40]      # 上位机没带 bbox 时裁托盘中心，仍给实时照片
+            bbox = [0.37, 0.37, 0.26, 0.26]      # 上位机没带 bbox 时裁托盘中心，仍给实时照片
         cam = int(msg.get('cam') or self.cam)
         box = None
         for i in range(1, 7):
