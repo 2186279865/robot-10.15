@@ -104,6 +104,18 @@ def save(cfg: Dict[str, object], path: Optional[Path] = None) -> Path:
 MAX_STEP_PULSES = {AXIS_Z: 200000, AXIS_Y: 120000, 4: 30000, 3: 6000}
 EFFECTIVE_RPM_CAP = 50
 
+#: X/Y **并行**走位后的残差保护阈值（脉冲）。
+#: 2026-10-31 现场反馈：并行后报「偏离目标 +11394 脉冲（>3000）」时爪子其实已经到位，
+#: 残差来自 telemetry 旧帧 —— Y 1600 RPM ≈ 8.5 万脉冲/s，晚 130 ms 就差 1.1 万脉冲。
+#: 因此 3000 不再是「中止线」，而是「不补走、只告警、继续本件」的线：
+#:   * ≤ 60         ：正常，不动；
+#:   * 60 ~ 3000    ：顺序补一次（相对量，等回执）；
+#:   * 3000 ~ 40000 ：**只告警、不补走**，继续本件（现场已确认）；
+#:   * > 40000      ：≈400 mm，任何回读滞后都解释不了 → 中止等人工，防真撞机。
+XY_MISS_TOL_PULSES = 60
+XY_MISS_SKIP_PULSES = 3000
+XY_MISS_ABORT_PULSES = 40000
+
 
 def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000) -> int:
     """按"实际速度上限 50 圈/分"估客户端等待上限（rpm 参数再大也不快）。"""
@@ -531,6 +543,22 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             prev = now or prev
         return prev or {}
 
+    def fresh_axis(axis, min_gap=0.12, max_tries=8, tol=24.0):
+        """单轴新鲜读数：连续两次（间隔 min_gap）差 ≤ tol 才认。
+
+        用于"残差要不要补走"之前的复核：telemetry 旧帧会让残差虚高上万脉冲，
+        拿新鲜读数重算一次，避免把滞后当成真的没到位（补走会多走一整段）。
+        取不到就返回 None，调用方按原值处理。
+        """
+        prev = read_counts().get(axis)
+        for _i in range(max_tries):
+            time.sleep(min_gap)
+            now = read_counts().get(axis)
+            if prev is not None and now is not None and abs(now - prev) <= tol:
+                return now
+            prev = now if now is not None else prev
+        return prev
+
     # 调用方（auto_grab.move_xy）已做过"新鲜+稳定"校验，这里直接取一次即可，
     # 避免每步再多等 0.3~1.5 s。
     cur = read_counts()
@@ -598,7 +626,9 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
 
         # 4) 残差 > tol 的轴顺序补一次
-        fin = read_counts()
+        # 先用"连续两次一致"的新鲜读数收口：运动中/刚停时的旧帧会把残差放大成上万脉冲，
+        # 那正是"偏离目标 +11394 脉冲"误报的来源（2026-10-31 现场确认爪子已在位）。
+        fin = fresh_counts() or read_counts()
         for axis, tgt, delta in plans:
             c = fin.get(axis)
             if c is None:
@@ -612,18 +642,26 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 say('%s 并行：读数疑似滞后（残差 %+d ≈ 位移 %+d），跳过补走'
                     % (AXIS_LABEL.get(axis, axis), miss, delta))
                 continue
-            if abs(miss) > max(60, int(tol_pulses)):
-                # 补走前再确认一次：读数在 250 ms 内还在变就再等，避免"运动未停就补走"叠加位移
-                _prev = fin.get(axis)
-                for _k in range(4):
-                    time.sleep(0.12)
-                    _now = read_counts().get(axis)
-                    if _prev is None or _now is None or abs(_now - _prev) <= 24:
-                        break
-                    _prev = _now
-                if abs(miss) > 3000:
-                    raise RuntimeError('%s 并行后偏离目标 %+d 脉冲（>3000），不做补走，请人工检查'
-                                       % (AXIS_LABEL.get(axis, axis), miss))
+            if abs(miss) > max(XY_MISS_TOL_PULSES, int(tol_pulses)):
+                # 补走/判定前用新鲜读数重算残差：旧帧偏 130 ms 就是 ~1.1 万脉冲的假残差。
+                fresh_c = fresh_axis(axis)
+                if fresh_c is not None:
+                    new_miss = tgt - int(round(fresh_c / COUNTS_PER_PULSE))
+                    if new_miss != miss:
+                        say('%s 并行残差复核：%+d → %+d 脉冲（用新鲜读数）'
+                            % (AXIS_LABEL.get(axis, axis), miss, new_miss))
+                        miss = new_miss
+                if abs(miss) > XY_MISS_ABORT_PULSES:
+                    raise RuntimeError(
+                        '%s 并行后偏离目标 %+d 脉冲（>%d），超出回读滞后可解释范围，'
+                        '不做补走，请人工检查'
+                        % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_ABORT_PULSES))
+                if abs(miss) > XY_MISS_SKIP_PULSES:
+                    # 现场要求（2026-10-31）：爪子已到位时不要停，只告警并继续本件。
+                    say('%s 并行后偏离目标 %+d 脉冲（>%d）：判定为回读滞后/已在位，'
+                        '不做补走，继续本件（不停机）'
+                        % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_SKIP_PULSES))
+                    continue
                 say('%s 并行残差 %+d 脉冲，顺序补一次（相对量，等回执）' % (AXIS_LABEL.get(axis, axis), miss))
                 if not _goto_wait(axis, miss, rpm_of(axis)):
                     raise RuntimeError('%s 补走未完成（锁存/超时），中止本件' % AXIS_LABEL.get(axis, axis))

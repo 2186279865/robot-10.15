@@ -215,5 +215,100 @@ class CountsBasedTests(unittest.TestCase):
         self.assertLess(PP.goto_budget_ms(152000, 1500), 120000)
 
 
+class _FastClock:
+    """把 move_xy_fast 里的 time.sleep/monotonic 变成瞬间推进，测试不必真的等秒级。"""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += max(0.0, float(seconds))
+
+
+class _MotionClient:
+    """给 move_xy_fast 用的假 client：motor_pos 会"走"，并可在回读里留一个滞后量。"""
+
+    def __init__(self, counts=None, lag_pulses=None):
+        self.counts = {int(k): float(v) for k, v in (counts or {}).items()}
+        self.lag = {int(k): int(v) for k, v in (lag_pulses or {}).items()}
+        self.calls = []
+        self._n = 0
+
+    def _add(self, axis, pulses):
+        self.counts[axis] = self.counts.get(axis, 0.0) + float(pulses) * PP.COUNTS_PER_PULSE
+
+    def send(self, cmd, *args, **kw):
+        self._n += 1
+        self.calls.append((cmd, args))
+        if cmd == 'motor_pos':
+            axis, direction, pulses = int(args[0]), int(args[1]), int(args[4])
+            self._add(axis, -pulses if direction else pulses)
+            if axis in self.lag:            # 回读停在"真值 - lag"，模拟旧帧/读数滞后
+                self._add(axis, -self.lag[axis])
+        return self._n
+
+    def goto(self, axis, pulses, rpm=None, **kw):
+        self._n += 1
+        self.calls.append(('goto', (int(axis), int(pulses))))
+        self._add(int(axis), int(pulses))
+        return self._n
+
+    def wait_reply(self, req_id, timeout_ms=8000):
+        cmd = self.calls[req_id - 1][0]
+        if cmd == 'param_get':
+            return {'kind': 'reply', 'code': '', 'pairs': {'value': '3200'}}
+        if cmd == 'goto':
+            return {'kind': 'reply', 'code': '', 'pairs': {'err': '0', 'passes': '1'}}
+        return {'kind': 'reply', 'code': '', 'pairs': {'ok': '1'}}
+
+    def gotos(self):
+        return [c for c in self.calls if c[0] == 'goto']
+
+
+class ParallelResidualTests(unittest.TestCase):
+    """X/Y 并行后的残差保护：>3000 只告警继续（2026-10-31 现场要求），不再中止整批。"""
+
+    def _run(self, client, targets):
+        logs = []
+        old = PP.time
+        PP.time = _FastClock()
+        try:
+            res = PP.move_xy_fast(client, targets, rpm=1600, log=logs.append,
+                                  counts_fn=lambda: dict(client.counts))
+        finally:
+            PP.time = old
+        return res, logs
+
+    def test_big_residual_continues_without_abort(self):
+        """复现现场：Y 目标 -25000，回读滞后 11394 脉冲（+11394 > 3000），爪子其实已在位。"""
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 11394})
+        res, logs = self._run(client, {PP.AXIS_Y: -25000})
+        self.assertTrue(all(r['ok'] for r in res))
+        self.assertEqual(client.gotos(), [])                     # 不补走
+        self.assertTrue(any('+11394' in t for t in logs), logs)
+        self.assertTrue(any('继续本件' in t for t in logs), logs)
+
+    def test_moderate_residual_still_corrected(self):
+        """60~3000 的残差仍按原逻辑顺序补一次（相对量）。"""
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 500})
+        res, _logs = self._run(client, {PP.AXIS_Y: -25000})
+        self.assertTrue(all(r['ok'] for r in res))
+        self.assertEqual(client.gotos(), [('goto', (PP.AXIS_Y, 500))])
+        self.assertAlmostEqual(client.counts[PP.AXIS_Y],
+                               -25000 * PP.COUNTS_PER_PULSE, places=3)
+
+    def test_absurd_residual_still_aborts(self):
+        """>40000 脉冲（≈400 mm）超出回读滞后可解释范围 → 仍中止等人工，防真撞机。"""
+        # 编码器基准被重置之类：真值应 -25000，回读却 +20000 → 偏差 -45000
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: -45000})
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(client, {PP.AXIS_Y: -25000})
+        self.assertIn('超出回读滞后可解释范围', str(ctx.exception))
+        self.assertEqual(client.gotos(), [])
+
+
 if __name__ == '__main__':
     unittest.main()
