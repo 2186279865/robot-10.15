@@ -1830,6 +1830,15 @@ class App:
                 self.note("连接成功：上次断开时固件锁存了停止，已自动清除（不产生任何运动）")
             except Exception as exc:             # noqa: BLE001 —— 尽力而为
                 self.note(f"自动清除停止锁存失败（可手动点『清除停止锁存』）：{exc}")
+        # 订阅四轴遥测：counts 保持新鲜，move_abs 才能按回读算增量；
+        # 这样「一键启动」前不用再等 _ensure_pos 去订阅（省 1–2 s）。
+        try:
+            for _addr in AXIS_LABELS:
+                self.client.send("tele_on", _addr, 200, timeout_ms=800)
+            self.note("连接成功：已订阅四轴遥测（200 ms，位置一上来就是准的）")
+        except Exception as exc:             # noqa: BLE001 —— 尽力而为
+            self.note(f"订阅遥测失败（可点「初始化」再试）：{exc}")
+
         ready_deg = int(P.GRIPPER_READY_DEG)
         # 固件里 gripper_ready_deg 的默认值还是 150（RAM 参数）：连上就改成 158，
         # 这样改角度不用重烧固件。

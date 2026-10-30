@@ -198,6 +198,17 @@ def main(argv=None) -> int:
     root.geometry('1760x980')              # 放在 App 之后，覆盖它的默认尺寸
     root.title(TITLE)
 
+    # 开机预热：界面一打开就打开双画面 + 后台加载 SAM 模型。
+    # 以前要等用户点「一键启动」才开流、才加载模型（首件识别要 15 s+），
+    # 现在预热完，点一键启动就是“立刻开始抓”。
+    if vision is not None and not args.selftest:
+        def _warm():
+            try:
+                vision.warmup()
+            except Exception as exc:                     # noqa: BLE001
+                print('开机预热失败（不影响使用）：', exc)
+        root.after(600, _warm)
+
     def _tab_names():
         return [app.notebook.tab(i, 'text').strip()
                 for i in range(app.notebook.index('end'))]

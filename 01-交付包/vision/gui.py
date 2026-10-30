@@ -873,18 +873,7 @@ class App:
             self.note('双画面运行中')
             # 后台预热 SAM：第一次识别要加载 ~5 s 模型，若不预热，
             # 用户第一次点「连续抓」会以为界面卡死（首帧加载占满 CPU/GIL）
-            try:
-                import threading as _th
-                def _prewarm():
-                    try:
-                        ok = self.ensure_segmenter()
-                        self.r.after(0, self.note,
-                                     '分割模型预热完成' if ok else '分割模型预热失败（首次识别会慢）')
-                    except Exception as exc:            # noqa: BLE001
-                        self.r.after(0, self.note, '分割模型预热异常：%s' % exc)
-                _th.Thread(target=_prewarm, daemon=True).start()
-            except Exception:                          # noqa: BLE001
-                pass
+            self._prewarm_async()
             self._loop_armed = False
             self._schedule_loop()
             if not getattr(self, '_rec_pump_armed', False):
@@ -892,6 +881,47 @@ class App:
                 self.r.after(120, self._rec_pump)
         except Exception as e:
             messagebox.showerror('打开失败', str(e))
+
+    def _prewarm_async(self):
+        """后台把 SAM 加载好（幂等：已加载就只做一次空转）。"""
+        try:
+            import threading as _th
+
+            if getattr(self, '_warm_running', False):
+                return
+            self._warm_running = True
+
+            def _prewarm():
+                try:
+                    ok = self.ensure_segmenter()
+                    self.r.after(0, self.note,
+                                 '分割模型预热完成' if ok else '分割模型预热失败（首次识别会慢）')
+                except Exception as exc:            # noqa: BLE001
+                    self.r.after(0, self.note, '分割模型预热异常：%s' % exc)
+                finally:
+                    self._warm_running = False
+
+            _th.Thread(target=_prewarm, daemon=True, name='sam-warmup').start()
+        except Exception:                          # noqa: BLE001
+            pass
+
+    def warmup(self):
+        """开机预热（上位机启动时调一次）：没开双画面就打开，然后再后台加载 SAM。
+
+        这样用户点「一键启动」时不用再等“开流 + 5 s 模型加载”。
+        认不出相机（派没上电/网络没通）不影响上位机启动，下次连上会自动再试。
+        """
+        try:
+            if not getattr(self, 'running', False):
+                self.start()                       # start() 内部已经带预热
+            else:
+                self._prewarm_async()
+        except Exception as exc:                   # noqa: BLE001
+            try:
+                self.note('开机预热失败（不影响使用）：%s' % exc)
+            except Exception:                      # noqa: BLE001
+                pass
+
 
     def refresh(self):
         """画一帧。注意：这里**不再**用 after 续期。

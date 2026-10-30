@@ -497,13 +497,42 @@ def pick_order(targets: Iterable[dict]) -> List[dict]:
     return sorted([t for t in targets if t.get('center_tray')], key=key)
 
 
+def goto_p0(client, log=print, wait=None, pos_source=None):
+    """把爪子送回初始位 P0：Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0。
+
+    与运行台「一键回 P0」是同一套四段；每段交给 `prep_pose.move_abs` 自己按回读
+    counts / 软位置算增量（拿不到位置来源会 POS_UNKNOWN 拒绝，绝不按目标值盲走）。
+    已在 P0 时各段 |Δ|≤2 脉冲会自动跳过，所以“出发前先回 P0”几乎不花时间。
+    """
+    soft = known = counts = None
+    if pos_source is not None:
+        try:
+            soft, known, counts = pos_source()
+        except Exception:                          # noqa: BLE001
+            soft = known = counts = None
+    log('[回P0] 开始：Z 抬顶 → X/Y 回 P1 → Z 降底 → Y 退 P0')
+    steps = [
+        ('Z 抬顶', {AXIS_Z: Z_UP}, [AXIS_Z]),
+        ('X/Y 回 P1', {AXIS_X: 0, AXIS_Y: P1_Y}, [AXIS_X, AXIS_Y]),
+        ('Z 降底', {AXIS_Z: Z_DOWN}, [AXIS_Z]),
+        ('Y 退 P0', {AXIS_Y: P0_Y}, [AXIS_Y]),
+    ]
+    for title, targets, order in steps:
+        log('[回P0] ' + title)
+        rpm = RPM.get(order[0], 1500) if len(order) == 1 else {a: RPM.get(a, 300) for a in order}
+        prep_pose.move_abs(client, targets, order=order, rpm=rpm, acc=_ACC_DEFAULT,
+                           log=log, wait=wait, soft=soft, known=known, counts=counts)
+    log('[回P0] 已回到 P0（Z 底 / X 0 / Y 0）')
+
+
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
              pos_source: Optional[Callable[[], tuple]] = None, drop: bool = True,
              stop_flag: Optional[Callable[[], bool]] = None,
              current_box: int = 1,
              on_event: Optional[Callable[[dict], None]] = None,
              display=None, warp_path=None, total: Optional[int] = None,
-             recognize_each: bool = False, retry_once: bool = True) -> Dict[str, object]:
+             recognize_each: bool = False, retry_once: bool = True,
+             home_start: bool = True, home_end: bool = True) -> Dict[str, object]:
     """连续抓 N 件——流程与「自动抓一件」完全一致，只是外面套了一层循环。
 
     与旧版的区别只在“什么时候识别”：
@@ -553,6 +582,16 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         % ('每件重新识别' if recognize_each else '一次识别→队列逐件'))
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
                 status='running', last_event='开始连续抓 %s 件' % cnt_txt)
+
+    # 出发前先回 P0（新流程：P0 出发 → 每件抓完在 P1 落货 → 件间不回位）。
+    # 已经在 P0 时四段都会因为 |Δ|≤2 被跳过，基本上零开销。
+    if home_start:
+        try:
+            log('[连续抓] 出发前回 P0（已在 P0 会自动跳过）')
+            goto_p0(client, log=log, wait=wait, pos_source=pos_source)
+        except Exception as exc:                   # noqa: BLE001
+            # 拿不到位置来源 / 机械已卡死 → 只警告不中断，让现场决定是否继续
+            log('[连续抓] 出发前回 P0 失败（不中断，继续尝试抓取）：%s' % exc)
 
     for i in range(count_i if count_i > 0 else 10 ** 6):
         if stop_flag is not None and stop_flag():
@@ -695,6 +734,19 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                     last_event='已完成 %d 件' % done)
 
     elapsed = time.perf_counter() - started
+
+    # 全部抓完后回 P0（新流程：件间不回位，只在整批结束时归位）。
+    # 用户按了「停止全部」就不动机械，避免“刚叫停它又自己跑起来”。
+    stopped = bool(stop_flag is not None and stop_flag())
+    if home_end and not stopped:
+        try:
+            log('[连续抓] 全部结束 → 回 P0')
+            goto_p0(client, log=log, wait=wait, pos_source=pos_source)
+        except Exception as exc:                   # noqa: BLE001
+            log('[连续抓] 回 P0 失败（已完成件数不受影响）：%s' % exc)
+    elif home_end and stopped:
+        log('[连续抓] 已叫停 → 不回 P0（保持当前姿态，等你确认）')
+
     log('[连续抓] 结束：成功 %d 件、失败 %d 件，总用时 %.1f s；%s'
         % (done, failed, elapsed, BM.describe()))
     emit('finished', done=done, failed=failed, elapsed=elapsed)

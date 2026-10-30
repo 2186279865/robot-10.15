@@ -624,6 +624,12 @@ class Screen:
     def _fetch_photo_later(self, item, msg):
         if not self.preview_port:
             return
+        # 优先用上位机推来的缩略图（thumb_b64）：它是**识别那一帧**按目标框裁好的，
+        # 与这件货一一对应。5060 的实时帧只是“当下画面”，跟识别帧不是同一时刻，
+        # 混用就会出现“照片和这一件对不上”（现场踩过），所以只在没有缩略图时兜底。
+        if item.get('thumb'):
+            print('[photo] seq=%s use thumb(push)' % (item.get('seq'),))
+            return
         bbox = msg.get('bbox')
         if not bbox or len(bbox) != 4:
             # 没有目标框就不能裁：盲裁中心会让每一件都长一个样（用户踩过），

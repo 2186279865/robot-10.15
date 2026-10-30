@@ -108,16 +108,11 @@ class RunTab(ttk.Frame):
         if client is None or not getattr(client, "online", False):
             messagebox.showwarning("未连接", "先连上派端（运动控制页或顶栏「连接」）再点一键启动。")
             return
-        if not messagebox.askyesno(
-                "一键启动",
-                "开始连续抓取：\n\n"
-                "• 抓到托盘里没有物块为止（件数不限）\n"
-                "• 每件都落货（P1 降到底 → 松爪）\n"
-                "• 失败会自动重识别重试一次，仍失败则停\n\n"
-                "手离开机械臂，随时可点顶部「停止全部」。继续？"):
-            return
+        # 不再弹确认框：点一下就开始（现场戴手套、赶时间，弹窗要点两次反而慢）。
+        # 点了什么压在日志里，随时能看出“这一轮是谁、什么时候点的”。
         self._busy = True
-        self.status("▶ 一键启动：连续抓取（抓到空为止）")
+        self.status("▶ 已点击「一键启动」→ 立即开始（捕捉到托盘空为止）")
+        self.item_log("👆 已点击「一键启动」（无需确认）")
         try:
             calib = (getattr(self.app, "calib_tab", None)
                      or getattr(self.app, "calib", None))
@@ -218,8 +213,32 @@ class RunTab(ttk.Frame):
         except Exception:                                 # noqa: BLE001
             return None, vis
 
+    def _maybe_clear_busy(self) -> None:
+        """上一轮真的结束了就把 _busy 放掉。
+
+        原来只在启动失败/回 P0 的 finally 里复位，成功跑完这一轮 `_busy` 会一直
+        留着 True → 第二次点「一键启动」直接提示“上一段还没结束”（用户踩过）。
+        """
+        if not self._busy:
+            return
+        calib = (getattr(self.app, "calib_tab", None)
+                 or getattr(self.app, "calib", None))
+        running = False
+        try:
+            if bool(getattr(calib, "_prep_running", False)):
+                running = True
+            th = getattr(calib, "_many_thread", None)
+            if th is not None and getattr(th, "is_alive", lambda: False)():
+                running = True
+        except Exception:                                 # noqa: BLE001
+            running = False
+        if not running:
+            self._busy = False
+            self.status("（上一段已结束 → 可以再次点「一键启动」）")
+
     def _tick(self) -> None:
         try:
+            self._maybe_clear_busy()
             frame, vis = self._frames()
             if frame is None:
                 self.canvas.delete("all")
