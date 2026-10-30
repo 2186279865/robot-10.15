@@ -533,7 +533,8 @@ class Screen:
             name = str(msg.get('name') or '')
             color = str(msg.get('color') or '')
             box = int(msg.get('box') or 0)
-            label = str(msg.get('box_label') or ('%s %s' % (name, color)).strip())
+            cls_label = ('%s %s' % (name, color)).strip()
+            label = cls_label or str(msg.get('box_label') or '')
             item = {'seq': seq, 'name': name, 'color': color,
                     'thumb': self._thumb_from_b64(msg.get('thumb_b64')),
                     'key': '%d/%d' % (box, seq)}
@@ -592,6 +593,8 @@ class Screen:
         if not self.preview_port:
             return
         bbox = msg.get('bbox')
+        if not bbox or len(bbox) != 4:
+            bbox = [0.30, 0.30, 0.40, 0.40]      # 上位机没带 bbox 时裁托盘中心，仍给实时照片
         cam = int(msg.get('cam') or self.cam)
         box = None
         for i in range(1, 7):
@@ -602,6 +605,7 @@ class Screen:
 
         def work():
             jpeg = fetch_frame(self.preview_host, self.preview_port, cam)
+            print('[photo] seq=%s box=%s bbox=%s jpeg=%s' % (item.get('seq'), box, bbox, len(jpeg or b'')))
             if not jpeg:
                 return
             png_b64 = crop_square(jpeg, bbox, cam)

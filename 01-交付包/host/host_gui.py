@@ -1199,19 +1199,31 @@ class App:
                         total = int(getattr(self.calib_tab, '_many_total', 0) or 0)
                     except Exception:                      # noqa: BLE001
                         pass
+                # 计时口径：只有“本轮抓取已开始”才走表；空闲/仅连接时恒为 0
+                _running = bool(getattr(self, '_disp_running', False))
                 info = {'done': done, 'total': total, 'status': 'running',
-                        'elapsed_s': time.monotonic() - self._disp_t0}
+                        'elapsed_s': (time.monotonic() - self._disp_t0) if _running else 0.0}
                 last = getattr(self, '_disp_last_event', '')
                 if last:
                     info['last_event'] = last
                 return info
 
             self._disp_t0 = time.monotonic()
+            self._disp_running = False
             self.display.start_keepalive(5.0, _provider)
             self.note(f"派端比赛屏已连接：{host}:5059")
         except Exception as exc:                           # noqa: BLE001
             self.display = None
             self.note(f"派端比赛屏未连接（不影响抓取）：{exc}")
+
+    def disp_run_start(self) -> None:
+        """本轮抓取开始：派端屏计时从此处开始。"""
+        self._disp_running = True
+        self._disp_t0 = time.monotonic()
+
+    def disp_run_stop(self) -> None:
+        """本轮抓取结束：计时冻结（屏上保留最后读数）。"""
+        self._disp_running = False
 
     def _stop_display(self) -> None:
         d, self.display = getattr(self, 'display', None), None

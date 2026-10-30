@@ -685,6 +685,10 @@ class CalibTab(ttk.Frame):
         except Exception:                             # noqa: BLE001
             _box = int(target.get('box') or 1)
         try:
+            self.app.disp_run_start()
+        except Exception:                             # noqa: BLE001
+            pass
+        try:
             if disp is not None:
                 disp.item(seq=1, name=_shape, color=_color, box=_box,
                           box_label='%d 号盒' % _box, total_done=0,
@@ -712,6 +716,10 @@ class CalibTab(ttk.Frame):
                         self.app._disp_done, self.app._disp_total = 1, 1
                     else:
                         disp.alarm(text='第 1 件失败')
+            except Exception:                         # noqa: BLE001
+                pass
+            try:
+                self.app.disp_run_stop()
             except Exception:                         # noqa: BLE001
                 pass
             self._prep_running = False
@@ -826,6 +834,10 @@ class CalibTab(ttk.Frame):
 
     def _many_worker(self, client, vision, count, drop):
         try:
+            self.app.disp_run_start()
+        except Exception:                               # noqa: BLE001
+            pass
+        try:
             _disp = getattr(self.app, 'display', None)
             _warp = None
             try:
@@ -850,6 +862,10 @@ class CalibTab(ttk.Frame):
         except Exception as exc:                            # noqa: BLE001
             self.say('连续抓失败：%s: %s' % (type(exc).__name__, exc))
         finally:
+            try:
+                self.app.disp_run_stop()
+            except Exception:                           # noqa: BLE001
+                pass
             self._prep_running = False
             self._many_stop = False
             try:
