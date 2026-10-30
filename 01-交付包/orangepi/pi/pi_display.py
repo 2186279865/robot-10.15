@@ -620,6 +620,9 @@ class Screen:
             # 直接保留上位机推来的这一件的缩略图（thumb_b64）即可。
             print('[photo] seq=%s skip(no bbox) thumb=%s'
                   % (item.get('seq'), bool(item.get('thumb'))))
+            if not item.get('thumb'):
+                # 既没有框也没有缩略图 → 只可能是上位机是旧版；在底栏给出明确提示
+                self.alerts = (self.alerts + ['派端屏没收到目标框（上位机需重启）'])[-2:]
             return
         cam = int(msg.get('cam') or self.cam)
         box = None
