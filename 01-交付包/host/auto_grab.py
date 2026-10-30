@@ -43,47 +43,6 @@ P1_Y = -13144
 P0_Y = 0
 TRAY_DEG = 60.0
 
-#: Z 行程可现场微调：写 `runtime/auto_grab.json` 的 `z_up_pulses` / `z_down_pulses`。
-#: 为什么值得调：Z 轴实际最高约 1800~2000 圈/分（≈60 mm/s，1658 脉冲/mm），
-#: 把转速从 2400 抬到 3000 只省 24 ms（93 趟实测均值 1616→1585 ms，见交接文档 §8 第 21 条），
-#: **真正能省时间的是少走行程**——一件要跑 4 趟 Z（抬/降/抬/降），
-#: 每少 10000 脉冲（≈6 mm）就省约 0.1 s/趟、0.4 s/件。
-#: 前提：抬顶高度必须还能越过托盘上的物块/箱口，改之前先手动把 Z 停在目标高度、横移 X/Y 试一下。
-TRAVEL_PATH = PKG_ROOT / 'runtime' / 'auto_grab.json'
-
-
-def _load_travel(default_up: int = Z_UP, default_down: int = Z_DOWN):
-    """读 `runtime/auto_grab.json` 里对 Z 行程的覆盖值；文件缺/坏/值不合理就退回默认。
-
-    返回 `(z_up, z_down, source)`，`source` 用于日志里说明用的是哪一路。
-    """
-    cfg = {'z_up_pulses': default_up, 'z_down_pulses': default_down}
-    try:
-        raw = json.loads(TRAVEL_PATH.read_text(encoding='utf-8'))
-    except Exception:                                  # noqa: BLE001 —— 没这个文件是常态
-        return default_up, default_down, '默认值'
-    if not isinstance(raw, dict):
-        return default_up, default_down, '默认值（文件格式不对）'
-    src = 'runtime/auto_grab.json'
-    for key in ('z_up_pulses', 'z_down_pulses'):
-        if key in raw:
-            try:
-                cfg[key] = int(raw[key])
-            except (TypeError, ValueError):
-                src += '（%s 非整数，已忽略）' % key
-    up, down = cfg['z_up_pulses'], cfg['z_down_pulses']
-    # 合理性：抬顶必须是负向且至少抬 20 mm（33160 脉冲）、降底在 0 附近（±20000）。
-    # 写错方向/写错单位会让整套动作上下反向——现场撞过机，这里必须拦。
-    if not (up <= -20000):
-        return default_up, down, src + '（z_up_pulses=%d 不合理，退回默认）' % up
-    if abs(down) > 20000:
-        return up, default_down, src + '（z_down_pulses=%d 不合理，退回默认）' % down
-    return up, down, src
-
-
-Z_UP, Z_DOWN, TRAVEL_SRC = _load_travel()
-
-
 SETTLE_GRAB_MS = 180       # 夹紧后只等舵机合拢（原 450；实测夹爪 168°→135° 约 0.2 s）
 SETTLE_OPEN_MS = 150       # 松爪后等货物离爪（原 500；爪子张开只需 ~0.15 s，货自然落盒）
 SETTLE_READY_MS = 0        # 回预备位不再单独等（下一段运动期间舵机自己转完）
@@ -923,8 +882,6 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
     log('[连续抓] 假设当前落料位的盒子 = %d 号（转盘一圈 %d 盒，每盒 %d°）'
         % (box_now, BOX_COUNT, int(BOX_STEP_DEG)))
-    log('[连续抓] Z 行程：抬顶 %d / 降底 %d 脉冲（%.1f mm / %.1f mm，来源：%s）'
-        % (Z_UP, Z_DOWN, abs(Z_UP) / 1658.0, abs(Z_DOWN) / 1658.0, TRAVEL_SRC))
     log('[连续抓] 模式：%s；每件都走与「自动抓一件」相同的 run_once'
         % ('每件重新识别' if recognize_each else '一次识别→队列逐件'))
     say_display(getattr(display, 'state', None), done=0, total=total_n, elapsed_s=0,
