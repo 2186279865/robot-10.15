@@ -53,6 +53,9 @@ AXIS_LABELS = {1: "Z (1)", 3: "托盘 (3)", 4: "X (4)", 5: "Y (5)"}
 BAUDRATE = 115200
 POLL_MS = 30
 LOG_MAX_LINES = 2000
+#: 界面日志落盘目录；None = 包内 runtime/。单元测试改成临时目录，
+#: 免得跑一遍用例就把现场 runtime/host-YYYYMMDD.log 灌满假数据。
+LOG_DIR = None
 #: 参数名以 `protocol.PARAM_DEFAULTS`（即模拟固件的契约）为准；
 #: 这里只补中文说明，名称对不上就在测试里直接暴露出来。
 PARAM_LABELS = {
@@ -2173,7 +2176,7 @@ class App:
             self.log_text.see("end")
         # 同时落盘：出问题后能回看（界面日志重启就没了）
         try:
-            log_dir = PKG_ROOT / "runtime"
+            log_dir = LOG_DIR if LOG_DIR is not None else (PKG_ROOT / "runtime")
             log_dir.mkdir(parents=True, exist_ok=True)
             path = log_dir / ("host-%s.log" % time.strftime("%Y%m%d"))
             if path.exists() and path.stat().st_size > 4 * 1024 * 1024:

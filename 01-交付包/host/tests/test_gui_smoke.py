@@ -47,6 +47,10 @@ class GuiSmokeTest(unittest.TestCase):
 
         cls.gui = host_gui
 
+        cls._tmpdir = tempfile.mkdtemp(prefix="gui_smoke_")
+        # 界面日志也写临时目录：否则跑一遍用例就把现场 runtime/host-YYYYMMDD.log 灌满假数据
+        host_gui.LOG_DIR = pathlib.Path(cls._tmpdir)
+
         class Args:
             sim = True
             port = None
@@ -59,7 +63,7 @@ class GuiSmokeTest(unittest.TestCase):
         # 否则「自动先走接近段」会让序列用例一直停在 idle。
         import approach_route as AR
         import journey as J
-        cls._tmpdir = tempfile.mkdtemp(prefix="gui_smoke_")
+
         AR.DEFAULT_PATH = pathlib.Path(cls._tmpdir) / "approach_route.json"
         J.DEFAULT_PATH = pathlib.Path(cls._tmpdir) / "journey.json"
         cls.app.approach = AR.empty()
