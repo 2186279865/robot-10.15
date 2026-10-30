@@ -242,6 +242,58 @@ class TrayEarlyTest(unittest.TestCase):
                       '降到底后必须已经松爪')
 
 
+class ReleasePacingTest(unittest.TestCase):
+    """松爪必须有「张嘴时间」：open 与 ready 之间要留够舵机从 135° 张到 180°。
+
+    2026-10-31 现场：把 SETTLE_OPEN_MS 清零后，open/ready 相隔 ~1 ms 下发，
+    固件 `host_cmd_gripper` 收到 ready 立刻 Servo_SetAngle(168) 覆盖 open，
+    爪子张不开、物块不掉，用户看到的就是「爪子没松/预备角度没了」。
+    """
+
+    def _run(self):
+        client = FakeClient()
+        events = []
+        orig_send = client.send
+
+        def send(name, *args, **kw):
+            events.append(('send', name, args))
+            return orig_send(name, *args, **kw)
+
+        class _Time:
+            """只拦 sleep 记时长，其余属性转给真实 time（不真的睡）。"""
+
+            @staticmethod
+            def sleep(secs):
+                events.append(('sleep', float(secs), ()))
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        client.send = send
+        orig_time = AG.time
+        AG.time = _Time()
+        try:
+            res = AG.run_once(client, {'center_tray': [0.5, 0.5]}, log=lambda _t: None,
+                              wait=lambda rid, ms: client.done_of(rid), calib=_calib(),
+                              pos_source=lambda: ({}, {}, dict(client.counts)),
+                              tray_deg=0.0)          # 不转盘，专看松爪节奏
+        finally:
+            AG.time = orig_time
+        return res, events
+
+    def test_open_then_ready_keeps_a_mouth_opening_gap(self):
+        res, events = self._run()
+        self.assertTrue(res['ok'])
+        names = [(e[1], e[2]) for e in events]          # (cmd, args)
+        idx_open = names.index(('gripper', ('open',)))
+        idx_ready = names.index(('gripper', ('ready',)))
+        self.assertLess(idx_open, idx_ready)
+        gaps = [e[1] for e in events[idx_open:idx_ready] if e[0] == 'sleep']
+        self.assertTrue(gaps, 'open 与 ready 之间必须有一段时间（否则舵机张不开）')
+        self.assertGreaterEqual(max(gaps), 0.15,
+                                '张嘴时间至少 150 ms（舵机 135°→180° 约 0.1~0.2 s）')
+
+
 class RunManyEventTest(unittest.TestCase):
     """run_many 必须走同一套 run_once，并把事件回调给界面用。"""
 

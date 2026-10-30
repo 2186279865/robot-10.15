@@ -48,9 +48,17 @@ TRAY_DEG = 60.0
 # 立刻回 ok（`host_protocol_inline.h:2112-2185`），舵机自己在 200 ms 内合拢，
 # Z 抬升时爪子已经夹住，两者本来就并行。
 SETTLE_GRAB_MS = 0         # 夹紧后不等（原 180）
-# 「Z 降到底 → 立刻松爪」：连松爪后的 150 ms 也不等了，Z 就停在底部，
+# 「Z 降到底 → 立刻松爪」：不再等转盘、也不再等落盒，Z 就停在底部，
 # 下一件的 ①Y 进通道本来也要求 Z 在底。
-SETTLE_OPEN_MS = 0         # 松爪后不等（原 150）
+#
+# **但松爪后的「张嘴时间」不能为 0**（2026-10-31 现场教训）：
+# 固件 `host_cmd_gripper`（host_protocol_inline.h:2112-2185）收到 ready 会
+# 立刻 `Servo_SetAngle(168)` 覆盖 PWM，不看 busy、不等舵机；
+# 如果 open 和 ready 背靠背下发（间隔 ~1 ms），舵机来不及从 135° 张到 180°，
+# 现场看起来就是「爪子没松 / 没回到张开的预备角度」，物块也可能不掉。
+# 舵机 135°→180° 约需 0.1~0.2 s，这里留 0.22 s 张口；
+# 回预备（180°→168°）仍然不等，它在下一件 ②Z 抬顶期间自己转完。
+SETTLE_OPEN_MS = 220       # 松爪后给舵机张嘴的时间（原 0 = 张不开；再早是 150/500）
 SETTLE_READY_MS = 0        # 回预备位不再单独等（下一段运动期间舵机自己转完）
 
 #: 在位判定：|残差| ≤ 60 脉冲（≈0.6 mm）就当已经在位，不再为 10 脉冲跑一趟往返。
@@ -582,12 +590,12 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         # 10 串行转（单件抓/未开 tray_async 时走这里）
         tray_turn(client, tray_deg, say,
                   counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
-    # 11 松爪 → 回预备：不再为"落盒/回位"额外等（原 0.2+0.5+0.25，2026-10-31 已清零）；
+    # 11 松爪 → 回预备：只给舵机「张嘴」留 SETTLE_OPEN_MS，不再等落盒/回位；
     #    回预备的转动在下一件「②Z 抬顶」期间自己完成。
-    say('松爪 180° → 回预备 %d°（下一段运动期间舵机自己转完，不再干等）'
-        % int(P.GRIPPER_READY_DEG))
+    say('松爪 180°（张嘴 %.0f ms）→ 回预备 %d°（不等它转完）'
+        % (SETTLE_OPEN_MS, int(P.GRIPPER_READY_DEG)))
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
-    time.sleep(SETTLE_OPEN_MS / 1000.0)
+    time.sleep(SETTLE_OPEN_MS / 1000.0)                 # 必须真的张到 180°，否则物块不掉
     client.send('gripper', 'ready', timeout_ms=2000)    # 回预备（不等它转完）
     if SETTLE_READY_MS > 0:
         time.sleep(SETTLE_READY_MS / 1000.0)
