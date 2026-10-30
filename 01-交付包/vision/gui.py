@@ -871,6 +871,20 @@ class App:
             self.bstream.start()
             self.running = True
             self.note('双画面运行中')
+            # 后台预热 SAM：第一次识别要加载 ~5 s 模型，若不预热，
+            # 用户第一次点「连续抓」会以为界面卡死（首帧加载占满 CPU/GIL）
+            try:
+                import threading as _th
+                def _prewarm():
+                    try:
+                        ok = self.ensure_segmenter()
+                        self.r.after(0, self.note,
+                                     '分割模型预热完成' if ok else '分割模型预热失败（首次识别会慢）')
+                    except Exception as exc:            # noqa: BLE001
+                        self.r.after(0, self.note, '分割模型预热异常：%s' % exc)
+                _th.Thread(target=_prewarm, daemon=True).start()
+            except Exception:                          # noqa: BLE001
+                pass
             self._loop_armed = False
             self._schedule_loop()
             if not getattr(self, '_rec_pump_armed', False):

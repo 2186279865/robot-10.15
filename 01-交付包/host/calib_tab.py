@@ -869,18 +869,19 @@ class CalibTab(ttk.Frame):
                 client, count,
                 recognize=(vision.recognize_blocking
                        if hasattr(vision, 'recognize_blocking') else vision.recognize_safe),
-                log=self.say,
+                # Tk 不是线程安全的：日志/事件一律 after 回主线程，否则「连续抓」会卡死
+                log=lambda t: self.after(0, self.say, t),
                 pos_source=self._pos_source,
                 drop=drop,
                 stop_flag=lambda: bool(self._many_stop),
-                on_event=self._many_event,
+                on_event=lambda ev: self.after(0, self._many_event, ev),
                 display=_disp,
                 warp_path=_warp,
             )
-            self.say('连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
-                     % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
+            self.after(0, self.say, '连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
+                       % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))
         except Exception as exc:                            # noqa: BLE001
-            self.say('连续抓失败：%s: %s' % (type(exc).__name__, exc))
+            self.after(0, self.say, '连续抓失败：%s: %s' % (type(exc).__name__, exc))
         finally:
             try:
                 self.app.disp_run_stop()
