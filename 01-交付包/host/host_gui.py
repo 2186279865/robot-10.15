@@ -1202,6 +1202,7 @@ class App:
                 # 计时口径：只有“本轮抓取已开始”才走表；空闲/仅连接时恒为 0
                 _running = bool(getattr(self, '_disp_running', False))
                 info = {'done': done, 'total': total, 'status': 'running',
+                        'running': _running,
                         'elapsed_s': (time.monotonic() - self._disp_t0) if _running else 0.0}
                 last = getattr(self, '_disp_last_event', '')
                 if last:
@@ -1217,13 +1218,29 @@ class App:
             self.note(f"派端比赛屏未连接（不影响抓取）：{exc}")
 
     def disp_run_start(self) -> None:
-        """本轮抓取开始：派端屏计时从此处开始。"""
+        """本轮抓取开始：派端屏计时从此处开始（并立刻推一次，不等 5 s 保活）。"""
         self._disp_running = True
         self._disp_t0 = time.monotonic()
+        d = getattr(self, 'display', None)
+        if d is not None:
+            try:
+                d.state(done=getattr(self, '_disp_done', 0),
+                        total=getattr(self, '_disp_total', 0),
+                        elapsed_s=0.0, status='running', running=True)
+            except Exception:                          # noqa: BLE001
+                pass
 
     def disp_run_stop(self) -> None:
         """本轮抓取结束：计时冻结（屏上保留最后读数）。"""
         self._disp_running = False
+        d = getattr(self, 'display', None)
+        if d is not None:
+            try:
+                d.state(done=getattr(self, '_disp_done', 0),
+                        total=getattr(self, '_disp_total', 0),
+                        status='running', running=False)
+            except Exception:                          # noqa: BLE001
+                pass
 
     def _stop_display(self) -> None:
         d, self.display = getattr(self, 'display', None), None

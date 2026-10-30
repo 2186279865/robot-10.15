@@ -65,8 +65,11 @@ class DisplayLink:
     # ---------- 赛题版（NDJSON v2，给 pi_display.py 的六列界面） ----------
 
     def state(self, done=None, total=None, elapsed_s=None, status='running',
-              last_event=None, current_box=None, current_label=None):
+              last_event=None, current_box=None, current_label=None,
+              running=None):
         msg = {'kind': 'state', 'state': status}
+        if running is not None:
+            msg['running'] = bool(running)
         if done is not None:
             msg['done'] = int(done)
         if total is not None:

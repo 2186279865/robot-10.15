@@ -505,7 +505,12 @@ class Screen:
             return
         if kind == 'state':
             self.state = str(msg.get('state') or self.state)
-            if msg.get('elapsed_s') is not None:
+            # 计时口径：只有 host 明确 running=True（已开始抓取）才走表；
+            # 未开始/待机时每收到一次 state 都把读数钉在 0，避免本地 _tick 数出“0→4 再归零”的锯齿
+            if msg.get('running') is False:
+                self.elapsed = 0.0
+                self._tick_anchor = None
+            elif msg.get('elapsed_s') is not None:
                 try:
                     self.elapsed = max(0.0, float(msg['elapsed_s']))
                     self._tick_anchor = (time.monotonic(), self.elapsed)
