@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Robot Battle Screen
+Comment=机器人比赛屏（开机自动启动；日志 %s）
+Exec=sh -c "cd /home/orangepi/robot1021/pi && sh ./start_display.sh"
+X-GNOME-Autostart-enabled=true
+Terminal=false
+Hidden=false

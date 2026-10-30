@@ -122,6 +122,18 @@ class PresetLookupTest(unittest.TestCase):
         self.assertIsNone(self._resolve('螺丝', '银'))
 
 
+    def test_unknown_shape_falls_back_to_color(self):
+        # 现场第 8 件：类别名是 '—'（形状没认出来）+ 蓝/浅蓝 → 必须给一张蓝图，
+        # 否则退回上位机裁的缩略图，屏上就是一块纯色（2026-10-31 用户报的就是这个）
+        ns = self._ns
+        idx = ns['_load_preset_index']()
+        self.assertEqual(ns['_preset_base_by_color'](idx, '蓝/浅蓝'), 'blue_cuboid')
+        self.assertEqual(ns['_preset_base_by_color'](idx, '红'), 'red_cuboid')
+        self.assertEqual(ns['_preset_base_by_color'](idx, '浅黄'), 'yellow_cone')
+        self.assertIsNone(ns['_preset_base_by_color'](idx, ''))
+        self.assertIsNone(ns['_preset_base_by_color'](idx, '透明'))
+
+
 class LiveCaptureSwitchedOffTest(unittest.TestCase):
     def test_pi_display_live_photo_defaults_off(self):
         src = (PI_DIR / 'pi_display.py').read_text(encoding='utf-8')
@@ -149,6 +161,45 @@ class LiveCaptureSwitchedOffTest(unittest.TestCase):
             link._q = None
         self.assertNotIn('thumb_b64', got, '默认不该再往派端推缩略图')
         self.assertEqual(got.get('name'), '圆锥')
+
+
+class DeployAndBootTest(unittest.TestCase):
+    """部署脚本 / 开机自启 / 自检横幅的回归（2026-10-31 派端被旧副本覆盖那次）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (PI_DIR / 'pi_display.py').read_text(encoding='utf-8')
+
+    def test_build_stamp_present(self):
+        self.assertIn("BUILD = '2026-10-31 presets-only'", self.src,
+                      '启动横幅要能一眼看出跑的是哪一版')
+        self.assertIn("print('[display] BUILD=%s", self.src)
+
+    def test_self_check_warns_when_presets_missing(self):
+        self.assertIn('def self_check_presets(', self.src)
+        self.assertIn('没有 presets 目录', self.src, '预设图缺失时必须在日志里喊出来')
+        # main() 启动时就要调用，而不是等第一件货
+        main_body = self.src[self.src.index('def main():'):]
+        self.assertIn('self_check_presets()', main_body)
+
+    def test_autostart_entry_installs_the_screen(self):
+        desk = PI_DIR / 'pi_display_autostart.desktop'
+        self.assertTrue(desk.exists(), '缺开机自启条目')
+        text = desk.read_text(encoding='utf-8')
+        self.assertIn('[Desktop Entry]', text)
+        self.assertIn('start_display.sh', text, '自启要复用 start_display.sh（它会先杀旧进程）')
+        self.assertIn('robot1021/pi', text)
+
+    def test_deploy_bat_verifies_the_upload(self):
+        bat = (PKG / 'deploy_pi_display.bat').read_bytes().decode('utf-8', 'replace')
+        self.assertIn('md5sum', bat, '上传后必须核对远端 md5，否则被旧副本覆盖也报成功')
+        self.assertIn('presets/*.png', bat, '必须核对预设图数量')
+        self.assertIn('~/.config/autostart', bat, '必须顺带装开机自启')
+        self.assertIn(':fail', bat)
+        # 2026-10-31 踩过：LF-only 的 bat 会被 cmd.exe 逐行吞首字符（'nabledelayedexpansion' 之类）
+        if '\n' in bat:
+            self.assertNotIn('\n', bat.replace('\r\n', ''),
+                             'bat 必须 CRLF 行尾，否则 cmd.exe 解析错乱')
 
 
 if __name__ == '__main__':

@@ -280,6 +280,31 @@ _preset_index = None
 _preset_cache = {}
 
 
+BUILD = '2026-10-31 presets-only'
+
+
+def self_check_presets():
+    """启动时自检：预设图在不在、index 有没有内容。
+
+    2026-10-31 踩过的坑：派端被旧副本（38 KB 那版、且没有 presets/ 目录）覆盖回去后，
+    屏幕照样能跑，只是每张卡片退化成「纯色方块」，从日志里看不出异常。
+    所以这里主动打一行醒目的自检结果，方便一眼看出"图没了"。
+    """
+    try:
+        files = [n for n in os.listdir(_PRESET_DIR) if n.lower().endswith('.png')]
+    except Exception as exc:                            # noqa: BLE001
+        print('[preset] !! 没有 presets 目录（%s）：屏幕会显示纯色方块，'
+              '请先部署 presets/。BUILD=%s' % (exc, BUILD))
+        return False
+    idx = _load_preset_index()
+    print('[preset] BUILD=%s dir=%s png=%d index=%d'
+          % (BUILD, _PRESET_DIR, len(files), len(idx)))
+    if not files or not idx:
+        print('[preset] !! 预设图或 index.json 缺失：屏幕会显示纯色方块（请重跑 deploy_pi_display.bat）')
+        return False
+    return True
+
+
 def _load_preset_index():
     """class_key（形如 '长方体|蓝'）→ 预设图片基名。"""
     global _preset_index
@@ -306,6 +331,41 @@ def _shape_family(name):
     if '长方' in name or '正方' in name or '菱' in name or '矩形' in name:
         return 'cuboid'
     return ''
+
+
+def _color_tokens(color):
+    """把 '蓝/浅蓝'、'浅蓝(偏白)' 这类颜色串拆成单字颜色集合。"""
+    cs = (color or '').strip()
+    out = []
+    for ch in '黄蓝红紫白粉绿橙灰黑褐青':
+        if ch in cs:
+            out.append(ch)
+    return out
+
+
+def _preset_base_by_color(idx, color):
+    """只剩颜色可用时（形状识别成 '—' 那种），按颜色挑一张代表图。
+
+    2026-10-31 现场：第 8 件类别名是 `—`（形状没认出来）+ 蓝色，预设查不到 →
+    退回上位机裁的缩略图，屏上就是一块纯蓝色，用户直接报「纯色图片」。
+    这里补一级：形状查不到就按颜色找同色预设（蓝色 → 蓝长方体）。
+    """
+    toks = _color_tokens(color)
+    if not toks:
+        return None
+    # 先精确：索引 key 里的颜色和某个 token 完全相等
+    for tok in toks:
+        for k, v in idx.items():
+            _shape, _sep, c = (k or '').partition('|')
+            if c and c == tok:
+                return v
+    # 再宽松：索引 key 的颜色里包含某个 token（'浅蓝' contains '蓝'）
+    for tok in toks:
+        for k, v in idx.items():
+            _shape, _sep, c = (k or '').partition('|')
+            if c and tok in c:
+                return v
+    return None
 
 
 def _preset_sizes():
@@ -369,6 +429,10 @@ def preset_photo(name, color, size=96):
             if fam in v:
                 base = v
                 break
+    if base is None and color:
+        # 形状没认出来（现场出现过 name='—'）或形状族对不上：按颜色挑一张代表图，
+        # 免得屏上出现"纯色方块"（那其实是上位机裁出来的缩略图）。
+        base = _preset_base_by_color(idx, color)
     if not base:
         return None
     want = max(8, int(size))
@@ -1008,6 +1072,9 @@ def main():
     ap.add_argument('--cam', type=int, default=0, help='实时照片取哪路相机')
     args = ap.parse_args()
     set_theme(args.theme)
+    print('[display] BUILD=%s 启动（port=%d screen=%s live_photo=%s）'
+          % (BUILD, args.port, args.screen, _USE_LIVE_PHOTO))
+    self_check_presets()
     w, h = (int(v) for v in str(args.screen).lower().split('x'))
     try:                                              # Windows: 物理像素
         import ctypes
