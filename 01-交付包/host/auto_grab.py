@@ -442,12 +442,14 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
     move_xy({AXIS_X: 0, AXIS_Y: P1_Y})                   # 7 只动 X/Y 回 P1（高位，并行）
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
-    move({AXIS_Y: P0_Y}, [AXIS_Y])                      # 9 再退 Y 回 P0
     if not drop:
+        # 不落货：按原流程退回 P0 停住（货仍在爪里）
+        move({AXIS_Y: P0_Y}, [AXIS_Y])                  # 9 退 Y 回 P0
         say('已回到 P0，物块还在爪里（按要求不落货）')
         elapsed = time.perf_counter() - t0
         return {'ok': True, 'x': x_pulse, 'y': y_pulse, 'elapsed': elapsed,
                 'target': describe(target), 'dropped': False}
+    say('已在 P1 降到底（P0/P1 下方都是盒子）→ 直接松爪，不再退回 P0')
     if tray_job is not None:
         # 10 等后台转盘到位（最多再等 TRAY_TIMEOUT_S+5 s）；失败/超时都不松爪
         _w0 = time.monotonic()

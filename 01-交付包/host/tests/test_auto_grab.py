@@ -116,10 +116,11 @@ class SequenceTest(unittest.TestCase):
 
         axes = [c[1][0] for c in client.gotos() if c[1][0] != AG.AXIS_TRAY]  # 转盘单独校验
         # 顺序（固定路线硬规矩：穿通道时 Z 必须在底部）：
-        # Y 进通道 → Z 抬顶 → [X/Y 并行 motor_pos] → Z 降底 → Z 抬顶 → [X/Y 并行] → Z 降底 → Y 退 P0
+        # Y 进通道 → Z 抬顶 → [X/Y 并行 motor_pos] → Z 降底 → Z 抬顶 → [X/Y 并行] → Z 降底
+        # 落货点在 P1（P0/P1 下方都是盒子）→ 降到底后直接松爪，不再有多余的 Y 退 P0。
         # 注意：X/Y 现在是 **一步并行**（motor_pos），不再逐个 goto；假 client 不更新编码器，
         # 所以残差保护会判定"读数滞后"而不补走 → gotos 里只剩 Y/Z。
-        self.assertEqual(axes, [5, 1, 1, 1, 1, 5])
+        self.assertEqual(axes, [5, 1, 1, 1, 1])
         _mp = [c[1][0] for c in client.calls
                if c[0] == 'motor_pos' and int(c[1][0]) in (AG.AXIS_X, AG.AXIS_Y)]
         self.assertIn(AG.AXIS_X, _mp)
