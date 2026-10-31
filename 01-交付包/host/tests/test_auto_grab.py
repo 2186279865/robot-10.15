@@ -211,15 +211,18 @@ class TrayEarlyTest(unittest.TestCase):
         self.assertTrue(marks and idx_grab)
         self.assertGreater(marks[0], idx_grab[0], '旧顺序：夹紧之后才转')
 
-    def test_release_does_not_wait_for_the_tray(self):
-        """降到底就立刻松爪：转盘还在转也不能拖住节拍（2026-10-31 用户要求）。"""
+    def test_tray_must_be_in_place_before_dropping(self):
+        """转盘**必须**在爪子到落料位之前到位（用户 2026-10-31 明确）：
+
+        没转完就等（宁可多等），转盘报错则中止本件、不降 Z 不松爪——绝不落错盒。
+        """
         client = FakeClient()
         client.counts = {1: 0, 3: 0, 4: 0, 5: 0}
         gate = threading.Event()
         orig_turn = AG.tray_turn
 
         def _blocking_turn(*_a, **_k):
-            gate.wait(3.0)          # 模拟"转盘还没转完"
+            gate.wait(2.0)          # 模拟"转盘比抓取慢，还没转完"
             return {'ok': True}
 
         AG.tray_turn = _blocking_turn
@@ -235,11 +238,30 @@ class TrayEarlyTest(unittest.TestCase):
             gate.set()
             AG.tray_turn = orig_turn
         self.assertTrue(res['ok'])
-        self.assertLess(dt, 2.0, '松爪不该等转盘（后台还在转时必须照常松爪）')
-        self.assertTrue([t for t in logs if '不等它' in t or '还在转' in t],
-                        '应该留下「转盘还在转但先松爪」的日志')
-        self.assertIn(('gripper', ('open',)), [(c[0], c[1]) for c in client.calls],
-                      '降到底后必须已经松爪')
+        self.assertGreaterEqual(dt, 1.0, '转盘没到位就必须等它（不能提前降 Z 松爪）')
+        self.assertTrue([t for t in logs if '还没到位 → 等它' in t], logs)
+        self.assertIn(('gripper', ('open',)), [(c[0], c[1]) for c in client.calls])
+
+    def test_tray_error_aborts_before_dropping(self):
+        """转盘报错 → 不降 Z、不松爪，整件抛 GrabError（防落错盒）。"""
+        client = FakeClient()
+        client.counts = {1: 0, 3: 0, 4: 0, 5: 0}
+        orig_turn = AG.tray_turn
+
+        def _bad_turn(*_a, **_k):
+            raise RuntimeError('motor_pos,3 超时')
+
+        AG.tray_turn = _bad_turn
+        try:
+            with self.assertRaises(AG.GrabError):
+                AG.run_once(client, {'center_tray': [0.5, 0.5]}, log=lambda _t: None,
+                            wait=lambda rid, ms: client.done_of(rid), calib=_calib(),
+                            pos_source=lambda: ({}, {}, dict(client.counts)),
+                            tray_deg=60.0, tray_early=True, state={})
+        finally:
+            AG.tray_turn = orig_turn
+        self.assertNotIn(('gripper', ('open',)), [(c[0], c[1]) for c in client.calls],
+                         '转盘没转好就绝不能松爪')
 
 
 class ReleasePacingTest(unittest.TestCase):
@@ -326,13 +348,12 @@ class RunManyEventTest(unittest.TestCase):
 
 
 class PrefetchTest(unittest.TestCase):
-    """一键启动要「点完就动」：识别期间先把「①Y 进通道」走掉。
+    """一键启动要「点完就动」：识别期间先把「①Y 进通道 → ②Z 抬顶」走掉。
 
+    用户 2026-10-31 明确的顺序：识别期间「先动 y，然后动 z，然后等待识别结果，
+    再移动 x、y 轴」；每件松爪后也是「立刻拍照识别，同时 z 抬顶」——就是这条线程。
     预走是安全敏感的（Z 不在底时绝不能动 Y 进通道），所以两个方向都要测：
-    在底 → 只走 Y（Z 抬顶留给识别回来后的正式流程）；不在底 / 没读数 → 只打一行
-    "跳过"，按常规顺序走。
-    2026-10-31：Z 抬顶**不放进预走**（= 2.29 版行为）——用户明确说提前抬 Z 那版变差，
-    且抓空那件会白抬 1.6 s、回 P0 再降 1.6 s。
+    在底 → 先 Y 后 Z 都走掉；不在底 / 没读数 → 只打一行 "跳过"，按常规顺序走。
     """
 
     def setUp(self):
@@ -364,31 +385,32 @@ class PrefetchTest(unittest.TestCase):
         pre = [t for t in logs if t.startswith('[预走]')]
         self.assertTrue(any('[预走] 完成' in t for t in pre), pre)
         self.assertTrue(any('①Y 进通道 开始' in t for t in pre), pre)
-        self.assertIn('已在通道末端（Z 仍在底）', ''.join(pre))
-        # 预走只动 Y：Z 抬顶必须等识别回来（正式流程 ②）
+        self.assertIn('已在通道末端抬到顶', ''.join(pre))
         full = '\n'.join(logs)
         self.assertIn('识别完成：', full)
-        self.assertLess(full.index('①Y 进通道 开始'), full.index('识别完成：'), full)
+        # 顺序：先 Y、再 Z，而且都在识别完成之前（识别期间机械臂自己在走）
+        iy = full.index('①Y 进通道 开始')
+        iz = full.index('②Z 抬顶 开始')
+        iend = full.index('识别完成：')
+        self.assertLess(iy, iz, full)
+        self.assertLess(iz, iend, full)
 
-    def test_prefetch_moves_y_only_before_recognition(self):
-        """预走只走 Y（相对 -13144 脉冲进通道）；Z 抬顶在识别完成之后才动。"""
+    def test_prefetch_moves_y_then_z_before_recognition(self):
+        """预走 = 先 Y（-13144 进通道）再 Z（-152000 抬顶），都在识别回来之前走完。"""
         logs = []
         client, res = self._run({}, logs)
         self.assertEqual(res['done'], 1)
         gotos = client.gotos()
         y_gotos = [c for c in gotos if int(c[1][0]) == AG.AXIS_Y]
-        self.assertTrue(y_gotos)
-        self.assertEqual(int(y_gotos[0][1][1]), AG.P1_Y)      # 从 0 往通道里走
         z_gotos = [c for c in gotos if int(c[1][0]) == AG.AXIS_Z]
-        self.assertTrue(z_gotos)
+        self.assertTrue(y_gotos and z_gotos)
+        self.assertEqual(int(y_gotos[0][1][1]), AG.P1_Y)      # 从 0 往通道里走
         self.assertEqual(int(z_gotos[0][1][1]), AG.Z_UP)      # 抬到顶（不是减高度）
-        # 第一个 Z 动作在「识别完成」之后（说明不是预走抬的）
-        z_line = None
-        for t in logs:
-            if 'Z 目标' in t:
-                z_line = t
-                break
-        self.assertIsNotNone(z_line)
+        # Y 必须排在 Z 前面（穿通道时 Z 要在底）
+        calls = client.calls
+        iy = [i for i, c in enumerate(calls) if c[0] == 'goto' and int(c[1][0]) == AG.AXIS_Y][0]
+        iz = [i for i, c in enumerate(calls) if c[0] == 'goto' and int(c[1][0]) == AG.AXIS_Z][0]
+        self.assertLess(iy, iz, calls)
 
     def test_skipped_when_z_not_at_bottom(self):
         logs = []

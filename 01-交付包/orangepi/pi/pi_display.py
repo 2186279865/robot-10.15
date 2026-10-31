@@ -707,6 +707,24 @@ class Screen:
             self.online = False
             self._dirty = True
             return
+        if kind == 'reset':
+            # 现场要求（2026-10-31）：每次点「一键启动」都把整页刷新——6 个盒卡片清空、
+            # 计数/计时归零、回「等待第一件」。以前只发 state，上一批的卡片会一直留着。
+            for _i in self.boxes:
+                self.boxes[_i] = {'label': '', 'color': '', 'items': []}
+            self.state = 'idle'
+            self.elapsed = 0.0
+            self.finished = False
+            self.total_s = 0.0
+            self.done = 0
+            self.total = int(msg.get('total') or 0)
+            self.alerts = []
+            self.last_event = str(msg.get('last_event') or '等待第一件…')[:80]
+            self.current_box = 0
+            self.current_label = ''
+            self._tick_anchor = None
+            self._dirty = True
+            return
         if kind == 'state':
             self.state = str(msg.get('state') or self.state)
             # 计时口径：只有 host 明确 running=True（已开始抓取）才走表；

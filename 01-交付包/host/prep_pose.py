@@ -737,29 +737,36 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             pr, reason = _once()
         return pr, reason
 
-    plans, bad, t_est = [], [], 0.0
-    try:
-        # 2) 两轴同时下发
-        for axis, tgt in targets.items():
-            now_p = int(round(cur[axis] / COUNTS_PER_PULSE))
-            delta = tgt - now_p
+    def _send_round(send_map):
+        """把 {axis: 绝对目标脉冲} **并行**下发（每个轴一条 motor_pos，同一瞬间发出）。
+
+        返回 (plans, bad)：plans=[(axis, 绝对目标, 相对增量)]（已下发的轴）、bad=被拒/缺读数的轴。
+        收口方式：等满估算时长（几乎不留余量）再要求连续两次读数几乎不变。
+        """
+        _cur = read_counts()
+        plans_g, bad_g, t_est_g = [], [], 0.0
+        for axis, tgt in send_map.items():
+            if axis not in _cur:
+                bad_g.append(axis)
+                continue
+            now_p = int(round(_cur[axis] / COUNTS_PER_PULSE))
+            delta = int(tgt) - now_p
             if delta == 0:
                 continue
             pr, reason = _send_pos(axis, delta, rpm_of(axis))
             if reason:
                 say('%s 并行：被拒绝（reason=%s, 应答=%s）'
                     % (AXIS_LABEL.get(axis, axis), reason, pr))
-                bad.append(axis)
+                bad_g.append(axis)
                 continue
             eff_rpm = min(float(rpm_of(axis)), 1240.0)   # 驱动器实际封顶≈1240 rpm，按指令值估会等不够
             sec = abs(delta) / max(1.0, eff_rpm * 3200.0 / 60.0)
-            t_est = max(t_est, sec)
-            plans.append((axis, tgt, delta))
+            t_est_g = max(t_est_g, sec)
+            plans_g.append((axis, int(tgt), delta))
             say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
-        # 3) 等停稳：等满估算时长（几乎不加余量），再要求 **连续 2 次（间隔 50 ms）**读数几乎不变
-        if plans:
-            t_wait = min(9.0, t_est * 1.02 + 0.10)
+        if plans_g:
+            t_wait = min(9.0, t_est_g * 1.02 + 0.10)
             say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
             t_end = time.monotonic() + t_wait
             while time.monotonic() < t_end:
@@ -771,7 +778,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 time.sleep(0.05)
                 now = read_counts()
                 if now and prev and all(
-                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans):
+                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans_g):
                     stable += 1
                     if stable >= 2:
                         prev = now
@@ -779,58 +786,80 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 else:
                     stable = 0
                 prev = now or prev
+        return plans_g, bad_g
 
-        # 4) 残差 > tol 的轴顺序补一次
-        # 先用"连续两次一致"的新鲜读数收口：运动中/刚停时的旧帧会把残差放大成上万脉冲，
-        # 那正是"偏离目标 +11394 脉冲"误报的来源（2026-10-31 现场确认爪子已在位）。
+    def _residual_fixes(plans_in):
+        """算残差，返回还要收口的 {axis: (绝对目标, 残差或 None)}。
+
+        先用"连续两次读数一致"的新鲜读数收口：运动中/刚停时的旧帧会把残差放大成上万脉冲，
+        那正是"偏离目标 +11394 脉冲"误报的来源（2026-10-31 现场确认爪子已在位）。
+        容差内 / 读数滞后 / 超上限 / 超可解释范围的处理都在这里，**绝不在这里单轴补走**。
+        """
         fin = fresh_counts() or read_counts()
-        for axis, tgt, delta in plans:
+        out = {}
+        for axis, tgt, delta in plans_in:
             c = fin.get(axis)
             if c is None:
                 continue
-            now_p = int(round(c / COUNTS_PER_PULSE))
-            miss = tgt - now_p
-            # 读数滞后保护：只有"残差≈整段位移"（0.6~1.15 倍）才判遥测没刷新；
-            # 残差远大于位移 = 真的没到位，必须补走。
+            miss = tgt - int(round(c / COUNTS_PER_PULSE))
             d = abs(int(delta))
             if d >= 200 and (0.60 * d) <= abs(miss) <= (1.15 * d):
                 say('%s 并行：读数疑似滞后（残差 %+d ≈ 位移 %+d），跳过补走'
                     % (AXIS_LABEL.get(axis, axis), miss, delta))
                 continue
-            if abs(miss) > max(XY_MISS_TOL_PULSES, int(tol_pulses)):
-                # 补走/判定前用新鲜读数重算残差：旧帧偏 130 ms 就是 ~1.1 万脉冲的假残差。
-                fresh_c = fresh_axis(axis)
-                if fresh_c is not None:
-                    new_miss = tgt - int(round(fresh_c / COUNTS_PER_PULSE))
-                    if new_miss != miss:
-                        say('%s 并行残差复核：%+d → %+d 脉冲（用新鲜读数）'
-                            % (AXIS_LABEL.get(axis, axis), miss, new_miss))
-                        miss = new_miss
-                # 复核后可能已经落回容差内（07:39 就是这样：-49332 → 0），
-                # 这时直接跳过 —— 绝不能拿 0 脉冲去发 goto（固件回 E02 reason=pulses）。
-                if abs(miss) <= max(XY_MISS_TOL_PULSES, int(tol_pulses)):
-                    say('%s 并行残差复核后已在容差内（%+d 脉冲），不补走'
-                        % (AXIS_LABEL.get(axis, axis), miss))
-                    continue
-                if abs(miss) > XY_MISS_ABORT_PULSES:
-                    raise RuntimeError(
-                        '%s 并行后偏离目标 %+d 脉冲（>%d），超出回读滞后可解释范围，'
-                        '不做补走，请人工检查'
-                        % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_ABORT_PULSES))
-                if abs(miss) > XY_MISS_SKIP_PULSES:
-                    # 现场要求（2026-10-31）：爪子已到位时不要停，只告警并继续本件。
-                    say('%s 并行后偏离目标 %+d 脉冲（>%d）：判定为回读滞后/已在位，'
-                        '不做补走，继续本件（不停机）'
-                        % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_SKIP_PULSES))
-                    continue
-                say('%s 并行残差 %+d 脉冲，顺序补一次（相对量，等回执）' % (AXIS_LABEL.get(axis, axis), miss))
-                if not _goto_wait(axis, miss, rpm_of(axis), tgt):
-                    raise RuntimeError('%s 补走未完成（锁存/超时），中止本件' % AXIS_LABEL.get(axis, axis))
-        for axis in bad:
-            rel = targets[axis] - int(round((cur.get(axis) or 0) / COUNTS_PER_PULSE))
-            if not _goto_wait(axis, rel, rpm_of(axis), targets[axis]):
-                raise RuntimeError('%s 并行被拒后补走失败' % AXIS_LABEL.get(axis, axis))
+            if abs(miss) <= max(XY_MISS_TOL_PULSES, int(tol_pulses)):
+                continue
+            fresh_c = fresh_axis(axis)
+            if fresh_c is not None:
+                new_miss = tgt - int(round(fresh_c / COUNTS_PER_PULSE))
+                if new_miss != miss:
+                    say('%s 并行残差复核：%+d → %+d 脉冲（用新鲜读数）'
+                        % (AXIS_LABEL.get(axis, axis), miss, new_miss))
+                    miss = new_miss
+            # 复核后可能已经落回容差内（07:39 就是这样：-49332 → 0）
+            if abs(miss) <= max(XY_MISS_TOL_PULSES, int(tol_pulses)):
+                say('%s 并行残差复核后已在容差内（%+d 脉冲），不补走'
+                    % (AXIS_LABEL.get(axis, axis), miss))
+                continue
+            if abs(miss) > XY_MISS_ABORT_PULSES:
+                raise RuntimeError(
+                    '%s 并行后偏离目标 %+d 脉冲（>%d），超出回读滞后可解释范围，'
+                    '不做补走，请人工检查'
+                    % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_ABORT_PULSES))
+            if abs(miss) > XY_MISS_SKIP_PULSES:
+                # 现场要求（2026-10-31）：爪子已到位时不要停，只告警并继续本件。
+                say('%s 并行后偏离目标 %+d 脉冲（>%d）：判定为回读滞后/已在位，'
+                    '不做补走，继续本件（不停机）'
+                    % (AXIS_LABEL.get(axis, axis), miss, XY_MISS_SKIP_PULSES))
+                continue
+            out[axis] = (tgt, miss)
+        return out
 
+    try:
+        # 2) 两轴同时下发 + 判停稳
+        plans, bad = _send_round(targets)
+        # 3) 残差收口：**整对并行重发**（现场硬要求：X/Y 必须一起走，绝不单轴补走）
+        fixes = _residual_fixes(plans)
+        for axis in bad:                  # 被拒的轴也放进这一轮，一起并行重发
+            fixes.setdefault(axis, (targets[axis], None))
+        for _round in range(2):
+            if not fixes:
+                break
+            desc = ', '.join(
+                ('%s %+d' % (AXIS_LABEL.get(a, a), m)) if m is not None
+                else ('%s 被拒重发' % AXIS_LABEL.get(a, a))
+                for a, (_t, m) in fixes.items())
+            say('X/Y 并行收口（第 %d 轮，%d 轴一起重发）：%s'
+                % (_round + 1, len(fixes), desc))
+            send_map = {a: t for a, (t, _m) in fixes.items()}
+            plans2, bad2 = _send_round(send_map)
+            fixes = _residual_fixes(plans2)
+            for axis in bad2:
+                fixes.setdefault(axis, (send_map[axis], None))
+        if fixes:
+            say('X/Y 并行收口后仍有偏差（%s）：按现场要求继续本件，不再单轴补走'
+                % ', '.join('%s %+d' % (AXIS_LABEL.get(a, a), (m if m is not None else 0))
+                            for a, (_t, m) in fixes.items()))
         return [{'axis': a, 'pulses': targets[a], 'ok': True, 'code': '', 'text': '', 'pairs': {}}
                 for a in sorted(targets)]
     finally:

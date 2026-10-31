@@ -148,6 +148,19 @@ class DisplayLink:
             msg['last_event'] = str(last_event)[:80]
         self.push(**msg)
 
+    def reset(self, total=None, last_event=None):
+        """让派端屏整页复位：6 个盒卡片清空、计数/计时归零、回「等待第一件」。
+
+        用户 2026-10-31 明确要求：「每次点击一键启动都刷新一下派端页面」。
+        以前只发 state，屏幕会把上一批的卡片和计时留着，看起来像是没启动过。
+        """
+        msg = {'kind': 'reset'}
+        if total is not None:
+            msg['total'] = int(total)
+        if last_event:
+            msg['last_event'] = str(last_event)[:80]
+        self.push(**msg)
+
     def alarm(self, text):
         self.push(kind='alarm', message=str(text)[:80])
 

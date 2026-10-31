@@ -47,7 +47,7 @@ TRAY_DEG = 60.0
 # 不再等舵机合拢 —— 固件 `host_cmd_gripper` 调完 `control_gripper_apply`
 # 立刻回 ok（`host_protocol_inline.h:2112-2185`），舵机自己在 200 ms 内合拢，
 # Z 抬升时爪子已经夹住，两者本来就并行。
-SETTLE_GRAB_MS = 0         # 夹紧后不等（原 180）
+SETTLE_GRAB_MS = 200       # 夹紧后停 200 ms 再抬 Z（用户 2026-10-31 明确：这里稍微等 0.2 s）
 # 「Z 降到底 → 立刻松爪」：不再等转盘、也不再等落盒，Z 就停在底部，
 # 下一件的 ①Y 进通道本来也要求 Z 在底。
 #
@@ -621,7 +621,28 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
 
     move_xy({AXIS_X: 0, AXIS_Y: P1_Y})                   # 7 只动 X/Y 回 P1（高位，并行）
-    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 先降到底
+    # 7.5 转盘**必须**在爪子到落料位之前到位（用户 2026-10-31 明确：「转盘务必在爪子
+    #     到达之前到位」）。转盘是从本件一开始就转的，正常到这里已经好了；
+    #     真没转完就在这里等（宁可多等半秒，也不落错盒）。转盘报错则中止本件、不松爪。
+    if tray_job is not None:
+        if tray_box.get('err') is not None:
+            raise GrabError('转盘没转到位：%s（不降 Z、不松爪，避免落错盒）' % tray_box['err'])
+        if tray_job.is_alive():
+            say('转盘 %+.0f° 还没到位 → 等它（不能带着没转好的转盘降 Z 松爪）' % tray_deg)
+            tray_job.join(timeout=TRAY_JOIN_TIMEOUT_S)
+            if tray_job.is_alive():
+                raise GrabError('转盘 %+.0f° 超过 %.0f s 还没转到位（不降 Z、不松爪）'
+                                % (tray_deg, TRAY_JOIN_TIMEOUT_S))
+            if tray_box.get('err') is not None:
+                raise GrabError('转盘没转到位：%s（不降 Z、不松爪）' % tray_box['err'])
+            say('转盘已到位（%+.0f°），开始降 Z' % tray_deg)
+        else:
+            say('转盘已到位（%+.0f°）→ 降 Z' % tray_deg)
+    elif abs(tray_deg) >= 1.0:
+        # 串行转（单件抓 / 未开 tray_async 时走这里）
+        tray_turn(client, tray_deg, say,
+                  counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
+    move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 8 在 P1 降到底（转盘已确认到位）
     if not drop:
         # 不落货：按原流程退回 P0 停住（货仍在爪里）
         move({AXIS_Y: P0_Y}, [AXIS_Y])                  # 9 退 Y 回 P0
@@ -633,25 +654,9 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 'target': describe(target), 'dropped': False,
                 'tray_applied': tray_applied['deg']}
     say('已在 P1 降到底（P0/P1 下方都是盒子）→ 直接松爪，不再退回 P0')
-    if tray_job is not None:
-        # 10 转盘还在后台转：**不再等它**（原逻辑 join 8 s，现场白等 1.5 s，
-        #    抓空那次还因为旧帧判错 Z 卡很久）。用户要求「降到底就立刻松爪」：
-        #    转盘是从本件一开始就在转的（tray_early），到这里基本已经到位；
-        #    真没到位也只记一条告警照常松爪 —— 落错盒的风险由日志暴露，不再阻塞节拍。
-        #    只有转盘线程明确报错（tray_box['err']）才中止本件，避免"以为转了其实没转"。
-        if tray_box.get('err') is not None:
-            raise GrabError('转盘没转到位：%s' % tray_box['err'])
-        if tray_job.is_alive():
-            say('转盘 %+.0f° 还在转（不等它，先松爪；下一件开始前会转完）' % tray_deg)
-        else:
-            say('转盘已到位（%+.0f°），没等 → 松爪' % tray_deg)
-    elif abs(tray_deg) >= 1.0:
-        # 10 串行转（单件抓/未开 tray_async 时走这里）
-        tray_turn(client, tray_deg, say,
-                  counts_get=lambda: (pos()[2] or {}).get(AXIS_TRAY))
     # 11 松爪 → 回预备：只给舵机「张嘴」留 SETTLE_OPEN_MS，不再等落盒/回位；
-    #    回预备的转动在下一件「②Z 抬顶」期间自己完成。
-    say('松爪 180°（张嘴 %.0f ms）→ 回预备 %d°（不等它转完）'
+    #    回预备的角度在下一件「Z 抬顶」期间自己转完（用户 2026-10-31：松爪后上升期间回预备角）。
+    say('松爪 180°（张嘴 %.0f ms）→ 回预备 %d°（Z 上升期间转完，不等）'
         % (SETTLE_OPEN_MS, int(P.GRIPPER_READY_DEG)))
     client.send('gripper', 'open', timeout_ms=2000)     # 11 松爪
     time.sleep(SETTLE_OPEN_MS / 1000.0)                 # 必须真的张到 180°，否则物块不掉
@@ -926,14 +931,14 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                 and abs(vals[1] - vals[0]) <= 200.0)
 
     def _prefetch_channel():
-        """把固定路线的**第一步「①Y 进通道」**放到后台先走（只走这一步）。
+        """把固定路线的**前两步**挂到后台先走：①Y 进通道 → ②Z 抬顶。
 
-        识别要 2~6 s（慢时十几秒），这段时间机械臂本来只能干等；
-        「Y 进通道」与识别结果无关（任何物块都得先穿通道），可以并行。
-        **不提前抬 Z**（= 2.29 版行为，现场验收过的那版）：
-          * 现场要求 Z 必须抬到位才允许横移，抬顶只能等识别回来、拿到 X/Y 目标后再做；
-          * 抓空那一件若提前抬顶，白抬 1.6 s，回 P0 还要再降 1.6 s（用户明确说这条变差了）。
-        Z 抬顶留在识别回来后的正式流程里（run_once ②）。
+        用户 2026-10-31 明确的顺序：识别期间「先动 y，然后动 z，然后等待识别结果，
+        再移动 x、y 轴」。识别要 2~6 s（慢时十几秒），这段时间机械臂本来只能干等；
+        Y 进通道/Z 抬顶都与识别结果无关，可以并行跑掉，识别一回来就能直接走 X/Y。
+        必须**先 Y 后 Z**：穿通道时 Z 要在底部（通道净高不够），抬顶只能发生在通道末端。
+        连续抓时上一件松爪后 Z 本来就在底部，这里正好接着抬——「松开爪子之后立刻
+        拍照识别，同时 Z 抬顶」就是这条线程。
         返回后台线程（可能被 join），跳过时返回 None。
         """
         if not prefetch or pos_source is None:
@@ -946,34 +951,36 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
         def work():
             first = {'v': True}
-            tg, order, what = {AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'
-            if stop_flag is not None and stop_flag():
-                log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
-                return
-            try:
-                _s, _k, cnt = pos_source() if pos_source else (None, None, None)
-            except Exception:                      # noqa: BLE001
-                _s, _k, cnt = None, None, None
-            try:
-                log('[预走] %s 开始' % what)
-                res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
-                                         acc=_ACC_DEFAULT,
-                                         log=lambda t: log('[预走] ' + t),
-                                         wait=wait, soft=_s, known=_k, counts=cnt,
-                                         prep=first['v'])
-                first['v'] = False
-                bad = [r for r in res if not r.get('ok')]
-                if bad:
-                    log('[预走] %s 没走到位（%s），交给正式流程重走'
-                        % (what, bad[0].get('code') or bad[0].get('text') or ''))
+            steps = (({AXIS_Y: P1_Y}, [AXIS_Y], '①Y 进通道'),
+                     ({AXIS_Z: Z_UP}, [AXIS_Z], '②Z 抬顶'))
+            for tg, order, what in steps:
+                if stop_flag is not None and stop_flag():
+                    log('[连续抓] 预走收到停止信号，中止（正式流程不再执行）')
                     return
-            except Exception as exc:               # noqa: BLE001
-                log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
-                return
-            log('[预走] 完成：已在通道末端（Z 仍在底），识别一回来就抬顶走 X/Y')
+                try:
+                    _s, _k, cnt = pos_source() if pos_source else (None, None, None)
+                except Exception:                  # noqa: BLE001
+                    _s, _k, cnt = None, None, None
+                try:
+                    log('[预走] %s 开始' % what)
+                    res = prep_pose.move_abs(client, tg, order=order, rpm=RPM,
+                                             acc=_ACC_DEFAULT,
+                                             log=lambda t: log('[预走] ' + t),
+                                             wait=wait, soft=_s, known=_k, counts=cnt,
+                                             prep=first['v'])
+                    first['v'] = False
+                    bad = [r for r in res if not r.get('ok')]
+                    if bad:
+                        log('[预走] %s 没走到位（%s），交给正式流程重走'
+                            % (what, bad[0].get('code') or bad[0].get('text') or ''))
+                        return
+                except Exception as exc:           # noqa: BLE001
+                    log('[预走] %s 失败：%s（不影响正式流程，run_once 会自己走）' % (what, exc))
+                    return
+            log('[预走] 完成：已在通道末端抬到顶，识别一回来就直接走 X/Y')
 
         th = threading.Thread(target=work, name='grab-prefetch', daemon=True)
-        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道」（Z 保持到底）')
+        log('[连续抓] 预走开始：识别同时在跑，机械臂先「①Y 进通道 → ②Z 抬顶」')
         th.start()
         return th
 
@@ -986,6 +993,13 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
     cnt_txt = '∞' if count_i <= 0 else str(count_i)   # count<=0 = 抓到托盘空为止
     total_n = int(total or (count_i if count_i > 0 else 0))
     pending: List[dict] = []
+
+    # 开批先刷新派端屏：用户 2026-10-31 明确「每次点击一键启动都刷新一下派端页面」，
+    # 否则上一批的盒卡片/计时还留在屏上，看着像没启动过。
+    if display is not None:
+        say_display(getattr(display, 'reset', None), total=total_n,
+                    last_event='开始连续抓 %s 件' % cnt_txt)
+        log('[连续抓] 派端屏已刷新（6 个盒卡片清空、计数归零、回「等待第一件」）')
 
     # 开批先清分盒登记：旧登记是掉电保留的长期文件，不清就会白占盒子 →
     # 新一批第 7 件直接「分盒失败」停机（现场 2026-10-31 踩过两次）。

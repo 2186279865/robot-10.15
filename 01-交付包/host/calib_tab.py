@@ -806,6 +806,11 @@ class CalibTab(ttk.Frame):
                 prefetch=True,
                 # 每次开批先清零「类别→盒号」：旧登记白占盒子会让第 7 件「分盒失败」停机。
                 reset_boxes=True,
+                # 现场固定时序（用户 2026-10-31）：「松开爪子之后立刻拍照识别，
+                # 同时 z 抬顶」——每件都要重新拍一张，所以必须 recognize_each=True。
+                # 识别期间预走线程会先走 ①Y（已在通道里就跳过）→ ②Z 抬顶，
+                # 识别一回来就只剩「X/Y 一起到物块上方」这一步。
+                recognize_each=True,
             )
             self.after(0, self.say, '连续抓结束：成功 %s 件、失败 %s 件，用时 %.1f s'
                        % (res.get('done'), res.get('failed'), res.get('elapsed') or 0))

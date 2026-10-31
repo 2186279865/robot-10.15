@@ -297,14 +297,18 @@ class ParallelResidualTests(unittest.TestCase):
         self.assertTrue(any('+11394' in t for t in logs), logs)
         self.assertTrue(any('继续本件' in t for t in logs), logs)
 
-    def test_moderate_residual_still_corrected(self):
-        """60~3000 的残差仍按原逻辑顺序补一次（相对量）。"""
+    def test_moderate_residual_is_re_sent_in_parallel(self):
+        """60~3000 的残差**再并行下发一次**（motor_pos），绝不退化成单轴顺序补走。
+
+        现场硬要求（2026-10-31）：X/Y 必须一起走，任何环节都不许「先 X 后 Y / 先 Y 后 X」。
+        """
         client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 500})
-        res, _logs = self._run(client, {PP.AXIS_Y: -25000})
+        res, logs = self._run(client, {PP.AXIS_Y: -25000})
         self.assertTrue(all(r['ok'] for r in res))
-        self.assertEqual(client.gotos(), [('goto', (PP.AXIS_Y, 500))])
-        self.assertAlmostEqual(client.counts[PP.AXIS_Y],
-                               -25000 * PP.COUNTS_PER_PULSE, places=3)
+        self.assertEqual(client.gotos(), [], '不许用 motor_goto 单轴补走')
+        y_pos = [c for c in client.calls if c[0] == 'motor_pos' and int(c[1][0]) == PP.AXIS_Y]
+        self.assertEqual(len(y_pos), 2, '第一轮 + 残差收口一轮，都是 motor_pos')
+        self.assertTrue(any('X/Y 并行收口' in t for t in logs), logs)
 
     def test_absurd_residual_still_aborts(self):
         """>40000 脉冲（≈400 mm）超出回读滞后可解释范围 → 仍中止等人工，防真撞机。"""
@@ -348,7 +352,9 @@ class ParallelResidualTests(unittest.TestCase):
         self.assertTrue(all(r['ok'] for r in res))
         self.assertEqual(client.gotos(), [],
                          '0 脉冲的补走绝不能发出去（固件回 E02 reason=pulses）')
-        self.assertTrue(any('容差内' in t or '不补走' in t for t in logs), logs)
+        # 新鲜读数一算残差是 0 → 直接收口，连第二轮都不发
+        self.assertFalse(any('X/Y 并行收口' in t for t in logs), logs)
+        self.assertFalse(any('重发' in t for t in logs), logs)
 
 
 class GotoTolTests(unittest.TestCase):
