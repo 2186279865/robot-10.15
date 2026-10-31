@@ -737,20 +737,33 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             pr, reason = _once()
         return pr, reason
 
-    def _send_round(send_map):
+    def _send_round(send_map, rel_map=None):
         """把 {axis: 绝对目标脉冲} **并行**下发（每个轴一条 motor_pos，同一瞬间发出）。
+
+        rel_map={axis: 相对脉冲} 的轴按**相对位移直发**：收口轮已经用新鲜读数算好了残差，
+        直接把残差当位移发，不再"绝对目标 − 基准"二次换算。
+
+        2026-10-31 16:54:17 现场（X 轴"莫名其妙不对"的真凶）：残差用 `fresh_counts()`
+        算出 -472，但这里用 `read_counts()` 读到 2.8 s 前的旧帧（+8668）重算成 -8668，
+        X 多走 8196 脉冲被顶到 0 点左侧；下一件又按被污染的位置算 +15114 顶回来。
+        所以基准必须和残差用同一份新鲜读数（`fresh_counts() or read_counts()`）。
 
         返回 (plans, bad)：plans=[(axis, 绝对目标, 相对增量)]（已下发的轴）、bad=被拒/缺读数的轴。
         收口方式：等满估算时长（几乎不留余量）再要求连续两次读数几乎不变。
         """
-        _cur = read_counts()
+        rel_map = rel_map or {}
+        abs_axes = [a for a in send_map if a not in rel_map]
+        _cur = (fresh_counts() or read_counts()) if abs_axes else {}
         plans_g, bad_g, t_est_g = [], [], 0.0
         for axis, tgt in send_map.items():
-            if axis not in _cur:
+            if axis in rel_map:
+                delta = int(rel_map[axis])
+            elif axis not in _cur:
                 bad_g.append(axis)
                 continue
-            now_p = int(round(_cur[axis] / COUNTS_PER_PULSE))
-            delta = int(tgt) - now_p
+            else:
+                now_p = int(round(_cur[axis] / COUNTS_PER_PULSE))
+                delta = int(tgt) - now_p
             if delta == 0:
                 continue
             pr, reason = _send_pos(axis, delta, rpm_of(axis))
@@ -763,7 +776,12 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             sec = abs(delta) / max(1.0, eff_rpm * 3200.0 / 60.0)
             t_est_g = max(t_est_g, sec)
             plans_g.append((axis, int(tgt), delta))
-            say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
+            if axis in rel_map:
+                say('%s 并行收口：%+d 脉冲直发（残差量，%d RPM）'
+                    % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
+            else:
+                say('%s 并行：%+d 脉冲（%d RPM）'
+                    % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
         if plans_g:
             t_wait = min(9.0, t_est_g * 1.02 + 0.10)
@@ -852,7 +870,9 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             say('X/Y 并行收口（第 %d 轮，%d 轴一起重发）：%s'
                 % (_round + 1, len(fixes), desc))
             send_map = {a: t for a, (t, _m) in fixes.items()}
-            plans2, bad2 = _send_round(send_map)
+            # 残差量直发（不再用"绝对目标 − 基准"）：基准只要过期一帧就会多走一整段
+            rel_map = {a: int(m) for a, (_t, m) in fixes.items() if m is not None}
+            plans2, bad2 = _send_round(send_map, rel_map)
             fixes = _residual_fixes(plans2)
             for axis in bad2:
                 fixes.setdefault(axis, (send_map[axis], None))

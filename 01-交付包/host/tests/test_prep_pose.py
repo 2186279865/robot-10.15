@@ -357,6 +357,99 @@ class ParallelResidualTests(unittest.TestCase):
         self.assertFalse(any('重发' in t for t in logs), logs)
 
 
+AXIS_X = 4     # X 轴号（prep_pose 里没有 AXIS_X 常量，只有 AXIS_Z/AXIS_Y）
+
+
+class _ScriptedClient:
+    """读数按脚本逐次给（模拟"旧帧 → 新帧"的跳变）；motor_pos 只记录、不改脚本。"""
+
+    def __init__(self, script_pulses):
+        self.script = [float(v) for v in script_pulses]
+        self.i = 0
+        self.calls = []
+        self._n = 0
+
+    def counts(self):
+        v = self.script[min(self.i, len(self.script) - 1)]
+        self.i += 1
+        return {AXIS_X: v * PP.COUNTS_PER_PULSE, PP.AXIS_Y: 0.0}
+
+    def send(self, cmd, *args, **kw):
+        self._n += 1
+        self.calls.append((cmd, args))
+        return self._n
+
+    def wait_reply(self, req_id, timeout_ms=8000):
+        cmd = self.calls[req_id - 1][0]
+        if cmd == 'param_get':
+            return {'kind': 'reply', 'code': '', 'pairs': {'value': '3200'}}
+        return {'kind': 'reply', 'code': '', 'pairs': {'ok': '1'}}
+
+    def motor_pos(self, axis=AXIS_X):
+        return [(int(c[1][1]), int(c[1][4])) for c in self.calls
+                if c[0] == 'motor_pos' and int(c[1][0]) == axis]
+
+
+class StaleBasisTests(unittest.TestCase):
+    """收口轮的基准必须和残差用同一份新鲜读数（2026-10-31 16:54 X 轴"莫名其妙不对"）。"""
+
+    def _run(self, client, targets):
+        # _ScriptedClient.counts 是方法；_MotionClient.counts 是 dict —— 两种都支持
+        raw = getattr(client, "counts", None)
+        fn = raw if callable(raw) else (lambda: dict(raw))
+        logs = []
+        old = PP.time
+        PP.time = _FastClock()
+        try:
+            res = PP.move_xy_fast(client, targets, rpm=1600, log=logs.append, counts_fn=fn)
+        finally:
+            PP.time = old
+        return res, logs
+
+    def test_joint_residual_sends_only_the_missing_pulses(self):
+        """现场原样：X 目标 0、命令 -8668 走完只剩 472；收口必须发 -472，不许再发 -8668。
+
+        旧代码：残差用 fresh_counts() 算出 -472，收口却用 read_counts()（2.8 s 前的旧帧
+        +8668）重算成 -8668 → X 多走 8196 脉冲被顶到 0 点左侧（遥测 -178145 counts）。
+        """
+        # 读数脚本：起始/第一轮判停稳都还是旧帧 8668；走完之后才跳到 472
+        client = _ScriptedClient([8668, 8668, 8668, 472, 472, 472, 472])
+        res, logs = self._run(client, {AXIS_X: 0})
+        self.assertTrue(all(r['ok'] for r in res))
+        sent = client.motor_pos()
+        self.assertEqual(sent[0], (1, 8668), sent)        # 第一轮：按新鲜读数走一整段
+        self.assertEqual(len(sent), 2, '收口只该再发一次，且只发残差量')
+        self.assertEqual(sent[1], (1, 472), '收口轮必须发残差 472，不能重发 8668')
+        self.assertTrue(any('残差量' in t for t in logs), logs)
+
+    def test_residual_round_never_resends_the_whole_segment(self):
+        """护栏：收口轮的脉冲量必须等于残差量（不允许等于上一轮的整段位移）。"""
+        # 读数时序：起点 3 次 5000；走完后判停稳/算残差那几次都是 100（剩 100 脉冲）；收口后变 0
+        client = _ScriptedClient([5000, 5000, 5000] + [100] * 7 + [0] * 8)
+        res, logs = self._run(client, {AXIS_X: 0})
+        self.assertTrue(all(r['ok'] for r in res))
+        sent = client.motor_pos()
+        self.assertEqual(sent[0], (1, 5000), sent)
+        self.assertEqual([p for _d, p in sent[1:]], [100],
+                         '残差 100 就是 100，绝不等于整段 5000')
+
+    def test_joint_round_keeps_both_axes_in_one_batch(self):
+        """X/Y 残差必须**同批**下发（现场硬要求：两轴永远一起走）。"""
+        client = _MotionClient({AXIS_X: 0.0, PP.AXIS_Y: 0.0},
+                               lag_pulses={AXIS_X: 500, PP.AXIS_Y: 800})
+        res, logs = self._run(client, {AXIS_X: 3000, PP.AXIS_Y: -12000})
+        self.assertTrue(all(r['ok'] for r in res))
+        xs = [i for i, c in enumerate(client.calls)
+              if c[0] == 'motor_pos' and int(c[1][0]) == AXIS_X]
+        ys = [i for i, c in enumerate(client.calls)
+              if c[0] == 'motor_pos' and int(c[1][0]) == PP.AXIS_Y]
+        self.assertEqual(len(xs), 2, xs)
+        self.assertEqual(len(ys), 2, ys)
+        self.assertEqual(ys[1], xs[1] + 1, '收口的 X/Y 必须紧挨着发出，中间不许插别的')
+        self.assertEqual(int(client.calls[xs[1]][1][4]), 500)
+        self.assertEqual(int(client.calls[ys[1]][1][4]), 800)
+
+
 class GotoTolTests(unittest.TestCase):
     """Z 轴闭环容差必须走 GOTO_TOL_BY_AXIS（提速时「抬转速 + 放宽容差」是成对的）。
 
