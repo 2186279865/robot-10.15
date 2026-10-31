@@ -41,6 +41,41 @@ from tkinter import ttk, messagebox       # noqa: E402
 TITLE = '机器人视觉分拣系统 — 视觉 + 控制（一体化）'
 DEFAULT_IMG_PORT = 5057
 DEFAULT_SER_PORT = 5058
+# 单实例锁：同一块控制板只允许一个窗口连。2026-10-31 现场同时开了两个窗口，
+# 两个都连同一块板子 → 抢 5058 串口桥来回互踢；关掉其中一个时它还会给板子发
+# stop_all，把另一个窗口正在跑的那件打成 E14 reason=stopped。
+LOCK_PORT = 47319
+
+
+def acquire_single_instance(port: int = LOCK_PORT):
+    """抢本机单实例锁，成功返回 socket（调用方要一直持有），已被占用返回 None。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Windows 上**不能**设 SO_REUSEADDR：那会让第二个实例也能绑上同一个端口
+    try:
+        s.bind(('127.0.0.1', int(port)))
+        s.listen(1)
+    except OSError:
+        try:
+            s.close()
+        except Exception:                      # noqa: BLE001
+            pass
+        return None
+    return s
+
+
+def warn_already_running(title: str = TITLE) -> None:
+    msg = ('已经有一个窗口在运行了。\n\n'
+           '同一块控制板只能由一个窗口连接：两个窗口会抢 5058 串口桥，'
+           '关掉其中一个还会给正在跑的件发「停止全部」。\n\n'
+           '请用已经开着的那个窗口（要重开就先把它关掉）。\n\n'
+           '（调试确实需要多开时加参数：--allow-multi）')
+    print(msg.replace('\n\n', ' '), flush=True)
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, title, 0x40)
+    except Exception:                          # noqa: BLE001 —— 没有 user32 就只打印
+        pass
 
 
 def _split_host_port(text: str):
@@ -162,11 +197,20 @@ def main(argv=None) -> int:
                         help='树莓派图传端口（默认 %d）' % DEFAULT_IMG_PORT)
     parser.add_argument('--pi-ser-port', type=int, default=None,
                         help='树莓派串口桥端口（默认 %d）' % DEFAULT_SER_PORT)
+    parser.add_argument('--allow-multi', action='store_true', dest='allow_multi',
+                        help='允许同时开多个窗口（调试用；正常用会抢串口/误发停止）')
     args = parser.parse_args(argv)
 
     apply_pi_args(args)                   # 必须在 import host_gui / vision 之前设置环境变量
 
     import host_gui                        # 10.21/host/host_gui.py
+
+    _lock = None
+    if not args.allow_multi:
+        _lock = acquire_single_instance()
+        if _lock is None:
+            warn_already_running()
+            return 2
 
     root = tk.Tk()
     root.title(TITLE)

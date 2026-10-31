@@ -20,7 +20,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import box_map as BM
 import prep_pose
@@ -118,6 +118,65 @@ def class_key(target: Dict) -> str:
     shape = str(target.get('shape') or target.get('class_name') or '未知').strip()
     color = str(target.get('color') or '').strip()
     return '%s|%s' % (shape, color) if color else shape
+
+
+# 视觉偶尔给不出定名（待登记 / 副摄待确认 / — / 未知 / 其他几何体）。
+# 这些**绝不能当新类别去占盒子**：6 个盒各占一类，占满后第 7 件就
+# 「分盒失败：6 个盒子都已分配给其它类别」直接停批（2026-10-31 07:41、07:47 各踩一次，
+# 一次是 `副摄待确认|蓝/浅蓝` 占了 6 号盒，一次是 `待登记|红` 撞上满盒）。
+UNNAMED_SHAPES = {'', '—', '-', '--', '未知', '待登记', '副摄待确认', '其他几何体', '物体'}
+
+
+def shape_of(key: str) -> str:
+    return str(key or '').split('|')[0].strip()
+
+
+def color_of(key: str) -> str:
+    parts = str(key or '').split('|')
+    return parts[1].strip() if len(parts) > 1 else ''
+
+
+def is_named(key: str) -> bool:
+    """这个类别键是不是"定名"的（能进分盒表）。"""
+    return shape_of(key) not in UNNAMED_SHAPES
+
+
+def box_for(key: str, log=print) -> Tuple[int, str]:
+    """这一件进几号盒，返回 (盒号, 实际按哪个类别算)。
+
+    规则（2026-10-31 依据现场两次停机改的）：
+      0) 键已经在分盒表里 → 直接用它的盒（常规路径）；
+      1) 没定名的件：先找**同颜色**的已登记类别，复用它的盒（红椭圆柱/红长方体
+         同色时可能进同一个盒——分盒只错这一件，比整批停机好）；
+      2) 没定名但还有空盒 → 占一个空盒并登记这个键（同键后续直接命中）；
+      3) 定名的新类别 → 正常 assign（有空盒）；
+      4) 6 个盒都占了 → 复用**最后登记**的那个盒，只 WARN，**绝不停批**。
+    """
+    mapping = BM.load()
+    if key in mapping:
+        return int(mapping[key]), key
+    if not is_named(key):
+        col = color_of(key)
+        if col:
+            for k, b in mapping.items():
+                if color_of(k) == col:
+                    log('[分盒] 「%s」没定名 → 复用同颜色类别「%s」的 %d 号盒（不占新盒）'
+                        % (key, k, int(b)))
+                    return int(b), k
+        if BM.next_free(mapping) is not None:
+            box = int(BM.assign(key))
+            log('[分盒] 「%s」没定名 → 占空盒 %d（登记该键，同键后续复用）' % (key, box))
+            return box, key
+    elif BM.next_free(mapping) is not None:
+        return int(BM.assign(key)), key
+    if mapping:
+        k, b = list(mapping.items())[-1]
+        log('[分盒] 「%s」拿不到空盒（6 个都占了）→ 复用最后登记「%s」的 %d 号盒，'
+            '只影响这一件的分盒、不停批' % (key, k, int(b)))
+        return int(b), k
+    # 分盒表空且分类失败：用 1 号盒兜底（不该发生，但绝不因为分盒停机）
+    log('[分盒] 分盒表是空的、类别也不可用 → 兜底 1 号盒')
+    return 1, key
 
 
 class GrabError(RuntimeError):
@@ -609,8 +668,18 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
 
 
 def pick_order(targets: Iterable[dict]) -> List[dict]:
-    """把一次识别的结果按 pick_target 的同一优先级排成队列（置信度→面积→v→u）。"""
+    """把一次识别的结果排成抓取队列：**定名的优先**，再按 pick_target 的优先级
+    （置信度→面积→v→u）。
+
+    为什么定名的优先：没定名（待登记/副摄待确认/—/未知）的件分盒只能靠颜色兜底，
+    容易占错盒；先把能确定类别的抓走，识别退化时也不会白占分盒名额
+    （2026-10-31 07:41 现场：`副摄待确认|蓝/浅蓝` 占了 6 号盒，下一件就「分盒失败」）。
+    """
     def key(t: dict):
+        try:
+            named = 0 if is_named(class_key(t)) else 1
+        except Exception:                      # noqa: BLE001
+            named = 1
         try:
             conf = float(t.get('confidence') or 0.0)
         except Exception:                      # noqa: BLE001
@@ -622,8 +691,8 @@ def pick_order(targets: Iterable[dict]) -> List[dict]:
         try:
             u, v = t['center_tray']
         except Exception:                      # noqa: BLE001
-            return (-conf, -area, 9.9, 9.9)
-        return (-conf, -area, float(v), float(u))
+            return (named, -conf, -area, 9.9, 9.9)
+        return (named, -conf, -area, float(v), float(u))
     return sorted([t for t in targets if t.get('center_tray')], key=key)
 
 
@@ -996,14 +1065,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
         box = 0
         deg = 0.0
         if drop:
-            try:
-                box = BM.assign(key)
-            except ValueError as exc:
-                failed += 1
-                log('[连续抓] 分盒失败：%s（每批「一键启动」已自动清零；出现这条说明本批'
-                '已登记满 6 类，或有人中途手动改了 runtime/box_map.json）' % exc)
-                emit('item_fail', i=i + 1, reason='分盒失败：%s' % exc)
-                break
+            # 分盒不再抛异常：未定名/满盒都只会 WARB 后复用某个盒，绝不因为分盒停批
+            box, key = box_for(key, log=log)
             # 最短路径：同类不转；异类转到目标盒；回旧盒走 |k|<=3 的那个方向
             k = (int(box) - box_now) % BOX_COUNT
             if k > BOX_COUNT // 2:
@@ -1070,7 +1133,7 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
                             target = pending.pop(0)
                             key = class_key(target)
                             if drop:
-                                box = BM.assign(key)
+                                box, key = box_for(key, log=log)
                                 deg = ((int(box) - box_now) % BOX_COUNT) * BOX_STEP_DEG
                             log('[连续抓] 重试用新目标：%s' % describe(target))
                 except Exception as exc_r:         # noqa: BLE001

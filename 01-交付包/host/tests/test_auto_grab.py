@@ -510,5 +510,80 @@ class BoxResetTest(unittest.TestCase):
         self.assertFalse(any('分盒已自动清零' in t for t in logs), logs)
 
 
+class BoxForTests(unittest.TestCase):
+    """分盒不再会因为「没定名」或「6 个盒都占满」停批（2026-10-31 现场两次停机）。
+
+    07:41 / 07:47 两次 `分盒失败：6 个盒子都已分配给其它类别` 都是这个原因：
+    视觉给出 `待登记|红`、`副摄待确认|蓝/浅蓝` 这种没定名的键，被当成新类别
+    占了盒子；6 类一满，第 7 件就 break 整批停。
+    """
+
+    def setUp(self):
+        import box_map
+        self._bm = box_map
+        self._old_path = box_map.DEFAULT_PATH
+        tmp = Path(__file__).resolve().parent / '_tmp'
+        tmp.mkdir(parents=True, exist_ok=True)
+        box_map.DEFAULT_PATH = tmp / ('box_for_%d.json' % int(time.time() * 1000))
+
+    def tearDown(self):
+        try:
+            self._bm.DEFAULT_PATH.unlink()
+        except Exception:                       # noqa: BLE001
+            pass
+        self._bm.DEFAULT_PATH = self._old_path
+
+    def test_named_new_key_gets_a_free_box(self):
+        box, used = AG.box_for('长方体|蓝', log=lambda _t: None)
+        self.assertEqual((box, used), (1, '长方体|蓝'))
+        self.assertEqual(self._bm.load(), {'长方体|蓝': 1})
+
+    def test_unnamed_key_reuses_same_colour_box(self):
+        self._bm.assign('椭圆柱|红')            # 1 号盒
+        logs = []
+        box, used = AG.box_for('待登记|红', log=logs.append)
+        self.assertEqual(box, 1)
+        self.assertEqual(used, '椭圆柱|红')
+        self.assertEqual(self._bm.load(), {'椭圆柱|红': 1}, '没定名的件不占新盒')
+        self.assertTrue(any('没定名' in t for t in logs), logs)
+
+    def test_unnamed_key_takes_free_box_and_registers_itself(self):
+        box, used = AG.box_for('待登记|蓝', log=lambda _t: None)
+        self.assertEqual((box, used), (1, '待登记|蓝'))
+        self.assertEqual(self._bm.load(), {'待登记|蓝': 1})
+
+    def test_full_table_reuses_last_box_instead_of_raising(self):
+        for key in ('圆锥|黄', '长方体|蓝', '长方体|红', '四棱锥|紫', '椭圆柱|红', '六棱锥|白'):
+            self._bm.assign(key)
+        logs = []
+        box, used = AG.box_for('长方体|紫', log=logs.append)   # 第 7 类：不再抛异常
+        self.assertIn(box, (1, 2, 3, 4, 5, 6))
+        self.assertIn(used, set(self._bm.load()))
+        self.assertEqual(len(self._bm.load()), 6, '满盒时不再登记新类别')
+        self.assertTrue(any('拿不到空盒' in t for t in logs), logs)
+
+    def test_unnamed_when_table_full_does_not_raise(self):
+        for key in ('圆锥|黄', '长方体|蓝', '长方体|红', '四棱锥|紫', '椭圆柱|红', '六棱锥|白'):
+            self._bm.assign(key)
+        box, used = AG.box_for('待登记|绿', log=lambda _t: None)
+        self.assertIn(box, (1, 2, 3, 4, 5, 6))
+        self.assertEqual(len(self._bm.load()), 6)
+
+    def test_is_named_knows_the_visual_placeholders(self):
+        for key in ('待登记|红', '副摄待确认|蓝/浅蓝', '—|蓝', '未知|红', '|红'):
+            self.assertFalse(AG.is_named(key), key)
+        for key in ('长方体|蓝', '圆锥|黄', '六棱锥|白'):
+            self.assertTrue(AG.is_named(key), key)
+
+    def test_pick_order_prefers_named_targets(self):
+        named = {'shape': '长方体', 'color': '蓝', 'confidence': 0.30,
+                 'area_px': 1000.0, 'center_tray': (0.4, 0.6)}
+        unnamed = {'shape': '待登记', 'color': '红', 'confidence': 0.95,
+                   'area_px': 9000.0, 'center_tray': (0.1, 0.1)}
+        ordered = AG.pick_order([unnamed, named])
+        self.assertEqual(ordered[0], named, '定名的先抓，别让没定名的白占分盒名额')
+        self.assertEqual(ordered[1], unnamed)
+
+
 if __name__ == '__main__':
     unittest.main()
