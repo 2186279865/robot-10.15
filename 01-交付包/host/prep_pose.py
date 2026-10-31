@@ -685,9 +685,6 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         except Exception:                                   # noqa: BLE001
             pass
 
-    # 遥测卡住的轴：本次 move_xy_fast 里"指令已发、读数整段没动过"，残差判定不可信。
-    blind: Dict[int, bool] = {}
-
     def _write_pos(axis, delta, rpm_i):
         """**只下发**一条 motor_pos，立刻返回请求 id（不等回执）。
 
@@ -730,24 +727,22 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             return False
 
     def _pick_base(axis):
-        """算相对位移用的"当前位置"：**调用方给的位置基准（指令账本）优先**。
+        """算相对位移用的"当前位置"：新鲜 counts 优先，过期了就用调用方给的位置基准。
 
-        为什么不再优先遥测 counts：驱动器只在轴停下后才刷新采样，运动期间遥测帧里的
-        counts 会连续几秒冻在"出发前的位置"（16:04 冻 3 s、16:31 又一次）。
-        用冻结值算相对位移 → 同一段位移被重复下发（Y 顶到轨道尽头）或干脆少走一整段
-        （16:31 回程只发 -19 脉冲，本该 +83162）。
-        账本（motion_hook 下发时累加）代表"指令走完之后的位置"，且 host_gui 只在轴静止
-        ≥1.2 s 时才用遥测回写账本，所以运动中它以账本为准最安全。
-        没有账本（未知/刚清零）时才退回新鲜遥测。
+        调用方（auto_grab._counts_with_soft）给的 counts 是"新鲜遥测 → 软位置"的合并结果，
+        所以读数过期时用它能避免把同一段位移再发一遍（16:04 那次事故的根因）。
         """
-        base = counts or {}
-        b = base.get(axis) if hasattr(base, 'get') else None
-        if b is not None:
-            return float(b)
         cur = read_counts()
         c = cur.get(axis)
         if c is not None and not _stale1(axis):
             return c
+        base = counts or {}
+        b = base.get(axis) if hasattr(base, 'get') else None
+        if b is not None:
+            if c is not None:
+                say('%s 读数过期（>%d ms），改用位置基准算位移'
+                    % (AXIS_LABEL.get(axis, axis), int(COUNTS_MAX_AGE_MS)))
+            return float(b)
         return c
 
     def _wait_arrive(plans_g, t_est_g):
@@ -765,7 +760,6 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         t0 = time.monotonic()
         prev = read_counts()
         last_change = t0
-        changed = False
         while True:
             now_t = time.monotonic()
             cur = read_counts()
@@ -773,29 +767,20 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             if cur and not stale:
                 if prev and any(abs(cur.get(a, 1e9) - prev.get(a, 0.0)) > 24 for a in axes):
                     last_change = now_t
-                    changed = True
                 arrived = all(
                     abs(cur.get(a, 1e9) - counts_of(t)) <= arrive_tol_counts(a)
                     for a, t, _d in plans_g)
                 if arrived:
                     say('X/Y 并行：counts 已到位（%.2f s）' % (now_t - t0))
-                    return changed or True
+                    return
                 prev = cur
-                # 读数整段没变化 = 遥测卡住（不是"指令没生效"）。按预计走位放行：
-                # 走完 t_est*1.02+0.10 就继续，别白等到硬上限，也别让 Z 提前往下压。
-                if not changed and (now_t - t0) >= max(0.6, t_est_g * 1.02 + 0.10):
-                    say('X/Y 并行：读数整段没变化（遥测卡住），按预计走位 %.2f s 继续'
-                        % (t_est_g * 1.02 + 0.10))
-                    return False
-                # 动过但又停住 ARRIVE_NO_PROGRESS_S 没进展 → 交给残差逻辑收口
-                if (changed and now_t - t0 > max(0.6, t_est_g * 0.6)
-                        and now_t - last_change > ARRIVE_NO_PROGRESS_S):
+                if now_t - t0 > 0.30 and now_t - last_change > ARRIVE_NO_PROGRESS_S:
                     say('X/Y 并行：%.2f s 内读数没有变化（指令可能没生效）→ 交给残差逻辑收口'
                         % (now_t - t0))
-                    return True
+                    return
             if now_t >= hard:
                 say('X/Y 并行：等到 %.2f s 仍未到位 → 交给残差逻辑收口' % (now_t - t0))
-                return changed
+                return
             time.sleep(MOTION_POLL_S)
 
     def _send_round(send_map):
@@ -901,12 +886,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 continue
             plans_g.append((axis, int(tgt), delta))
         if plans_g:
-            moved = _wait_arrive(plans_g, t_est_g)
-            for axis, _t, _d in plans_g:
-                if moved:
-                    blind.pop(int(axis), None)
-                else:
-                    blind[int(axis)] = True
+            _wait_arrive(plans_g, t_est_g)
         return plans_g, bad_g
 
     def _residual_fixes(plans_in):
@@ -926,15 +906,9 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                 time.sleep(0.05)
             fin = read_counts() or fin
         for axis, tgt, delta in plans_in:
-            # 先看"知道过期"的（有 age），再看"推断卡住"的（整段没变化）：
-            # 两种情况都**不按残差补走、更不 abort** —— 读了不可信的值就绝不据此动轴。
             if _stale1(axis):
                 say('%s 并行：读数过期（>%d ms），跳过补走（避免按旧值重复下发）'
                     % (AXIS_LABEL.get(axis, axis), int(COUNTS_MAX_AGE_MS)))
-                continue
-            if blind.get(int(axis)):
-                say('%s 并行：整段读数没变化（遥测卡住）→ 不按残差判定，继续下一步'
-                    % AXIS_LABEL.get(axis, axis))
                 continue
             c = fin.get(axis)
             if c is None:

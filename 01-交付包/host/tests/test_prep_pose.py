@@ -235,49 +235,25 @@ class _FastClock:
 
 
 class _MotionClient:
-    """给 move_xy_fast 用的假 client。
+    """给 move_xy_fast 用的假 client：motor_pos 会"走"，并可在回读里留一个滞后量。"""
 
-    **关键：motor_pos 发出后要过 `delay_s` 才真的走**（用假时钟计时）——现场驱动器
-    的 counts 回读就是这样：命令一下发，读数还是旧值，等轴停下才刷新。以前这种假
-    client 是"发出即到位"，把「读数整段没变化（遥测卡住）」这条新判据掩盖掉了。
-
-    `lag_pulses` 让回读停在"真值 - lag"（模拟旧帧）。
-    `blind=True` 则**永远不更新回读**（模拟 16:31 现场 Y 遥测冻结几秒）。
-    """
-
-    def __init__(self, counts=None, lag_pulses=None, delay_s=0.15, blind=False):
+    def __init__(self, counts=None, lag_pulses=None):
         self.counts = {int(k): float(v) for k, v in (counts or {}).items()}
         self.lag = {int(k): int(v) for k, v in (lag_pulses or {}).items()}
-        self.delay_s = float(delay_s)
-        self.blind = bool(blind)
-        self.pending = {}
-        self._t_sent = 0.0
         self.calls = []
         self._n = 0
 
     def _add(self, axis, pulses):
         self.counts[axis] = self.counts.get(axis, 0.0) + float(pulses) * PP.COUNTS_PER_PULSE
 
-    def read(self):
-        """当作一次"读回读"：够时间了就把待走的位移落到 counts 上。"""
-        if self.blind:
-            return dict(self.counts)
-        if self.pending and (PP.time.monotonic() - self._t_sent) >= self.delay_s:
-            for axis, pulses in list(self.pending.items()):
-                self._add(axis, pulses)
-                if axis in self.lag:        # 回读停在"真值 - lag"，模拟旧帧/读数滞后
-                    self._add(axis, -self.lag[axis])
-            self.pending.clear()
-        return dict(self.counts)
-
     def send(self, cmd, *args, **kw):
         self._n += 1
         self.calls.append((cmd, args))
         if cmd == 'motor_pos':
             axis, direction, pulses = int(args[0]), int(args[1]), int(args[4])
-            signed = -pulses if direction else pulses
-            self.pending[axis] = self.pending.get(axis, 0) + signed
-            self._t_sent = PP.time.monotonic()
+            self._add(axis, -pulses if direction else pulses)
+            if axis in self.lag:            # 回读停在"真值 - lag"，模拟旧帧/读数滞后
+                self._add(axis, -self.lag[axis])
         return self._n
 
     def goto(self, axis, pulses, rpm=None, **kw):
@@ -307,7 +283,7 @@ class ParallelResidualTests(unittest.TestCase):
         PP.time = _FastClock()
         try:
             res = PP.move_xy_fast(client, targets, rpm=1600, log=logs.append,
-                                  counts_fn=client.read)
+                                  counts_fn=lambda: dict(client.counts))
         finally:
             PP.time = old
         return res, logs
@@ -333,16 +309,6 @@ class ParallelResidualTests(unittest.TestCase):
         y_pos = [c for c in client.calls if c[0] == 'motor_pos' and int(c[1][0]) == PP.AXIS_Y]
         self.assertEqual(len(y_pos), 2, '第一轮 + 残差收口一轮，都是 motor_pos')
         self.assertTrue(any('X/Y 并行收口' in t for t in logs), logs)
-
-    def test_blind_readback_is_not_treated_as_residual(self):
-        """读数整段没变化（遥测卡住）→ 不按残差判定、也不 abort（16:31 现场：Y 冻几秒，
-        旧代码据此算出 +83162 > 40000 → 整件判死）。"""
-        client = _MotionClient({PP.AXIS_Y: 0.0}, blind=True)
-        res, logs = self._run(client, {PP.AXIS_Y: -20000})
-        self.assertTrue(all(r['ok'] for r in res), res)
-        self.assertEqual(client.gotos(), [])
-        self.assertTrue(any('遥测卡住' in t for t in logs), logs)
-        self.assertFalse(any('偏离目标' in t and '40000' in t for t in logs), logs)
 
     def test_absurd_residual_still_aborts(self):
         """>40000 脉冲（≈400 mm）超出回读滞后可解释范围 → 仍中止等人工，防真撞机。"""
