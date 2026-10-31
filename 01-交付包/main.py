@@ -206,7 +206,9 @@ def main(argv=None) -> int:
     import host_gui                        # 10.21/host/host_gui.py
 
     _lock = None
-    if not args.allow_multi:
+    # --selftest 是自检截图（模拟后端、不连板子），不该被"已经开着一个窗口"挡住：
+    # 现场经常一边开着真机窗口、一边跑 selftest 回归。真要连板子的窗口仍然独占。
+    if not args.allow_multi and not args.selftest:
         _lock = acquire_single_instance()
         if _lock is None:
             warn_already_running()

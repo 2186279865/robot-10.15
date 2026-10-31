@@ -437,6 +437,19 @@ class HostClient:
         if frame.kind == "event":
             self._on_event(frame)
         elif frame.kind == "tele":
+            # 遥测帧顺手更新 last_counts：后台抓取线程（auto_grab._live_counts）读的就是
+            # 这份缓存，以前只有 motor_query 才会写，导致它常年是空的 →
+            # 「读数不够新（>800 ms），按现有值继续」刷屏（2026-10-31 16:31 现场 20+ 次）。
+            try:
+                _addr = int(frame.pairs.get("addr", 0))
+                if _addr > 0 and "counts" in frame.pairs:
+                    self.last_counts[_addr] = {
+                        "counts": int(frame.pairs["counts"]),
+                        "ts": self.now_ms(),
+                        "what": frame.pairs.get("what", ""),
+                    }
+            except (TypeError, ValueError):
+                pass
             self.emit("tele", frame.raw, pairs=frame.pairs)
         elif frame.kind == "request":
             # 固件不应回送请求帧；记录以便排查接线/回环问题。

@@ -372,9 +372,15 @@ class AxisPanel:
                 # 修 2026-10-31 02:38 的漂移 —— 被固件拒绝的 motor_pos 也会在
                 # motion_hook 里记账，随后 goto 再记一次，soft_pos[Y] 漂到 +140570 脉冲，
                 # 下一条动作因此算出 -153714 脉冲的假位移、被 RANGE 拦下停机。
-                self.app.soft_pos[self.addr] = int(round(
-                    units.counts_to_pulses(self.last_counts)))
-                self.app.pos_known[self.addr] = True
+                idle_s = time.monotonic() - float(
+                    (getattr(self.app, "_last_motion_axis_s", {}) or {}).get(self.addr, 0.0))
+                if idle_s >= 1.2:
+                    # **只在静止时**才用遥测对齐软位置：遥测值是"驱动器上一拍的采样"，
+                    # 轴在动时会被冻结好几秒（16:31 现场 Y 停在托盘位反复覆盖账本），
+                    # 那样会让下一次相对位移按旧位置算 → 少走/多走一整段。
+                    self.app.soft_pos[self.addr] = int(round(
+                        units.counts_to_pulses(self.last_counts)))
+                    self.app.pos_known[self.addr] = True
             except ValueError:
                 pass
         self.refresh_readback()
@@ -1668,6 +1674,10 @@ class App:
                 self.soft_pos[addr] += (-pulses if negative else pulses)
                 self.pos_known[addr] = True
                 self._last_motion_s = time.monotonic()
+                _lm = getattr(self, "_last_motion_axis_s", None)
+                if _lm is None:
+                    self._last_motion_axis_s = _lm = {}
+                _lm[addr] = self._last_motion_s
                 if mode != "rel":
                     # 固件把「绝对位置」也按相对移动执行（control_apply_position(..., absolute=0)），
                     # 所以实际走的就是 pulses；记账必须按真实动作，不能按目标位置差。
@@ -1686,6 +1696,10 @@ class App:
                 self.soft_pos[addr] += (-pulses if direction else pulses)
                 self.pos_known[addr] = True
                 self._last_motion_s = time.monotonic()
+                _lm = getattr(self, "_last_motion_axis_s", None)
+                if _lm is None:
+                    self._last_motion_axis_s = _lm = {}
+                _lm[addr] = self._last_motion_s
                 self._journey_add(addr, direction, rpm, acc, pulses)
                 if self._approach_recording and not self._approach_running and addr in AR.AXES:
                     self._approach_record(addr, direction, rpm, acc, pulses)

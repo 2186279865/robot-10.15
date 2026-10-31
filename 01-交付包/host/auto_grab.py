@@ -537,15 +537,18 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         out: Dict[int, float] = {}
         for a in targets:
             a = int(a)
-            if a in fresh:
-                out[a] = fresh[a]
-                continue
+            # **账本优先**：遥测在轴运动期间会冻结（16:31 现场 Y 冻在托盘位，回程按
+            # 冻结值算出 -19 脉冲，本该 +83162 → 整件 abort）。账本只在轴静止时被
+            # 遥测回写，运动中一直是"指令走完之后的位置"，用它算相对位移才不会再错。
             if soft_ and known_ and known_.get(a) and soft_.get(a) is not None:
                 try:
                     out[a] = float(soft_[a]) * float(prep_pose.COUNTS_PER_PULSE)
                     continue
                 except Exception:                  # noqa: BLE001
                     pass
+            if a in fresh:
+                out[a] = fresh[a]
+                continue
             if a in panel:
                 out[a] = panel[a]
                 continue
