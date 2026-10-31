@@ -179,6 +179,106 @@ def box_for(key: str, log=print) -> Tuple[int, str]:
     return 1, key
 
 
+# ---- X/Y 位移账本（全开环，2026-10-31 现场定版） --------------------------
+# 每段 X/Y 都是相对 `motor_pos`；程序自己记账（只 += 实发脉冲），**不读遥测、不判到位、
+# 不补走**。误差靠「每件回 P1 / 每批回 P0 时把账本归零」清掉——现场逐帧核对的结论是
+# 「每段执行本身都很准，乱走全是确认环节拿错读数把位移重放一次造成的」：
+#   16:04 冻结遥测又推 +26076 → 顶到 Y 轨道尽头（E14/超时/E09）；
+#   16:31 冻结遥测把账本覆盖回 P1 → 回程只发 -19 脉冲；
+#   16:54 "并行收口"按旧账本把 -472 算成 -8668 → X 跑到 -90 mm 撞量程。
+_BOOK = {int(AXIS_X): 0.0, int(AXIS_Y): float(P1_Y)}
+_BOOK_KNOWN = {'v': False}
+
+
+def book_get() -> Dict[int, float]:
+    """当前账本（脉冲）：{X 轴号: x, Y 轴号: y}。"""
+    return {int(AXIS_X): float(_BOOK.get(int(AXIS_X), 0.0)),
+            int(AXIS_Y): float(_BOOK.get(int(AXIS_Y), 0.0))}
+
+
+def book_set(x=None, y=None, log=None, why: str = '') -> None:
+    """把账本写成指定值（开批校准 / 回 P1 / 回 P0 之后调用）。"""
+    if x is not None:
+        _BOOK[int(AXIS_X)] = float(x)
+    if y is not None:
+        _BOOK[int(AXIS_Y)] = float(y)
+    _BOOK_KNOWN['v'] = True
+    if log:
+        cur = book_get()
+        log('[账本] X=%+.0f Y=%+.0f 脉冲%s'
+            % (cur[int(AXIS_X)], cur[int(AXIS_Y)], ('（%s）' % why) if why else ''))
+
+
+def book_add(axis, pulses) -> None:
+    """按实发脉冲累加账本——唯一会改账本的地方。"""
+    _BOOK[int(axis)] = float(_BOOK.get(int(axis), 0.0)) + float(pulses)
+
+
+def book_calibrate(client, log=print, pos_source=None) -> bool:
+    """开批前给 X/Y 账本找一个可信起点：motor_query 实测 > 遥测缓存 > 界面软位置。
+
+    返回 True 表示两轴都拿到起点；False 表示完全没读数（调用方应拒绝开工）。
+    """
+    got: Dict[int, float] = {}
+    for axis in (int(AXIS_X), int(AXIS_Y)):
+        rep = None
+        try:
+            rid = client.send('motor_query', axis, 'pos', timeout_ms=800)
+        except Exception:                              # noqa: BLE001
+            rid = None
+        if rid is not None:
+            for _i in range(20):                       # 最多约 0.3 s
+                try:
+                    rep = client.done_of(rid)
+                except Exception:                      # noqa: BLE001
+                    rep = None
+                if rep:
+                    break
+                time.sleep(0.015)
+        pairs = (rep or {}).get('pairs') or {}
+        try:
+            if pairs.get('counts') is not None:
+                got[axis] = float(pairs['counts']) / float(prep_pose.COUNTS_PER_PULSE)
+        except (TypeError, ValueError, KeyError):
+            pass
+    src = 'motor_query 实测'
+    if len(got) < 2:
+        # 现场链路拥塞时 motor_query 回执可能 0.3~0.8 s 才到；先等一小会儿，
+        # 让 _dispatch 把 counts 写进 last_counts，再走「退 2」。
+        time.sleep(0.20)
+    if len(got) < 2:                                   # 退 2：遥测缓存
+        raw = getattr(client, 'last_counts', None) or {}
+        for axis in (int(AXIS_X), int(AXIS_Y)):
+            if axis in got:
+                continue
+            info = raw.get(axis)
+            c = info.get('counts') if isinstance(info, dict) else info
+            try:
+                if c is not None:
+                    got[axis] = float(c) / float(prep_pose.COUNTS_PER_PULSE)
+            except (TypeError, ValueError):
+                pass
+        src = '遥测缓存'
+    if len(got) < 2 and pos_source is not None:        # 退 3：界面面板 counts
+        try:
+            _soft, _known, cnt = pos_source()
+            for axis in (int(AXIS_X), int(AXIS_Y)):
+                if axis in got:
+                    continue
+                c = (cnt or {}).get(axis)
+                if c is not None:
+                    got[axis] = float(c) / float(prep_pose.COUNTS_PER_PULSE)
+            src = '界面面板'
+        except Exception:                              # noqa: BLE001
+            pass
+    if len(got) < 2:
+        log('[连续抓] X/Y 位置查不到（没有编码器回读）→ 先点「初始化 / 查位置」再启动；'
+            '本次不动机器')
+        return False
+    book_set(got[int(AXIS_X)], got[int(AXIS_Y)], log=log, why='开批校准（%s）' % src)
+    return True
+
+
 class GrabError(RuntimeError):
     """自动抓一件失败（原因直接给人看）。"""
 
@@ -559,20 +659,23 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     _speed_once = {'v': bool(prep)}
 
     def move_xy(targets: Dict[int, float]) -> None:
-        """X/Y **永远并行**：两轴各发一条相对 motor_pos，固件独立执行、真正同时动。
+        """X/Y **永远并行**：按账本算相对位移，两轴各发一条 motor_pos，全开环。
 
-        绝不退回"先 X 后 Y"的顺序 goto —— 现场要求 X/Y 必须一起走。
+        不读遥测、不判到位、不补走：现场核对证明每段执行都准，乱走是"确认环节拿错
+        读数把位移重放一次"造成的（16:04 / 16:31 / 16:54 三次事故同一根）。
+        返回后账户 += 实发脉冲；每件回 P1 / 每批回 P0 时账本归零，误差不跨件累积。
         """
-        targets = {int(k): int(v) for k, v in targets.items()}
-        cnt = _counts_with_soft(targets, _fresh_counts_for(list(targets)))
-        say('X/Y 并行一步走：%s'
-            % ', '.join('%s→%+d' % (prep_pose.AXIS_LABEL.get(a, a), v)
-                        for a, v in targets.items()))
-        prep_pose.move_xy_fast(client, targets, rpm=RPM, log=say, wait=wait,
-                               counts=cnt,
-                               counts_fn=lambda: (pos()[2] or _live_counts()),
-                               acc=_ACC_DEFAULT, speed_setup=_speed_once['v'],
-                               counts_age_fn=_age_ms)
+        goals = {int(k): float(v) for k, v in targets.items() if v is not None}
+        cur = book_get()
+        deltas = {a: int(round(g - cur.get(a, 0.0))) for a, g in goals.items()}
+        say('X/Y 并行一步走：%s（账本 X %+.0f / Y %+.0f 脉冲）'
+            % (', '.join('%s→%+d' % (prep_pose.AXIS_LABEL.get(a, a), int(round(g)))
+                         for a, g in sorted(goals.items())),
+               cur.get(int(AXIS_X), 0.0), cur.get(int(AXIS_Y), 0.0)))
+        sent = prep_pose.move_xy_fast(client, deltas, rpm=RPM, log=say, wait=wait,
+                                      acc=_ACC_DEFAULT, speed_setup=_speed_once['v'])
+        for axis, pulses in (sent or {}).items():
+            book_add(axis, pulses)
         _speed_once['v'] = False
 
     def move(targets: Dict[int, float], order: List[int],
@@ -636,7 +739,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 2 在通道末端抬到顶
     # 3 到物块上方：X/Y **一步并行**（两轴各发一条 motor_pos，固件独立执行；
     #   host_goto 只有单槽、并行 goto 会 E09，所以这里用 motor_pos 而不是 goto）。
-    #   收口由 move_xy_fast 按新鲜编码器读数轮询，不达标的轴再顺序补一次 goto。
+    #   全开环：只发不判、不补走（2026-10-31 现场定版），见 move_xy_fast 的 docstring。
     move_xy({AXIS_X: x_pulse, AXIS_Y: y_pulse})
     move({AXIS_Z: Z_DOWN}, [AXIS_Z])                    # 4 Z 降底 = 抓取位
     say('夹紧 135°（发完就走，舵机自己合拢；同时立刻抬 Z）')
@@ -649,6 +752,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
     move({AXIS_Z: Z_UP}, [AXIS_Z])                      # 6 抬起
 
     move_xy({AXIS_X: 0, AXIS_Y: P1_Y})                   # 7 只动 X/Y 回 P1（高位，并行）
+    book_set(0.0, float(P1_Y), log=say, why='已回 P1，账本归零')
     # 7.5 转盘**必须**在爪子到落料位之前到位（用户 2026-10-31 明确：「转盘务必在爪子
     #     到达之前到位」）。转盘是从本件一开始就转的，正常到这里已经好了；
     #     真没转完就在这里等（宁可多等半秒，也不落错盒）。转盘报错则中止本件、不松爪。
@@ -848,16 +952,19 @@ def goto_p0(client, log=print, wait=None,
 
     if abs(x) <= tol and abs(y - P0_Y) <= tol and abs(z - Z_DOWN) <= tol:
         say('已经在 P0（X %+.0f / Y %+.0f / Z %+.0f 脉冲）→ 不用动' % (x, y, z))
+        book_set(0.0, float(P0_Y), log=log, why='已在 P0')
         return
 
     if abs(x) <= tol and abs(y - P1_Y) <= tol:
         if abs(z - Z_DOWN) <= tol:
             say('在 P1 且 Z 已到底 → 直接 Y 回 P0（不抬 Z）')
             move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
+            book_set(0.0, float(P0_Y), log=log, why='已在 P1 直接回 P0')
             return
         say('在 P1、Z 没到底（%+.0f 脉冲）→ 先 Z 降到底，再 Y 回 P0' % z)
         move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底')
         move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
+        book_set(0.0, float(P0_Y), log=log, why='P1 降 Z 后回 P0')
         return
 
     say('不在 P1（X %+.0f / Y %+.0f）→ 先 X/Y 并行回 P1（Z 保持 %+.0f 不动）'
@@ -865,6 +972,7 @@ def goto_p0(client, log=print, wait=None,
     move_xy({AXIS_X: 0.0, AXIS_Y: P1_Y}, 'X/Y 回 P1')
     move({AXIS_Z: Z_DOWN}, [AXIS_Z], 'Z 降到底')
     move({AXIS_Y: P0_Y}, [AXIS_Y], 'Y 退回 P0')
+    book_set(0.0, float(P0_Y), log=log, why='从托盘回 P0')
 
 
 def run_many(client, count: int, recognize: Callable[[], object], log=print, wait=None,
@@ -1031,6 +1139,8 @@ def run_many(client, count: int, recognize: Callable[[], object], log=print, wai
 
     # 开批先清分盒登记：旧登记是掉电保留的长期文件，不清就会白占盒子 →
     # 新一批第 7 件直接「分盒失败」停机（现场 2026-10-31 踩过两次）。
+    if not book_calibrate(client, log=log, pos_source=pos_source):
+        raise GrabError('X/Y 位置读不到（先点「初始化 / 查位置」再一键启动）')
     if reset_boxes:
         try:
             BM.auto_reset(log=log)
