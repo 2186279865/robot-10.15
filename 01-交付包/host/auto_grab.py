@@ -466,21 +466,6 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
                 continue
         return out
 
-    def _is_stale(axis) -> bool:
-        return _age_ms(axis) > COUNTS_MAX_AGE_MS
-
-    def _age_ms(axis) -> float:
-        """该轴遥测 counts 的龄期（毫秒）；取不到返回 0（当作新鲜）。"""
-        raw = getattr(client, 'last_counts', None) or {}
-        info = raw.get(int(axis))
-        ts = info.get('ts') if isinstance(info, dict) else None
-        if ts is None:
-            return 0.0
-        try:
-            return max(0.0, float(client.now_ms()) - float(ts))
-        except Exception:                               # noqa: BLE001
-            return 0.0
-
     def _counts_ok(cnt, axes) -> bool:
         """要动的这些轴，counts 是否"够新"（遥测 ts 与 uptime 差 ≤ COUNTS_MAX_AGE_MS）。"""
         if not cnt:
@@ -520,37 +505,28 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         return cnt
 
     def _counts_with_soft(targets, cnt) -> Dict[int, float]:
-        """凑一份能用的位置基准（counts）：**新鲜的遥测 > 软位置 > 过期遥测**。
+        """凑一份能用的 counts：遥测直读 > 界面面板（pos_source）> 软位置换算。
 
-        2026-10-31 16:04 现场事故：Y 的遥测 counts 冻在 -803218（托盘位）三秒多，
-        ⑦ 已把 Y 送回 P1（软位置已累加 +26090），预走却按冻结值又算了一遍 +26076
-        → Y 顶到轨道尽头（E14 → 客户端超时 → E09），整件白失败。
-        所以顺序改成：先看遥测是否**新鲜**，不新鲜就用软位置（motion_hook 在下发时
-        就累加，代表"指令走完之后的位置"），两者都没有才退回过期遥测。
+        motor_pos / goto 都是相对量，只要方向对就能走；绝对值只用来判"在不在位"，
+        老一点也能接受（后面残差复核会兜住）。全缺才会退化成 POS_UNKNOWN。
         """
         soft_, known_, panel = pos()
-        fresh = {int(k): float(v) for k, v in (cnt or {}).items()
-                 if not _is_stale(int(k))}
-        stale = {int(k): float(v) for k, v in (cnt or {}).items()
-                 if _is_stale(int(k))}
-        panel = {int(k): float(v) for k, v in (panel or {}).items()}
         out: Dict[int, float] = {}
+        for src in (panel, cnt):                   # panel 先放，cnt（更新）覆盖
+            for k, v in (src or {}).items():
+                try:
+                    out[int(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
         for a in targets:
             a = int(a)
-            if a in fresh:
-                out[a] = fresh[a]
+            if a in out:
                 continue
             if soft_ and known_ and known_.get(a) and soft_.get(a) is not None:
                 try:
                     out[a] = float(soft_[a]) * float(prep_pose.COUNTS_PER_PULSE)
-                    continue
                 except Exception:                  # noqa: BLE001
                     pass
-            if a in panel:
-                out[a] = panel[a]
-                continue
-            if a in stale:
-                out[a] = stale[a]
         return out
 
     _speed_once = {'v': bool(prep)}
@@ -568,8 +544,7 @@ def run_once(client, target: dict, log=print, wait=None, calib=None,
         prep_pose.move_xy_fast(client, targets, rpm=RPM, log=say, wait=wait,
                                counts=cnt,
                                counts_fn=lambda: (pos()[2] or _live_counts()),
-                               acc=_ACC_DEFAULT, speed_setup=_speed_once['v'],
-                               counts_age_fn=_age_ms)
+                               acc=_ACC_DEFAULT, speed_setup=_speed_once['v'])
         _speed_once['v'] = False
 
     def move(targets: Dict[int, float], order: List[int],
