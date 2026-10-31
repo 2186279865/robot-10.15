@@ -21,7 +21,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 import protocol as P
 
 #: 心跳周期与失联判定阈值（毫秒）。
-HEARTBEAT_MS = 1000
+HEARTBEAT_MS = 500
 #: 判失联需要“完全收不到任何字节”这么久。原来 8 s，现场图传一开就把无线链路挤满，
 #: 派端串口桥在 1.5 s 没收到字节就会注入停车帧（E10），8 s 判死太急：
 #: 断开一次要重连+重新推参数，比多等几秒贵得多。15 s 仍留“链路变慢”的预警。

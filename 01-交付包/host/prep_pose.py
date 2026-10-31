@@ -179,6 +179,12 @@ ARRIVE_COUNTS_MIN = 800.0
 ARRIVE_NEED = 2
 ARRIVE_GAP_S = 0.08
 
+#: 各轴**实测**有效转速（圈/分）：2026-10-31 18:12 现场由 `[预走] ... elapsed_ms` 反算
+#: —— Y=800.2（42675 脉冲/s）、Z=1810.7（96569 脉冲/s）、X=300 指令即实测、托盘 300。
+#: 用**指令转速**估走位时间会严重偏短（Y@2000 按 1240 上限算 → 少等 1.55 倍），
+#: 于是"还没走到就进下一步"，Z 提前下压 → 抓偏。
+EFFECTIVE_RPM_BY_AXIS = {AXIS_Z: 1900.0, AXIS_Y: 800.0, 4: 300.0, 3: 300.0}
+
 
 def arrive_tol_counts(axis: int) -> float:
     """该轴「遥测判到位」的容差（counts）。"""
@@ -205,6 +211,51 @@ def tele_counts(client, axis: int):
         return float(ent)
     except (TypeError, ValueError):
         return None
+
+
+def query_pulses(client, axis: int, wait=None, timeout_ms: int = 400,
+                 tries: int = 3, gap_ms: int = 15, log=None):
+    """**现查**该轴编码器位置（脉冲），不依赖遥测缓存。
+
+    现场 2026-10-31 18:12 实测：固件的 `host_query_sweep()` 挂在"遥测发送"分支里、
+    每个遥测节拍只轮询一根轴（4 轴 × 400 ms = **1.6 s**），所以遥测里的 X/Y counts
+    最长滞后 1.6 s；Y 42,675 脉冲/s → 光滞后就相当于算错几万脉冲。
+    `motor_query` 是直问驱动器（`EmmQuery_Start`），回的 counts 是**当下**的。
+
+    忙的时候固件回 `E09 query_busy`（查询事务单槽），这里等 `gap_ms` 重试；
+    仍拿不到就返回 None，调用方退回遥测（并告警）。
+    """
+    say = log or (lambda _t: None)
+    wf = wait if wait is not None else getattr(client, 'wait_reply', None)
+    for _i in range(max(1, int(tries))):
+        try:
+            rid = client.send('motor_query', int(axis), 'pos', timeout_ms=timeout_ms)
+        except Exception:                             # noqa: BLE001
+            return None
+        rep = None
+        if wf is not None:
+            try:
+                rep = wf(rid, timeout_ms)
+            except Exception:                         # noqa: BLE001
+                rep = None
+        pr = {}
+        if isinstance(rep, dict):
+            p = rep.get('pairs')
+            pr = p if isinstance(p, dict) else rep
+        code = str(rep.get('code') or '') if isinstance(rep, dict) else ''
+        counts = pr.get('counts')
+        if counts not in (None, ''):
+            try:
+                return float(counts) / COUNTS_PER_PULSE
+            except (TypeError, ValueError):
+                pass
+        if code == 'E09' or str(pr.get('reason') or '') == 'query_busy':
+            time.sleep(max(1, int(gap_ms)) / 1000.0)
+            continue
+        say('%s 现查位置失败：code=%s reason=%s'
+            % (AXIS_LABEL.get(int(axis), axis), code or '-', pr.get('reason') or '-'))
+        break
+    return None
 
 
 def await_goto(client, req, axis: int, want_counts: int, timeout_ms: int,
@@ -331,17 +382,42 @@ def move_abs(client, targets, order=None, rpm=50, acc=0, log=None, wait=None,
 
         item = {'axis': axis, 'pulses': pulses, 'rpm': rpm_i, 'ok': False,
                 'code': '', 'text': '', 'pairs': {}}
-        try:
-            req = client.goto(axis, pulses, rpm=rpm_i,
-                              tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
-            rep, how = await_goto(client, req, axis, counts_of(target),
-                                  estimate_timeout_ms(pulses, rpm_i), waiter, say)
-        except Exception as exc:                      # noqa: BLE001
-            item['code'] = 'EXC'
-            item['text'] = '%s: %s' % (type(exc).__name__, exc)
-            results.append(item)
-            say('%s：异常 %s' % (label, item['text']))
-            return results
+        rep, how = None, 'timeout'
+        for _attempt in range(2):
+            try:
+                req = client.goto(axis, pulses, rpm=rpm_i,
+                                  tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
+                rep, how = await_goto(client, req, axis, counts_of(target),
+                                      estimate_timeout_ms(pulses, rpm_i), waiter, say)
+            except Exception as exc:                  # noqa: BLE001
+                rep, how = None, 'exc'
+                say('%s：异常 %s: %s' % (label, type(exc).__name__, exc))
+            code = str((rep or {}).get('code') or '') if isinstance(rep, dict) else ''
+            if _attempt == 0 and code in ('E10', 'E14'):
+                # 现场 2026-10-31：派端看门狗/链路抖一下 → 固件置停止锁存(E10) 或闭环放弃(E14)
+                # → 旧代码直接判整件失败。这里清锁存、按现查位置重算剩余量再试一次。
+                say('%s：%s（%s）→ 自动 stop_clear 后重试一次'
+                    % (label, code, '停止锁存' if code == 'E10' else '闭环未到位'))
+                try:
+                    client.send('stop_clear', timeout_ms=ACK_MS)
+                except Exception:                     # noqa: BLE001
+                    pass
+                time.sleep(0.15)
+                cur_p = query_pulses(client, axis, wait=wait, log=say)
+                if cur_p is not None:
+                    pulses = int(target) - int(round(cur_p))
+                    if pulses == 0:
+                        item.update({'ok': True, 'code': '', 'text': '',
+                                     'pairs': {'retried': '1', 'arrived': '1'}})
+                        say('%s：清锁存后复查已在目标位，继续' % label)
+                        results.append(item)
+                        break
+                continue
+            break
+        else:
+            pass
+        if item.get('ok'):
+            continue
         if how == 'counts':
             # 回执还在路上：把它的截止时间推后，迟到的回执照常结算（不再刷「结果未知」）。
             try:
@@ -645,6 +721,10 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         say('%s 补走完成：%s' % (AXIS_LABEL.get(axis, axis), detail))
         return True
 
+    def _q_pulses(axis):
+        """现查该轴位置（脉冲）；查不到返回 None。"""
+        return query_pulses(client, axis, wait=wait, log=say)
+
     def read_counts():
         if counts_fn is None:
             return {}
@@ -687,11 +767,16 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             prev = now if now is not None else prev
         return prev
 
-    # 调用方（auto_grab.move_xy）已做过"新鲜+稳定"校验，这里直接取一次即可，
-    # 避免每步再多等 0.3~1.5 s。
+    # 基准来源：motor_query **现查**优先（遥测 counts 1.6 s 才刷新一次，不能当基准）；
+    # 查不到再看遥测；两边都没有才退回顺序走位。
+    _q0 = {}
+    for _a in targets:
+        _v = _q_pulses(_a)
+        if _v is not None:
+            _q0[_a] = _v
     cur = read_counts()
-    if not all(a in cur for a in targets):
-        say('X/Y 并行：没有编码器读数，退回顺序走位')
+    if not all(a in cur or _q0.get(a) is not None for a in targets):
+        say('X/Y 并行：查不到 X/Y 位置（motor_query 与遥测都没有）→ 退回顺序走位')
         _c = dict(counts) if counts else None
         return move_abs(client, targets, order=sorted(targets), rpm=rpm, acc=acc,
                         log=log, wait=wait, counts=_c, prep=True)
@@ -737,7 +822,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             pr, reason = _once()
         return pr, reason
 
-    def _send_round(send_map, rel_map=None):
+    def _send_round(send_map, rel_map=None, base=None):
         """把 {axis: 绝对目标脉冲} **并行**下发（每个轴一条 motor_pos，同一瞬间发出）。
 
         rel_map={axis: 相对脉冲} 的轴按**相对位移直发**：收口轮已经用新鲜读数算好了残差，
@@ -753,16 +838,30 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         """
         rel_map = rel_map or {}
         abs_axes = [a for a in send_map if a not in rel_map]
-        _cur = (fresh_counts() or read_counts()) if abs_axes else {}
+        # 基准 = **当下真实位置**：先 motor_query 现查；查不到才退回遥测（并告警）。
+        # （遥测 1.6 s 才刷新一次，拿它算相对位移会错几万脉冲 —— 18:12 现场实测）
+        _base = {k: v for k, v in (base or {}).items() if v is not None}
+        for axis in abs_axes:
+            if axis in _base:
+                continue
+            v = _q_pulses(axis)
+            if v is None:
+                rc = read_counts()
+                if axis in rc:
+                    v = rc[axis] / COUNTS_PER_PULSE
+                    say('%s 并行：现查没回 counts，退回遥测读数（可能滞后）'
+                        % AXIS_LABEL.get(axis, axis))
+            if v is not None:
+                _base[axis] = v
         plans_g, bad_g, t_est_g = [], [], 0.0
         for axis, tgt in send_map.items():
             if axis in rel_map:
                 delta = int(rel_map[axis])
-            elif axis not in _cur:
+            elif axis not in _base:
                 bad_g.append(axis)
                 continue
             else:
-                now_p = int(round(_cur[axis] / COUNTS_PER_PULSE))
+                now_p = int(round(_base[axis]))
                 delta = int(tgt) - now_p
             if delta == 0:
                 continue
@@ -772,7 +871,9 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                     % (AXIS_LABEL.get(axis, axis), reason, pr))
                 bad_g.append(axis)
                 continue
-            eff_rpm = min(float(rpm_of(axis)), 1240.0)   # 驱动器实际封顶≈1240 rpm，按指令值估会等不够
+            # 按**实测**转速估走位时间（Y 实测 800 圈/分；用 1240 上限会少等 1.55 倍）
+            eff_rpm = min(float(rpm_of(axis)),
+                          float(EFFECTIVE_RPM_BY_AXIS.get(int(axis), 1240.0)))
             sec = abs(delta) / max(1.0, eff_rpm * 3200.0 / 60.0)
             t_est_g = max(t_est_g, sec)
             plans_g.append((axis, int(tgt), delta))
@@ -784,27 +885,32 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
                     % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
 
         if plans_g:
-            t_wait = min(9.0, t_est_g * 1.02 + 0.10)
-            say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
-            t_end = time.monotonic() + t_wait
-            while time.monotonic() < t_end:
-                time.sleep(0.02)
-            hard = time.monotonic() + 2.0
-            prev = read_counts()
-            stable = 0
-            while time.monotonic() < hard:
-                time.sleep(0.05)
-                now = read_counts()
-                if now and prev and all(
-                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans_g):
-                    stable += 1
-                    if stable >= 2:
-                        prev = now
-                        break
-                else:
-                    stable = 0
-                prev = now or prev
+            # 不用遥测"连续两帧不变"判停稳（遥测 1.6 s 重复同一缓存帧，必然判成停稳）。
+            # 改成：先睡 t_est*0.6 保底，然后每 0.20 s 用 motor_query **现查**一次，
+            # 全部轴都进容差就立刻走下一步（省掉 1.15 倍余量的空等），到 t_wait 还没到
+            # 就交给 `_residual_fixes()` 再收口。
+            t_wait = min(9.0, t_est_g * 1.15 + 0.15)
+            t_early = max(0.20, t_est_g * 0.60)
+            say('X/Y 并行：按实测转速估 %.2f s（每 0.20 s 现查位置，到了就走）' % t_wait)
+            t0 = time.monotonic()
+            time.sleep(t_early)
+            while time.monotonic() - t0 < t_wait:
+                if _all_arrived(plans_g):
+                    say('X/Y 并行：现查已到位（%.2f s）' % (time.monotonic() - t0))
+                    break
+                time.sleep(0.20)
         return plans_g, bad_g
+
+    def _all_arrived(plans_in) -> bool:
+        """现查一遍：所有轴都进容差才算到了（查不到就当没到）。"""
+        lim = max(XY_MISS_TOL_PULSES, int(tol_pulses))
+        for axis, tgt, _delta in plans_in:
+            v = _q_pulses(axis)
+            if v is None:
+                return False
+            if abs(int(tgt) - int(round(v))) > lim:
+                return False
+        return True
 
     def _residual_fixes(plans_in):
         """算残差，返回还要收口的 {axis: (绝对目标, 残差或 None)}。
@@ -813,9 +919,23 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         那正是"偏离目标 +11394 脉冲"误报的来源（2026-10-31 现场确认爪子已在位）。
         容差内 / 读数滞后 / 超上限 / 超可解释范围的处理都在这里，**绝不在这里单轴补走**。
         """
-        fin = fresh_counts() or read_counts()
+        # 优先 motor_query 现查（真值）；查不到的轴退回遥测启发式。
+        _fresh = {}
+        for axis, _t, _d in plans_in:
+            v = _q_pulses(axis)
+            if v is not None:
+                _fresh[axis] = v
+        fin = {} if len(_fresh) >= len(plans_in) else (fresh_counts() or read_counts())
         out = {}
         for axis, tgt, delta in plans_in:
+            if axis in _fresh:
+                miss = int(tgt) - int(round(_fresh[axis]))
+                if abs(miss) <= max(XY_MISS_TOL_PULSES, int(tol_pulses)):
+                    continue
+                say('%s 并行：现查残差 %+d 脉冲（motor_query，准）'
+                    % (AXIS_LABEL.get(axis, axis), miss))
+                out[axis] = (int(tgt), miss)
+                continue
             c = fin.get(axis)
             if c is None:
                 continue
@@ -855,7 +975,7 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
 
     try:
         # 2) 两轴同时下发 + 判停稳
-        plans, bad = _send_round(targets)
+        plans, bad = _send_round(targets, base=_q0)          # 复用开头现查的基准，少 2 次查询
         # 3) 残差收口：**整对并行重发**（现场硬要求：X/Y 必须一起走，绝不单轴补走）
         fixes = _residual_fixes(plans)
         for axis in bad:                  # 被拒的轴也放进这一轮，一起并行重发
