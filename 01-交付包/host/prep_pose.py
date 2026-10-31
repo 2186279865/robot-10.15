@@ -130,8 +130,23 @@ PARAM_GET_MS = 1500
 #: 参数写入（param_set）超时。
 PARAM_SET_MS = 2000
 
+#: 各轴**实测**有效转速（圈/分）。指令值不等于实跑值，超时与收口都按实测估：
+#:   Z：指令 2400/3000 都只跑出 ≈1800~1900（93 趟实测 avg 1585 ms / 152009 脉冲）；
+#:   Y：指令 2000 实测 ≈690（8 万脉冲约 2 s）；X：300 就是 300。
+EFFECTIVE_RPM_BY_AXIS = {AXIS_Z: 1900, AXIS_Y: 690, 4: 300, 3: 300}
 
-def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000) -> int:
+#: 遥测 counts 的最大可用龄期（毫秒）。超过它就不再拿这份读数当"现在的位置"。
+#: 现场 2026-10-31 16:04:54：Y 的 counts 冻在 -803218（托盘位）三秒多，
+#: ⑦ 已经发过 +26090 回 P1、预走又按这份旧值发 +26076 —— 同一段位移发了两遍，
+#: 把 Y 顶到轨道尽头（E14 + 客户端等待超时 + E09 goto_busy，整件白失败）。
+COUNTS_MAX_AGE_MS = 800.0
+
+#: 并行走位/残差收口的轮询参数。
+MOTION_POLL_S = 0.03          # counts 轮询间隔
+ARRIVE_NO_PROGRESS_S = 0.25   # 这么久 counts 完全没变化 → 认为指令没生效，提前收口
+
+
+def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000, axis=None) -> int:
     """按真实有效转速估客户端等待上限（单程时间 × 2 倍余量 + extra）。
 
     历史上这里硬压 `min(rpm, 50)`（"实际最多 50 圈/分"是早期误判），于是
@@ -141,6 +156,12 @@ def estimate_timeout_ms(pulses: int, rpm: int, extra_ms: int = 8000) -> int:
     """
     revs = abs(int(pulses)) / float(PULSES_PER_REV)
     speed = max(1, min(int(rpm), EFFECTIVE_RPM_CAP))
+    if axis is not None:
+        # 指令转速 ≠ 实跑转速（Y 给 2000 实际只跑 ≈690）。超时按实测估，
+        # 才不会出现「固件还在正常闭环，客户端却先判超时」。
+        eff = EFFECTIVE_RPM_BY_AXIS.get(int(axis))
+        if eff:
+            speed = max(1, min(speed, int(eff)))
     ms = revs / (speed / 60.0) * 1000.0
     return int(ms * 2.0) + int(extra_ms)
 
@@ -557,7 +578,7 @@ def run(client, cfg: Optional[Dict[str, object]] = None, log=None, wait=None,
 
 def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=None,
                  tol_pulses=8, timeout_s=3.5, acc=0, wait=None,
-                 speed_setup: bool = True):
+                 speed_setup: bool = True, counts_age_fn=None):
     """X/Y **一步并行**走位：两轴各发一条 motor_pos（固件独立执行，同时动）。
 
     收口策略（关键）：GUI 的 telemetry 约 100~200 ms 一次，运动中按 counts 轮询会被旧值误导，
@@ -595,55 +616,6 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
             return wr(rid, timeout_ms=timeout_ms)
         except Exception:                           # noqa: BLE001
             return None
-
-    def _goto_wait(axis, tgt, rpm_i, want_pulses=None):
-        """闭环补走并**等它跑完**。client.goto() 只发不等，必须自己等回执。
-
-        用 `await_goto`：回执迟到时按遥测 counts 判到位先继续（并把迟到回执的
-        截止时间推后），不再因为链路拥塞把整件卡住十几秒。
-        """
-        # 0 脉冲的 goto 固件会回 E02 reason=pulses（2026-10-31 07:39 现场：
-        # 新鲜读数复核后残差变成 0，仍照旧发了一条 `motor_goto,5,0,...`，
-        # 结果整件被判「Y 补走未完成」白失败一次）。没有位移就是已经到位。
-        if int(round(float(tgt or 0))) == 0:
-            say('%s 补走 0 脉冲：已经在目标位，不发指令' % AXIS_LABEL.get(axis, axis))
-            return True
-        try:
-            rid = client.goto(axis, tgt, rpm=rpm_i,
-                              tol=P.GOTO_TOL_BY_AXIS.get(int(axis)))
-        except Exception as exc:                    # noqa: BLE001
-            say('%s 补走下发异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
-            return False
-        wf = wait if wait is not None else getattr(client, 'wait_reply', None)
-        if wf is None:
-            say('%s 补走已下发（无回执可等）' % AXIS_LABEL.get(axis, axis))
-            return False
-        tmo = estimate_timeout_ms(tgt, rpm_i)
-        want = counts_of(want_pulses if want_pulses is not None else tgt)
-        try:
-            rep, how = await_goto(client, rid, axis, want, tmo, wf, say)
-        except Exception as exc:                    # noqa: BLE001
-            say('%s 补走等待异常：%s' % (AXIS_LABEL.get(axis, axis), exc))
-            return False
-        if how == 'counts':
-            try:
-                client.extend_deadline(rid, extra_ms=30000)
-            except Exception:                       # noqa: BLE001
-                pass
-            say('%s 补走：回执还没到，遥测 counts 已到位，先继续' % AXIS_LABEL.get(axis, axis))
-            return True
-        pr = _pairs(rep) or {}
-        code = str(rep.get('code') or '') if isinstance(rep, dict) else ''
-        if not pr and not code:
-            say('%s 补走：等回执超时（%d ms）' % (AXIS_LABEL.get(axis, axis), tmo))
-            return False
-        if code or str(pr.get('reason') or ''):
-            say('%s 补走失败：code=%s reason=%s（不再继续下一步）'
-                % (AXIS_LABEL.get(axis, axis), code or '-', pr.get('reason') or '-'))
-            return False
-        detail = ' '.join('%s=%s' % (k, pr[k]) for k in ('err', 'passes', 'elapsed_ms', 'reason') if k in pr)
-        say('%s 补走完成：%s' % (AXIS_LABEL.get(axis, axis), detail))
-        return True
 
     def read_counts():
         if counts_fn is None:
@@ -713,79 +685,208 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         except Exception:                                   # noqa: BLE001
             pass
 
-    def _send_pos(axis, delta, rpm_i):
-        """发一条 motor_pos；若被 `reason=speed_limit` 拒，抬限速后**原地重发**。
+    def _write_pos(axis, delta, rpm_i):
+        """**只下发**一条 motor_pos，立刻返回请求 id（不等回执）。
 
-        绝不退化成单轴顺序补走 —— 现场 02:37 那批就是因为退回"X 先走、Y 补走"，
-        看起来像 X/Y 没一起走。第二次仍被拒才交给调用方记录 bad。
+        2026-10-31 现场：X→Y 成对的 motor_pos 里有 8% 相隔 ≥1 s（最坏 3 s），
+        因为以前是"发一条等一条回执"（链路被图传挤时回执迟到 1~3 s）。
+        结果 X 早就走完停住，Y 的命令才发出去 —— 肉眼就是「X/Y 分开走」。
+        固件对两轴是独立执行的，先发后发差 1~2 ms 没有任何语义差别，
+        所以这里改成"两轴连发、回执统一收"。
         """
-        def _once():
-            rep = _snd('motor_pos', axis, 1 if delta < 0 else 0, int(rpm_i), int(acc),
-                       abs(int(delta)), 'rel', timeout_ms=ACK_MS)
-            pr = _pairs(rep) or {}
-            return pr, str(pr.get('reason') or '')
+        return client.send('motor_pos', int(axis), 1 if delta < 0 else 0, int(rpm_i),
+                           int(acc), abs(int(delta)), 'rel', timeout_ms=ACK_MS)
 
-        pr, reason = _once()
-        if reason == 'speed_limit':
-            hi = max(int(rpm_i), 3200)
-            say('%s 并行：被限速拒绝（reason=speed_limit, max=%s）→ 把 speed_rpm_max 抬到 %d 原地重发'
-                % (AXIS_LABEL.get(axis, axis), pr.get('max', '?'), hi))
-            try:
-                _snd('param_set', 'speed_rpm_max', hi, timeout_ms=PARAM_SET_MS)
-            except Exception:                            # noqa: BLE001
-                pass
-            pr, reason = _once()
-        return pr, reason
+    def _collect(rids, timeout_ms=ACK_MS):
+        """统一收一组 motor_pos 的回执，返回 {rid: (pairs, reason, code)}。
+
+        code 也带出来：`E09`（goto_busy，固件单槽还在跑）要特殊处理，
+        不能当普通失败把整件判死（2026-10-31 16:05 现场）。
+        """
+        wf = wait if wait is not None else getattr(client, 'wait_reply', None)
+        out = {}
+        for rid in rids:
+            rep = None
+            if wf is not None:
+                try:
+                    rep = wf(rid, timeout_ms)
+                except Exception:                       # noqa: BLE001
+                    rep = None
+            pr = _pairs(rep) or {}
+            code = str((rep or {}).get('code') or '') if isinstance(rep, dict) else ''
+            out[rid] = (pr, str(pr.get('reason') or ''), code)
+        return out
+
+    def _stale1(axis):
+        """该轴当前读数是否已过期（取不到 age 就当"新鲜"，保持调用方语义）。"""
+        if counts_age_fn is None:
+            return False
+        try:
+            return float(counts_age_fn(int(axis))) > COUNTS_MAX_AGE_MS
+        except Exception:                               # noqa: BLE001
+            return False
+
+    def _pick_base(axis):
+        """算相对位移用的"当前位置"：新鲜 counts 优先，过期了就用调用方给的位置基准。
+
+        调用方（auto_grab._counts_with_soft）给的 counts 是"新鲜遥测 → 软位置"的合并结果，
+        所以读数过期时用它能避免把同一段位移再发一遍（16:04 那次事故的根因）。
+        """
+        cur = read_counts()
+        c = cur.get(axis)
+        if c is not None and not _stale1(axis):
+            return c
+        base = counts or {}
+        b = base.get(axis) if hasattr(base, 'get') else None
+        if b is not None:
+            if c is not None:
+                say('%s 读数过期（>%d ms），改用位置基准算位移'
+                    % (AXIS_LABEL.get(axis, axis), int(COUNTS_MAX_AGE_MS)))
+            return float(b)
+        return c
+
+    def _wait_arrive(plans_g, t_est_g):
+        """按 counts 到位即走（替代"先睡满 t_est 再判两次读数不变"）。
+
+        判据（先到先用）：
+          * 所有轴 |counts - 目标| ≤ arrive_tol_counts(轴)  → 到位，立刻继续；
+          * 0.30 s 后最近 ARRIVE_NO_PROGRESS_S 内 counts 完全没变化 → 指令没生效，
+            提前交给残差逻辑重发（不再白等到客户端超时）；
+          * 硬上限 t_est*1.3+0.5 s（≥1 s，≤9 s）。
+        读数过期（age > COUNTS_MAX_AGE_MS）时不做"到位/无进展"判断，只等。
+        """
+        axes = [a for a, _t, _d in plans_g]
+        hard = time.monotonic() + max(1.0, min(9.0, t_est_g * 1.3 + 0.5))
+        t0 = time.monotonic()
+        prev = read_counts()
+        last_change = t0
+        while True:
+            now_t = time.monotonic()
+            cur = read_counts()
+            stale = any(_stale1(a) for a in axes)
+            if cur and not stale:
+                if prev and any(abs(cur.get(a, 1e9) - prev.get(a, 0.0)) > 24 for a in axes):
+                    last_change = now_t
+                arrived = all(
+                    abs(cur.get(a, 1e9) - counts_of(t)) <= arrive_tol_counts(a)
+                    for a, t, _d in plans_g)
+                if arrived:
+                    say('X/Y 并行：counts 已到位（%.2f s）' % (now_t - t0))
+                    return
+                prev = cur
+                if now_t - t0 > 0.30 and now_t - last_change > ARRIVE_NO_PROGRESS_S:
+                    say('X/Y 并行：%.2f s 内读数没有变化（指令可能没生效）→ 交给残差逻辑收口'
+                        % (now_t - t0))
+                    return
+            if now_t >= hard:
+                say('X/Y 并行：等到 %.2f s 仍未到位 → 交给残差逻辑收口' % (now_t - t0))
+                return
+            time.sleep(MOTION_POLL_S)
 
     def _send_round(send_map):
-        """把 {axis: 绝对目标脉冲} **并行**下发（每个轴一条 motor_pos，同一瞬间发出）。
+        """把 {axis: 绝对目标脉冲} **同批并行**下发。
 
-        返回 (plans, bad)：plans=[(axis, 绝对目标, 相对增量)]（已下发的轴）、bad=被拒/缺读数的轴。
-        收口方式：等满估算时长（几乎不留余量）再要求连续两次读数几乎不变。
+        1) 先把所有轴的 motor_pos 背靠背写出去（中间不插任何等待）；
+        2) 再统一收这组回执：reason=speed_limit → 抬限速后**整批重写**一次；
+        3) 按 counts 到位即走收口（`_wait_arrive`）。
+        返回 (plans, bad)。
         """
-        _cur = read_counts()
-        plans_g, bad_g, t_est_g = [], [], 0.0
+        plans_g, bad_g, t_est_g, todo = [], [], 0.0, []
         for axis, tgt in send_map.items():
-            if axis not in _cur:
+            c = _pick_base(axis)
+            if c is None:
                 bad_g.append(axis)
                 continue
-            now_p = int(round(_cur[axis] / COUNTS_PER_PULSE))
+            now_p = int(round(float(c) / COUNTS_PER_PULSE))
             delta = int(tgt) - now_p
             if delta == 0:
                 continue
-            pr, reason = _send_pos(axis, delta, rpm_of(axis))
+            eff = min(float(rpm_of(axis)),
+                      float(EFFECTIVE_RPM_BY_AXIS.get(int(axis), 1240.0)), 1240.0)
+            sec = abs(delta) / max(1.0, eff * 3200.0 / 60.0)
+            t_est_g = max(t_est_g, sec)
+            todo.append((axis, int(tgt), delta))
+        if not todo:
+            return plans_g, bad_g
+
+        # --- 关键：两轴连发（不插等待），回执最后统一收 ---
+        rids = {}
+        for axis, tgt, delta in todo:
+            rids[axis] = _write_pos(axis, delta, rpm_of(axis))
+            say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
+        say('X/Y 并行：%d 轴已同批发出（%s），等 counts 到位'
+            % (len(todo), '/'.join(AXIS_LABEL.get(a, str(a)) for a, _t, _d in todo)))
+        acks = _collect(list(rids.values()))
+
+        limited = [a for a in rids if acks.get(rids[a], ({}, '', ''))[1] == 'speed_limit']
+        if limited:
+            hi = max([int(rpm_of(a)) for a in rids] + [3200])
+            first = acks.get(rids[limited[0]], ({}, '', ''))[0] or {}
+            say('%s 并行：被限速拒绝（reason=speed_limit, max=%s）→ 把 speed_rpm_max 抬到 %d 后整批重发'
+                % ('/'.join(AXIS_LABEL.get(a, str(a)) for a in limited),
+                   first.get('max', '?'), hi))
+            try:
+                _snd('param_set', 'speed_rpm_max', hi, timeout_ms=PARAM_SET_MS)
+            except Exception:                           # noqa: BLE001
+                pass
+            rids = {}
+            for axis, tgt, delta in todo:
+                rids[axis] = _write_pos(axis, delta, rpm_of(axis))
+            acks = _collect(list(rids.values()))
+
+        # E09（goto_busy）= 固件只有一个闭环槽、上一条 goto 还在跑。**不判失败**：
+        # 等 0.30 s 让它收尾，再把这几轴重发一次（2026-10-31 16:05 现场：
+        # 旧代码超时后立刻重发 → E09 → 第 4 件白失败；其实机械臂就在目标附近）。
+        busy = [a for a in rids
+                if acks.get(rids[a], ({}, '', ''))[2] == 'E09'
+                or acks.get(rids[a], ({}, '', ''))[1] == 'goto_busy']
+        if busy:
+            say('%s 并行：固件忙（E09 goto_busy，上一条还在跑）→ 等 0.30 s 后只重发这几轴'
+                % '/'.join(AXIS_LABEL.get(a, str(a)) for a in busy))
+            time.sleep(0.30)
+            redo = {}
+            for axis, tgt, _d in todo:
+                if axis not in busy:
+                    continue
+                c = _pick_base(axis)
+                if c is None:
+                    continue
+                left = int(tgt) - int(round(float(c) / COUNTS_PER_PULSE))
+                if abs(left) <= max(XY_MISS_TOL_PULSES, int(tol_pulses)):
+                    say('%s 并行：忙过之后复查已在目标位（差 %+d 脉冲），不再重发'
+                        % (AXIS_LABEL.get(axis, axis), left))
+                    acks[rids[axis]] = ({'ok': '1'}, '', '')   # 上一条已经把它带到目标
+                    continue
+                redo[axis] = (int(tgt), left)
+            if redo:
+                rids2 = {}
+                for axis, (_t, left) in redo.items():
+                    rids2[axis] = _write_pos(axis, left, rpm_of(axis))
+                    say('%s 并行：忙过之后重发 %+d 脉冲'
+                        % (AXIS_LABEL.get(axis, axis), left))
+                acks2 = _collect(list(rids2.values()))
+                for axis, rid in rids2.items():
+                    acks[rid] = acks2.get(rid, ({}, '', ''))
+                rids.update(rids2)
+                for axis, (tgt, _left) in redo.items():
+                    for i, (a, _t, _d) in enumerate(todo):
+                        if a == axis:
+                            todo[i] = (axis, tgt, _left)
+
+        for axis, tgt, delta in todo:
+            pr, reason, code = acks.get(rids[axis], ({}, '', ''))
+            if code == 'E09' or reason == 'goto_busy':
+                say('%s 并行：忙过之后仍被拒（code=%s）→ 交给残差逻辑收口'
+                    % (AXIS_LABEL.get(axis, axis), code or reason))
+                continue
             if reason:
                 say('%s 并行：被拒绝（reason=%s, 应答=%s）'
                     % (AXIS_LABEL.get(axis, axis), reason, pr))
                 bad_g.append(axis)
                 continue
-            eff_rpm = min(float(rpm_of(axis)), 1240.0)   # 驱动器实际封顶≈1240 rpm，按指令值估会等不够
-            sec = abs(delta) / max(1.0, eff_rpm * 3200.0 / 60.0)
-            t_est_g = max(t_est_g, sec)
             plans_g.append((axis, int(tgt), delta))
-            say('%s 并行：%+d 脉冲（%d RPM）' % (AXIS_LABEL.get(axis, axis), delta, rpm_of(axis)))
-
         if plans_g:
-            t_wait = min(9.0, t_est_g * 1.02 + 0.10)
-            say('X/Y 并行：等 %.2f s 后判停稳' % t_wait)
-            t_end = time.monotonic() + t_wait
-            while time.monotonic() < t_end:
-                time.sleep(0.02)
-            hard = time.monotonic() + 2.0
-            prev = read_counts()
-            stable = 0
-            while time.monotonic() < hard:
-                time.sleep(0.05)
-                now = read_counts()
-                if now and prev and all(
-                        abs(now.get(a, 1e9) - prev.get(a, 0.0)) <= 24 for a, _t, _d in plans_g):
-                    stable += 1
-                    if stable >= 2:
-                        prev = now
-                        break
-                else:
-                    stable = 0
-                prev = now or prev
+            _wait_arrive(plans_g, t_est_g)
         return plans_g, bad_g
 
     def _residual_fixes(plans_in):
@@ -797,7 +898,18 @@ def move_xy_fast(client, targets, rpm=1600, log=None, counts=None, counts_fn=Non
         """
         fin = fresh_counts() or read_counts()
         out = {}
+        # 读数过期就不许据此补走：16:04 现场就是这么把同一段位移发了两遍。
+        stale_axes = [a for a, _t, _d in plans_in if _stale1(a)]
+        if stale_axes:
+            t_end = time.monotonic() + 0.35
+            while time.monotonic() < t_end and any(_stale1(a) for a in stale_axes):
+                time.sleep(0.05)
+            fin = read_counts() or fin
         for axis, tgt, delta in plans_in:
+            if _stale1(axis):
+                say('%s 并行：读数过期（>%d ms），跳过补走（避免按旧值重复下发）'
+                    % (AXIS_LABEL.get(axis, axis), int(COUNTS_MAX_AGE_MS)))
+                continue
             c = fin.get(axis)
             if c is None:
                 continue
