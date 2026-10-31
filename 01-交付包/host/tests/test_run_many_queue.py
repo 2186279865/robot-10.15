@@ -19,11 +19,6 @@ class _FakeClient:
         self.counts = {1: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
         self.sent = []
 
-    @property
-    def last_counts(self):                 # 开批校准（全开环账本）要 X/Y 起点
-        return {4: {'counts': 0.0},
-                5: {'counts': float(AG.P1_Y) * 20.48}}
-
     def tick(self):
         return None
 

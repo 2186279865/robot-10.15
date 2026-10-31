@@ -221,6 +221,176 @@ class CountsBasedTests(unittest.TestCase):
         self.assertLess(budget, 20000)
 
 
+class _FastClock:
+    """把 move_xy_fast 里的 time.sleep/monotonic 变成瞬间推进，测试不必真的等秒级。"""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += max(0.0, float(seconds))
+
+
+class _MotionClient:
+    """给 move_xy_fast 用的假 client。
+
+    **关键：motor_pos 发出后要过 `delay_s` 才真的走**（用假时钟计时）——现场驱动器
+    的 counts 回读就是这样：命令一下发，读数还是旧值，等轴停下才刷新。以前这种假
+    client 是"发出即到位"，把「读数整段没变化（遥测卡住）」这条新判据掩盖掉了。
+
+    `lag_pulses` 让回读停在"真值 - lag"（模拟旧帧）。
+    `blind=True` 则**永远不更新回读**（模拟 16:31 现场 Y 遥测冻结几秒）。
+    """
+
+    def __init__(self, counts=None, lag_pulses=None, delay_s=0.15, blind=False):
+        self.counts = {int(k): float(v) for k, v in (counts or {}).items()}
+        self.lag = {int(k): int(v) for k, v in (lag_pulses or {}).items()}
+        self.delay_s = float(delay_s)
+        self.blind = bool(blind)
+        self.pending = {}
+        self._t_sent = 0.0
+        self.calls = []
+        self._n = 0
+
+    def _add(self, axis, pulses):
+        self.counts[axis] = self.counts.get(axis, 0.0) + float(pulses) * PP.COUNTS_PER_PULSE
+
+    def read(self):
+        """当作一次"读回读"：够时间了就把待走的位移落到 counts 上。"""
+        if self.blind:
+            return dict(self.counts)
+        if self.pending and (PP.time.monotonic() - self._t_sent) >= self.delay_s:
+            for axis, pulses in list(self.pending.items()):
+                self._add(axis, pulses)
+                if axis in self.lag:        # 回读停在"真值 - lag"，模拟旧帧/读数滞后
+                    self._add(axis, -self.lag[axis])
+            self.pending.clear()
+        return dict(self.counts)
+
+    def send(self, cmd, *args, **kw):
+        self._n += 1
+        self.calls.append((cmd, args))
+        if cmd == 'motor_pos':
+            axis, direction, pulses = int(args[0]), int(args[1]), int(args[4])
+            signed = -pulses if direction else pulses
+            self.pending[axis] = self.pending.get(axis, 0) + signed
+            self._t_sent = PP.time.monotonic()
+        return self._n
+
+    def goto(self, axis, pulses, rpm=None, **kw):
+        self._n += 1
+        self.calls.append(('goto', (int(axis), int(pulses))))
+        self._add(int(axis), int(pulses))
+        return self._n
+
+    def wait_reply(self, req_id, timeout_ms=8000):
+        cmd = self.calls[req_id - 1][0]
+        if cmd == 'param_get':
+            return {'kind': 'reply', 'code': '', 'pairs': {'value': '3200'}}
+        if cmd == 'goto':
+            return {'kind': 'reply', 'code': '', 'pairs': {'err': '0', 'passes': '1'}}
+        return {'kind': 'reply', 'code': '', 'pairs': {'ok': '1'}}
+
+    def gotos(self):
+        return [c for c in self.calls if c[0] == 'goto']
+
+
+class ParallelResidualTests(unittest.TestCase):
+    """X/Y 并行后的残差保护：>3000 只告警继续（2026-10-31 现场要求），不再中止整批。"""
+
+    def _run(self, client, targets):
+        logs = []
+        old = PP.time
+        PP.time = _FastClock()
+        try:
+            res = PP.move_xy_fast(client, targets, rpm=1600, log=logs.append,
+                                  counts_fn=client.read)
+        finally:
+            PP.time = old
+        return res, logs
+
+    def test_big_residual_continues_without_abort(self):
+        """复现现场：Y 目标 -25000，回读滞后 11394 脉冲（+11394 > 3000），爪子其实已在位。"""
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 11394})
+        res, logs = self._run(client, {PP.AXIS_Y: -25000})
+        self.assertTrue(all(r['ok'] for r in res))
+        self.assertEqual(client.gotos(), [])                     # 不补走
+        self.assertTrue(any('+11394' in t for t in logs), logs)
+        self.assertTrue(any('继续本件' in t for t in logs), logs)
+
+    def test_moderate_residual_is_re_sent_in_parallel(self):
+        """60~3000 的残差**再并行下发一次**（motor_pos），绝不退化成单轴顺序补走。
+
+        现场硬要求（2026-10-31）：X/Y 必须一起走，任何环节都不许「先 X 后 Y / 先 Y 后 X」。
+        """
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 500})
+        res, logs = self._run(client, {PP.AXIS_Y: -25000})
+        self.assertTrue(all(r['ok'] for r in res))
+        self.assertEqual(client.gotos(), [], '不许用 motor_goto 单轴补走')
+        y_pos = [c for c in client.calls if c[0] == 'motor_pos' and int(c[1][0]) == PP.AXIS_Y]
+        self.assertEqual(len(y_pos), 2, '第一轮 + 残差收口一轮，都是 motor_pos')
+        self.assertTrue(any('X/Y 并行收口' in t for t in logs), logs)
+
+    def test_blind_readback_is_not_treated_as_residual(self):
+        """读数整段没变化（遥测卡住）→ 不按残差判定、也不 abort（16:31 现场：Y 冻几秒，
+        旧代码据此算出 +83162 > 40000 → 整件判死）。"""
+        client = _MotionClient({PP.AXIS_Y: 0.0}, blind=True)
+        res, logs = self._run(client, {PP.AXIS_Y: -20000})
+        self.assertTrue(all(r['ok'] for r in res), res)
+        self.assertEqual(client.gotos(), [])
+        self.assertTrue(any('遥测卡住' in t for t in logs), logs)
+        self.assertFalse(any('偏离目标' in t and '40000' in t for t in logs), logs)
+
+    def test_absurd_residual_still_aborts(self):
+        """>40000 脉冲（≈400 mm）超出回读滞后可解释范围 → 仍中止等人工，防真撞机。"""
+        # 编码器基准被重置之类：真值应 -25000，回读却 +20000 → 偏差 -45000
+        client = _MotionClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: -45000})
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(client, {PP.AXIS_Y: -25000})
+        self.assertIn('超出回读滞后可解释范围', str(ctx.exception))
+        self.assertEqual(client.gotos(), [])
+
+    def test_fresh_read_that_clears_the_residual_sends_nothing(self):
+        """复现 2026-10-31 07:39:10 现场：旧帧算出 -49332 脉冲残差，复核后是 0。
+
+        旧代码算完残差不再判容差，硬发了一条 `motor_goto,5,0,...` →
+        固件回 `E02 reason=pulses` → 「Y 补走未完成」整件白失败一次。
+        现在复核后落回容差内就必须跳过，绝不能发 0 脉冲的 goto。
+        """
+        client = _MotionClient({PP.AXIS_Y: 0.0})
+        target = -49332.0
+        true_counts = {PP.AXIS_Y: target * PP.COUNTS_PER_PULSE}
+        # 旧帧只反映了 39332 脉冲的位移 → 残差 -10000（够大、又不落在"读数滞后"启发式区间）
+        stale_counts = {PP.AXIS_Y: (target + 10000.0) * PP.COUNTS_PER_PULSE}
+        seen = {'n': 0}
+
+        def counts_fn():
+            seen['n'] += 1
+            if seen['n'] == 1:                  # 起点读数：真实的 0（否则计划位移就不对了）
+                return {PP.AXIS_Y: 0.0}
+            if seen['n'] <= 6:                  # 走完后的旧帧：只反映 39332 脉冲 → 残差 -10000
+                return dict(stale_counts)
+            return dict(true_counts)            # 复核用的新鲜读数：其实已经在 -49332
+
+        logs = []
+        old = PP.time
+        PP.time = _FastClock()
+        try:
+            res = PP.move_xy_fast(client, {PP.AXIS_Y: target}, rpm=1600,
+                                  log=logs.append, counts_fn=counts_fn)
+        finally:
+            PP.time = old
+        self.assertTrue(all(r['ok'] for r in res))
+        self.assertEqual(client.gotos(), [],
+                         '0 脉冲的补走绝不能发出去（固件回 E02 reason=pulses）')
+        # 新鲜读数一算残差是 0 → 直接收口，连第二轮都不发
+        self.assertFalse(any('X/Y 并行收口' in t for t in logs), logs)
+        self.assertFalse(any('重发' in t for t in logs), logs)
+
+
 class GotoTolTests(unittest.TestCase):
     """Z 轴闭环容差必须走 GOTO_TOL_BY_AXIS（提速时「抬转速 + 放宽容差」是成对的）。
 
@@ -333,125 +503,120 @@ class AwaitGotoTests(unittest.TestCase):
 
 
 
+class _ParallelClient:
+    """可编排的假 client：motor_pos 立即"走"，可指定第 n 条回执（E09/speed_limit 等）。"""
 
-class _OpenLoopTime:
-    """假时钟：只记录 sleep，不真的等。"""
-
-    def __init__(self):
-        self.sleeps = []
-        self._t = 0.0
-
-    def sleep(self, s):
-        self.sleeps.append(float(s))
-        self._t += float(s)
-
-    def monotonic(self):
-        return self._t
-
-    def perf_counter(self):
-        return self._t
-
-    def time(self):
-        return self._t
-
-
-class _OpenLoopClient:
-    """假 client：只记 motor_pos / param_set，按需给 E09 一次。"""
-
-    def __init__(self, e09_axes=(), e09_times=1):
-        self.sent = []
-        self._done = {}
+    def __init__(self, counts=None, lag_pulses=None, pos_replies=None):
+        self.counts = {int(k): float(v) for k, v in (counts or {}).items()}
+        self.lag = {int(k): int(v) for k, v in (lag_pulses or {}).items()}
+        self.pos_replies = list(pos_replies or [])
+        self.calls = []
+        self.events = []
         self._n = 0
-        self._e09_left = {int(a): int(e09_times) for a in e09_axes}
 
-    def send(self, cmd, *args, timeout_ms=None):
-        self.sent.append((cmd,) + tuple(args))
+    def send(self, cmd, *args, **kw):
         self._n += 1
-        rid = self._n
-        rep = {'kind': 'reply', 'code': '', 'text': '', 'pairs': {'ok': '1'}}
+        self.calls.append((cmd, args))
         if cmd == 'motor_pos':
-            axis = int(args[0])
-            if self._e09_left.get(axis, 0) > 0:
-                self._e09_left[axis] -= 1
-                rep = {'kind': 'err', 'code': 'E09', 'text': 'E09 goto_busy', 'pairs': {}}
-        self._done[rid] = rep
-        return rid
+            axis, direction, pulses = int(args[0]), int(args[1]), int(args[4])
+            self.events.append(('send', axis))
+            self.counts[axis] = self.counts.get(axis, 0.0) + (
+                -pulses if direction else pulses) * PP.COUNTS_PER_PULSE
+            if axis in self.lag:
+                self.counts[axis] -= self.lag[axis] * PP.COUNTS_PER_PULSE
+        return self._n
 
-    def done_of(self, rid):
-        return self._done.get(int(rid))
-
-    def gotos(self):
-        return [s for s in self.sent if s[0] in ('goto', 'motor_goto')]
+    def wait_reply(self, req_id, timeout_ms=8000):
+        self.events.append(('wait', req_id))
+        cmd = self.calls[req_id - 1][0]
+        if cmd == 'param_get':
+            return {'kind': 'reply', 'code': '', 'pairs': {'value': '3200'}}
+        if cmd == 'motor_pos' and self.pos_replies:
+            return self.pos_replies.pop(0)
+        if cmd == 'goto':
+            return {'kind': 'reply', 'code': '', 'pairs': {'err': '0', 'passes': '1'}}
+        return {'kind': 'reply', 'code': '', 'pairs': {'ok': '1'}}
 
     def motor_pos(self):
-        return [s for s in self.sent if s[0] == 'motor_pos']
+        return [c for c in self.calls if c[0] == 'motor_pos']
 
-    def param_sets(self):
-        return [s for s in self.sent if s[0] == 'param_set']
+    def gotos(self):
+        return [c for c in self.calls if c[0] == 'goto']
 
 
-class OpenLoopTests(unittest.TestCase):
-    """X/Y 横移是全开环：只发不判、不补走、账本靠实发脉冲（2026-10-31 现场定版）。"""
+class MotionFixTests(unittest.TestCase):
+    """2026-10-31 16:04 现场事故（重复相对位移把 Y 顶到轨道尽头）之后的四条硬要求。
 
-    def _run(self, targets, e09_axes=(), e09_times=1, speed_setup=True):
-        cli = _OpenLoopClient(e09_axes=e09_axes, e09_times=e09_times)
-        clock = _OpenLoopTime()
+    对应交接文档 §8 第 32/33 条：M1 两轴同批发出、M2 过期读数改用位置基准、
+    M3 到位即走、M4 过期读数不补走、M5 固件忙（E09）不当失败。
+    """
+
+    def _run(self, client, targets, **kw):
         logs = []
         old = PP.time
-        PP.time = clock
+        PP.time = _FastClock()
         try:
-            sent = PP.move_xy_fast(cli, targets, rpm={4: 300, 5: 2000},
-                                   log=logs.append, speed_setup=speed_setup)
+            res = PP.move_xy_fast(client, targets, rpm=1600, log=logs.append,
+                                  counts_fn=lambda: dict(client.counts), **kw)
         finally:
             PP.time = old
-        return cli, clock, logs, sent
+        return res, logs
 
-    def test_both_axes_are_written_back_to_back(self):
-        """两轴各出一条 motor_pos，且都在任何等待之前（真正的并行）。"""
-        cli, clock, logs, sent = self._run({4: 5000, 5: -74277})
-        pos = cli.motor_pos()
-        self.assertEqual([p[1] for p in pos], [4, 5])
-        self.assertEqual(pos[0][2], 0)                 # dir=0 → 正向
-        self.assertEqual(pos[0][5], 5000)
-        self.assertEqual(pos[1][2], 1)                 # dir=1 → 负向
-        self.assertEqual(pos[1][5], 74277)
-        self.assertTrue(any('同批发出' in t for t in logs), logs)
+    def test_m1_both_axes_are_written_before_any_reply(self):
+        """两轴必须同批发出：第二条 motor_pos 不能等第一条回执。
 
-    def test_returns_sent_pulses_and_never_uses_goto(self):
-        """返回实发脉冲给调用方记账本；全程不发 goto（不再补走）。"""
-        cli, clock, logs, sent = self._run({4: 5000, 5: -74277})
-        self.assertEqual(sent, {4: 5000, 5: -74277})
-        self.assertEqual(cli.gotos(), [])
-        self.assertEqual(len(cli.motor_pos()), 2)
+        现场（2026-10-31）X→Y 成对的 motor_pos 里有 8% 相隔 ≥1 s、最坏 3 s，
+        因为以前是"发一条等一条回执"，看着就是「X/Y 分开走」。
+        """
+        client = _ParallelClient({4: 0.0, PP.AXIS_Y: 0.0})
+        res, _logs = self._run(client, {4: 1200, PP.AXIS_Y: -20000})
+        self.assertTrue(all(r['ok'] for r in res), res)
+        sends = [i for i, e in enumerate(client.events) if e[0] == 'send']
+        waits = [i for i, e in enumerate(client.events) if e[0] == 'wait']
+        self.assertEqual(len(sends), 2, client.events)
+        waits_after = [i for i in waits if i > sends[0]]
+        self.assertTrue(waits_after, client.events)
+        self.assertLess(sends[1], waits_after[0],
+                        '第二条 motor_pos 必须在收第一条回执之前发出：%s' % (client.events,))
 
-    def test_wait_uses_measured_effective_rpm(self):
-        """按实测有效转速估时：Y 74277 脉冲 @690 RPM ≈ 2.24 s（指令 2000 RPM 会低估）。"""
-        cli, clock, logs, sent = self._run({5: -74277})
-        self.assertEqual(len(clock.sleeps), 1, clock.sleeps)
-        self.assertGreater(clock.sleeps[0], 1.9)
-        self.assertLess(clock.sleeps[0], 2.6)
-        self.assertTrue(any('不判读数、不补走' in t for t in logs), logs)
+    def test_m3_motion_released_as_soon_as_counts_arrive(self):
+        """到位即走：counts 一进容差就收口，不再死等 t_est 那 0.5~1.1 s。"""
+        client = _ParallelClient({PP.AXIS_Y: 0.0})
+        _res, logs = self._run(client, {PP.AXIS_Y: -20000})
+        self.assertTrue(any('counts 已到位' in t for t in logs), logs)
 
-    def test_zero_targets_are_skipped(self):
-        cli, clock, logs, sent = self._run({4: 0, 5: 0})
-        self.assertEqual(cli.motor_pos(), [])
-        self.assertEqual(sent, {})
+    def test_m2_stale_readback_uses_position_base(self):
+        """读数过期时按调用方给的位置基准算位移（16:04 就是按冻结旧值又发了一遍）。"""
+        client = _ParallelClient({PP.AXIS_Y: -800.0 * PP.COUNTS_PER_PULSE})
+        self._run(client, {PP.AXIS_Y: -20000}, counts={PP.AXIS_Y: 0.0},
+                  counts_age_fn=lambda axis: 2000.0)
+        first = client.motor_pos()[0][1]
+        self.assertEqual(int(first[4]), 20000,
+                         '位移必须按位置基准算（0 → -20000），不能用过期读数（-800）')
+        self.assertEqual(client.gotos(), [], '不许用 motor_goto 补走')
 
-    def test_e09_is_retried_not_failed(self):
-        """E09（上一条还在跑）只重发那一轴，不判失败、不补走。"""
-        cli, clock, logs, sent = self._run({5: -74277}, e09_axes=(5,))
-        y = [p for p in cli.motor_pos() if p[1] == 5]
-        self.assertEqual(len(y), 2, y)
-        self.assertEqual(y[1][5], 74277)               # 重发同样的量
-        self.assertTrue(any('E09' in t for t in logs), logs)
-        self.assertEqual(sent, {5: -74277})
+    def test_m4_stale_readback_skips_residual_correction(self):
+        """残差阶段读数还过期 → 跳过补走，绝不按旧值再发一条。"""
+        client = _ParallelClient({PP.AXIS_Y: 0.0}, lag_pulses={PP.AXIS_Y: 5000})
+        _res, logs = self._run(client, {PP.AXIS_Y: -20000},
+                               counts_age_fn=lambda axis: 2000.0)
+        self.assertEqual(len(client.motor_pos()), 1,
+                         '读数过期时不许再补走：%s' % (client.calls,))
+        self.assertTrue(any('跳过补走（避免按旧值重复下发）' in t for t in logs), logs)
 
-    def test_speed_setup_param_set_is_fire_and_forget(self):
-        cli, clock, logs, sent = self._run({5: -1000}, speed_setup=True)
-        ps = [p for p in cli.param_sets() if p[1] == 'speed_rpm_max']
-        self.assertEqual(len(ps), 1, cli.param_sets())
-        self.assertEqual(int(ps[0][2]), 3200)
-        cli2, _, _, _ = self._run({5: -1000}, speed_setup=False)
-        self.assertEqual([p for p in cli2.param_sets() if p[1] == 'speed_rpm_max'], [])
+    def test_m5_e09_busy_is_retried_not_failed(self):
+        """固件忙（E09 goto_busy）不判失败：等 0.30 s 复查，已在目标位就直接收口。"""
+        client = _ParallelClient(
+            {PP.AXIS_Y: 0.0},
+            pos_replies=[{'kind': 'err', 'code': 'E09',
+                          'pairs': {'reason': 'goto_busy'}}])
+        res, logs = self._run(client, {PP.AXIS_Y: -20000})
+        self.assertTrue(all(r['ok'] for r in res), res)
+        self.assertTrue(any('固件忙（E09 goto_busy' in t for t in logs), logs)
+        self.assertTrue(any('复查已在目标位' in t for t in logs), logs)
+        self.assertEqual(len(client.motor_pos()), 1,
+                         '上一条已经把轴带到目标，不用重发：%s' % (client.calls,))
 
 
+if __name__ == '__main__':
+    unittest.main()

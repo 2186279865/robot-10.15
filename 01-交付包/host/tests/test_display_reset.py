@@ -66,9 +66,7 @@ class RunManyResetsDisplayTest(unittest.TestCase):
         try:
             res = AG.run_many(FakeClient(), 1, lambda: None, log=logs.append,
                               wait=lambda rid, ms: None,
-                              pos_source=lambda: ({}, {}, {4: 0.0,
-                                                         5: float(AG.P1_Y) * 20.48}),
-                              drop=False,
+                              pos_source=lambda: ({}, {}, {}), drop=False,
                               display=disp, warp_path=None)
         finally:
             AG.load_targets = orig
